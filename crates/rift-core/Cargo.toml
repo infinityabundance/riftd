@@ -1,0 +1,15 @@
+[package]
+name = "rift-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+blake3 = "1"
+bincode = "1"
+dirs = "5"
+ed25519-dalek = { version = "1", features = ["rand"] }
+hex = "0.4"
+rand = "0.7"
+serde = { version = "1", features = ["derive"] }
+snow = "0.9"
+thiserror = "1"

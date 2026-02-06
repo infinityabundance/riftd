@@ -1,0 +1,11 @@
+[package]
+name = "rift"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+hex = "0.4"
+rift-core = { path = "../../crates/rift-core" }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "time"] }
