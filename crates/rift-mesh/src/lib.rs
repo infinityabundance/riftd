@@ -11,9 +11,9 @@ use tokio_stream::StreamExt;
 use rift_core::message::{
     decode_wire_message, encode_wire_message, ChatMessage, ControlMessage, MessageId, WireMessage,
 };
-use rift_core::noise::{noise_builder, NoiseSession};
-use rift_core::{Identity, PeerId};
+use rift_core::{Identity, Invite, PeerId};
 use rift_discovery::{discover_peers, start_mdns_advertisement, DiscoveryConfig, MdnsHandle};
+use rift_nat::{attempt_hole_punch, NatConfig, PeerEndpoint};
 
 const MAX_PACKET: usize = 2048;
 
@@ -50,13 +50,14 @@ pub struct MeshHandle {
 }
 
 struct MeshInner {
-    socket: Arc<UdpSocket>,
+    sockets: Mutex<Vec<Arc<UdpSocket>>>,
     identity: Identity,
     peers_by_id: Mutex<HashMap<PeerId, SocketAddr>>,
     connections: Mutex<HashMap<SocketAddr, PeerConnection>>,
-    pending: Mutex<HashMap<SocketAddr, PendingHandshake>>,
+    pending: Mutex<HashMap<PendingKey, PendingHandshake>>,
     cache: Mutex<HashSet<MessageId>>,
     voice_seq: Mutex<HashMap<PeerId, u32>>,
+    nat_cfg: Mutex<Option<NatConfig>>,
     events_tx: mpsc::Sender<MeshEvent>,
 }
 
@@ -64,7 +65,14 @@ struct MeshInner {
 struct PeerConnection {
     addr: SocketAddr,
     peer_id: Option<PeerId>,
-    session: NoiseSession,
+    session: rift_core::noise::NoiseSession,
+    socket_idx: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct PendingKey {
+    socket_idx: usize,
+    addr: SocketAddr,
 }
 
 enum PendingHandshake {
@@ -80,17 +88,18 @@ impl Mesh {
 
         let (events_tx, events_rx) = mpsc::channel(256);
         let inner = Arc::new(MeshInner {
-            socket: socket.clone(),
+            sockets: Mutex::new(vec![socket.clone()]),
             identity,
             peers_by_id: Mutex::new(HashMap::new()),
             connections: Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
             cache: Mutex::new(HashSet::new()),
             voice_seq: Mutex::new(HashMap::new()),
+            nat_cfg: Mutex::new(None),
             events_tx,
         });
 
-        MeshInner::spawn_receiver(inner.clone());
+        MeshInner::spawn_receiver(inner.clone(), 0, socket.clone());
 
         let mesh = Self {
             inner,
@@ -108,13 +117,41 @@ impl Mesh {
     }
 
     pub fn local_addr(&self) -> Result<SocketAddr> {
-        Ok(self.inner.socket.local_addr()?)
+        let sockets = self.inner.sockets.blocking_lock();
+        Ok(sockets[0].local_addr()?)
     }
 
-    pub fn start_discovery(&mut self) -> Result<()> {
+    pub fn start_lan_discovery(&mut self) -> Result<()> {
         let mdns = start_mdns_advertisement(self.discovery_config.clone())?;
         self._mdns = Some(mdns);
         MeshInner::spawn_discovery(self.inner.clone(), self.discovery_config.clone());
+        Ok(())
+    }
+
+    pub async fn enable_nat(&mut self, nat_cfg: NatConfig) {
+        let mut cfg = self.inner.nat_cfg.lock().await;
+        *cfg = Some(nat_cfg);
+    }
+
+    pub async fn join_invite(&mut self, invite: Invite, nat_cfg: NatConfig) -> Result<()> {
+        {
+            let mut cfg = self.inner.nat_cfg.lock().await;
+            *cfg = Some(nat_cfg.clone());
+        }
+
+        for addr in invite.known_peers {
+            let endpoint = PeerEndpoint {
+                peer_id: PeerId([0u8; 32]),
+                external_addrs: vec![addr],
+                punch_ports: vec![addr.port()],
+            };
+            if let Ok((socket, remote)) = attempt_hole_punch(&nat_cfg, &endpoint).await {
+                let socket_idx = self.inner.add_socket(socket).await?;
+                if let Err(err) = self.inner.initiate_handshake(remote, socket_idx).await {
+                    eprintln!("handshake to {} failed: {err}", remote);
+                }
+            }
+        }
         Ok(())
     }
 
@@ -157,15 +194,19 @@ impl Mesh {
 }
 
 impl MeshInner {
-    fn spawn_receiver(inner: Arc<Self>) {
+    fn spawn_receiver(inner: Arc<Self>, socket_idx: usize, socket: Arc<UdpSocket>) {
         tokio::spawn(async move {
             let mut buf = [0u8; MAX_PACKET];
             loop {
-                let (len, addr) = match inner.socket.recv_from(&mut buf).await {
+                let (len, addr) = match socket.recv_from(&mut buf).await {
                     Ok(res) => res,
                     Err(_) => continue,
                 };
-                if let Err(err) = inner.handle_packet(addr, &buf[..len]).await {
+                if let Err(err) = inner
+                    .clone()
+                    .handle_packet(socket_idx, addr, &buf[..len])
+                    .await
+                {
                     eprintln!("mesh recv error: {err}");
                 }
             }
@@ -193,15 +234,25 @@ impl MeshInner {
                 if already {
                     continue;
                 }
-                if let Err(err) = inner.initiate_handshake(peer.addr).await {
+                if let Err(err) = inner.initiate_handshake(peer.addr, 0).await {
                     eprintln!("handshake to {} failed: {err}", peer.addr);
                 }
             }
         });
     }
 
-    async fn initiate_handshake(&self, addr: SocketAddr) -> Result<()> {
-        let builder = noise_builder();
+    async fn add_socket(self: &Arc<Self>, socket: UdpSocket) -> Result<usize> {
+        let socket = Arc::new(socket);
+        let mut sockets = self.sockets.lock().await;
+        sockets.push(socket.clone());
+        let idx = sockets.len() - 1;
+        drop(sockets);
+        Self::spawn_receiver(self.clone(), idx, socket);
+        Ok(idx)
+    }
+
+    async fn initiate_handshake(&self, addr: SocketAddr, socket_idx: usize) -> Result<()> {
+        let builder = rift_core::noise::noise_builder();
         let static_kp = builder.generate_keypair()?;
         let mut hs = builder
             .local_private_key(&static_kp.private)
@@ -209,15 +260,19 @@ impl MeshInner {
 
         let mut buf = [0u8; MAX_PACKET];
         let len = hs.write_message(&[], &mut buf)?;
-        self.socket.send_to(&buf[..len], addr).await?;
+        let socket = self.socket_by_idx(socket_idx).await?;
+        socket.send_to(&buf[..len], addr).await?;
 
         let mut pending = self.pending.lock().await;
-        pending.insert(addr, PendingHandshake::InitiatorAwait2(hs));
+        pending.insert(
+            PendingKey { socket_idx, addr },
+            PendingHandshake::InitiatorAwait2(hs),
+        );
         Ok(())
     }
 
-    async fn handle_packet(&self, addr: SocketAddr, data: &[u8]) -> Result<()> {
-        if self.try_handle_pending(addr, data).await? {
+    async fn handle_packet(self: Arc<Self>, socket_idx: usize, addr: SocketAddr, data: &[u8]) -> Result<()> {
+        if self.try_handle_pending(socket_idx, addr, data).await? {
             return Ok(());
         }
 
@@ -233,7 +288,7 @@ impl MeshInner {
         let plaintext = match maybe_session {
             Some(res) => res?,
             None => {
-                self.start_responder(addr, data).await?;
+                self.start_responder(socket_idx, addr, data).await?;
                 return Ok(());
             }
         };
@@ -243,9 +298,15 @@ impl MeshInner {
         Ok(())
     }
 
-    async fn try_handle_pending(&self, addr: SocketAddr, data: &[u8]) -> Result<bool> {
+    async fn try_handle_pending(
+        &self,
+        socket_idx: usize,
+        addr: SocketAddr,
+        data: &[u8],
+    ) -> Result<bool> {
         let mut pending = self.pending.lock().await;
-        let Some(state) = pending.remove(&addr) else {
+        let key = PendingKey { socket_idx, addr };
+        let Some(state) = pending.remove(&key) else {
             return Ok(false);
         };
 
@@ -254,23 +315,29 @@ impl MeshInner {
                 let mut out = [0u8; MAX_PACKET];
                 hs.read_message(data, &mut out)?;
                 let len = hs.write_message(&[], &mut out)?;
-                self.socket.send_to(&out[..len], addr).await?;
+                let socket = self.socket_by_idx(socket_idx).await?;
+                socket.send_to(&out[..len], addr).await?;
                 let transport = hs.into_transport_mode()?;
-                self.install_connection(addr, transport).await?;
+                self.install_connection(addr, transport, socket_idx).await?;
             }
             PendingHandshake::ResponderAwait3(mut hs) => {
                 let mut out = [0u8; MAX_PACKET];
                 hs.read_message(data, &mut out)?;
                 let transport = hs.into_transport_mode()?;
-                self.install_connection(addr, transport).await?;
+                self.install_connection(addr, transport, socket_idx).await?;
             }
         }
 
         Ok(true)
     }
 
-    async fn start_responder(&self, addr: SocketAddr, first_msg: &[u8]) -> Result<()> {
-        let builder = noise_builder();
+    async fn start_responder(
+        &self,
+        socket_idx: usize,
+        addr: SocketAddr,
+        first_msg: &[u8],
+    ) -> Result<()> {
+        let builder = rift_core::noise::noise_builder();
         let static_kp = builder.generate_keypair()?;
         let mut hs = builder
             .local_private_key(&static_kp.private)
@@ -279,10 +346,14 @@ impl MeshInner {
         let mut out = [0u8; MAX_PACKET];
         hs.read_message(first_msg, &mut out)?;
         let len = hs.write_message(&[], &mut out)?;
-        self.socket.send_to(&out[..len], addr).await?;
+        let socket = self.socket_by_idx(socket_idx).await?;
+        socket.send_to(&out[..len], addr).await?;
 
         let mut pending = self.pending.lock().await;
-        pending.insert(addr, PendingHandshake::ResponderAwait3(hs));
+        pending.insert(
+            PendingKey { socket_idx, addr },
+            PendingHandshake::ResponderAwait3(hs),
+        );
         Ok(())
     }
 
@@ -290,11 +361,13 @@ impl MeshInner {
         &self,
         addr: SocketAddr,
         transport: snow::TransportState,
+        socket_idx: usize,
     ) -> Result<()> {
         let conn = PeerConnection {
             addr,
             peer_id: None,
-            session: NoiseSession::new(transport),
+            session: rift_core::noise::NoiseSession::new(transport),
+            socket_idx,
         };
         let mut connections = self.connections.lock().await;
         connections.insert(addr, conn);
@@ -304,12 +377,23 @@ impl MeshInner {
             peer_id: self.identity.peer_id,
         });
         self.send_wire(addr, &join).await?;
+
+        self.send_peer_list(addr).await?;
         Ok(())
+    }
+
+    async fn send_peer_list(&self, addr: SocketAddr) -> Result<()> {
+        let peers: Vec<SocketAddr> = {
+            let connections = self.connections.lock().await;
+            connections.keys().copied().collect()
+        };
+        let msg = WireMessage::Control(ControlMessage::PeerList { peers });
+        self.send_wire(addr, &msg).await
     }
 
     async fn send_wire(&self, addr: SocketAddr, msg: &WireMessage) -> Result<()> {
         let plaintext = encode_wire_message(msg);
-        let ciphertext = {
+        let (ciphertext, socket_idx) = {
             let mut connections = self.connections.lock().await;
             let Some(conn) = connections.get_mut(&addr) else {
                 return Err(anyhow!("missing connection"));
@@ -317,36 +401,14 @@ impl MeshInner {
             let mut out = vec![0u8; plaintext.len() + 128];
             let len = conn.session.encrypt(&plaintext, &mut out)?;
             out.truncate(len);
-            out
+            (out, conn.socket_idx)
         };
-        self.socket.send_to(&ciphertext, addr).await?;
+        let socket = self.socket_by_idx(socket_idx).await?;
+        socket.send_to(&ciphertext, addr).await?;
         Ok(())
     }
 
-    async fn broadcast_voice(
-        &self,
-        from: PeerId,
-        seq: u32,
-        timestamp: u64,
-        payload: Vec<u8>,
-    ) -> Result<()> {
-        let msg = WireMessage::Voice {
-            from,
-            seq,
-            timestamp,
-            payload,
-        };
-        let addrs: Vec<SocketAddr> = {
-            let connections = self.connections.lock().await;
-            connections.keys().copied().collect()
-        };
-        for addr in addrs {
-            self.send_wire(addr, &msg).await?;
-        }
-        Ok(())
-    }
-
-    async fn handle_wire(&self, addr: SocketAddr, msg: WireMessage) -> Result<()> {
+    async fn handle_wire(self: Arc<Self>, addr: SocketAddr, msg: WireMessage) -> Result<()> {
         match msg {
             WireMessage::Control(ControlMessage::Join { peer_id }) => {
                 let mut connections = self.connections.lock().await;
@@ -360,6 +422,8 @@ impl MeshInner {
                 drop(peers);
 
                 let _ = self.events_tx.send(MeshEvent::PeerJoined(peer_id)).await;
+
+                self.send_peer_list(addr).await?;
             }
             WireMessage::Control(ControlMessage::Leave { peer_id }) => {
                 let mut peers = self.peers_by_id.lock().await;
@@ -382,6 +446,9 @@ impl MeshInner {
 
                 self.gossip(addr, WireMessage::Control(ControlMessage::Chat(chat)))
                     .await?;
+            }
+            WireMessage::Control(ControlMessage::PeerList { peers }) => {
+                self.handle_peer_list(peers).await?;
             }
             WireMessage::Voice {
                 from,
@@ -423,6 +490,37 @@ impl MeshInner {
         Ok(())
     }
 
+    async fn handle_peer_list(self: Arc<Self>, peers: Vec<SocketAddr>) -> Result<()> {
+        let nat_cfg = { self.nat_cfg.lock().await.clone() };
+        let Some(nat_cfg) = nat_cfg else {
+            return Ok(());
+        };
+
+        for addr in peers {
+            let already = {
+                let connections = self.connections.lock().await;
+                connections.contains_key(&addr)
+            };
+            if already {
+                continue;
+            }
+            let endpoint = PeerEndpoint {
+                peer_id: PeerId([0u8; 32]),
+                external_addrs: vec![addr],
+                punch_ports: vec![addr.port()],
+            };
+            if let Ok((socket, remote)) = attempt_hole_punch(&nat_cfg, &endpoint).await {
+                if let Ok(socket_idx) = self.add_socket(socket).await {
+                    if let Err(err) = self.initiate_handshake(remote, socket_idx).await {
+                        eprintln!("handshake to {} failed: {err}", remote);
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     async fn gossip(&self, from: SocketAddr, msg: WireMessage) -> Result<()> {
         let addrs: Vec<SocketAddr> = {
             let connections = self.connections.lock().await;
@@ -436,6 +534,37 @@ impl MeshInner {
             if let Err(err) = self.send_wire(addr, &msg).await {
                 eprintln!("gossip send to {} failed: {err}", addr);
             }
+        }
+        Ok(())
+    }
+
+    async fn socket_by_idx(&self, socket_idx: usize) -> Result<Arc<UdpSocket>> {
+        let sockets = self.sockets.lock().await;
+        sockets
+            .get(socket_idx)
+            .cloned()
+            .ok_or_else(|| anyhow!("missing socket"))
+    }
+
+    async fn broadcast_voice(
+        &self,
+        from: PeerId,
+        seq: u32,
+        timestamp: u64,
+        payload: Vec<u8>,
+    ) -> Result<()> {
+        let msg = WireMessage::Voice {
+            from,
+            seq,
+            timestamp,
+            payload,
+        };
+        let addrs: Vec<SocketAddr> = {
+            let connections = self.connections.lock().await;
+            connections.keys().copied().collect()
+        };
+        for addr in addrs {
+            self.send_wire(addr, &msg).await?;
         }
         Ok(())
     }

@@ -1,3 +1,5 @@
+use std::net::SocketAddr;
+
 use serde::{Deserialize, Serialize};
 
 use crate::CoreError;
@@ -76,6 +78,7 @@ pub enum ControlMessage {
     Join { peer_id: PeerId },
     Leave { peer_id: PeerId },
     Chat(ChatMessage),
+    PeerList { peers: Vec<SocketAddr> },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

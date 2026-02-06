@@ -6,7 +6,9 @@ edition = "2021"
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+dirs = "5"
 rift-core = { path = "../../crates/rift-core" }
 rift-mesh = { path = "../../crates/rift-mesh" }
 rift-media = { path = "../../crates/rift-media" }
+rift-nat = { path = "../../crates/rift-nat" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "io-util", "signal", "time", "sync"] }

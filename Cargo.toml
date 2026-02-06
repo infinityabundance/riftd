@@ -4,6 +4,7 @@ members = [
   "crates/rift-discovery",
   "crates/rift-mesh",
   "crates/rift-media",
+  "crates/rift-nat",
   "bin/rift",
 ]
 resolver = "2"
