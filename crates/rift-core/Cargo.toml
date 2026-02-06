@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+base64 = "0.21"
 blake3 = "1"
 bincode = "1"
 dirs = "5"

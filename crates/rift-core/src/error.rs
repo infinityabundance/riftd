@@ -14,4 +14,6 @@ pub enum CoreError {
     IdentityMissing(String),
     #[error("config directory not found")]
     ConfigDirMissing,
+    #[error("invalid invite")]
+    InvalidInvite,
 }

@@ -1,3 +1,5 @@
+use std::fs;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -5,9 +7,10 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use tokio::io::{self, AsyncBufReadExt, BufReader};
 
-use rift_core::Identity;
+use rift_core::{decode_invite, encode_invite, generate_invite, Identity};
 use rift_media::{AudioConfig, AudioIn, AudioMixer, AudioOut, OpusDecoder, OpusEncoder};
 use rift_mesh::{Mesh, MeshConfig, MeshEvent};
+use rift_nat::NatConfig;
 
 /*
 Usage:
@@ -22,10 +25,15 @@ $ rift create --channel gaming
 
 # voice mode
 $ rift create --channel gaming --voice
+
+# internet mode
+$ rift create --channel gaming --internet
+$ rift invite --channel gaming
+$ rift join --invite "rift://join/..."
 */
 
 #[derive(Parser, Debug)]
-#[command(name = "rift", version, about = "LAN-only P2P chat over UDP + Noise + mDNS")]
+#[command(name = "rift", version, about = "P2P chat over UDP + Noise + mDNS")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -43,6 +51,20 @@ enum Commands {
         port: u16,
         #[arg(long)]
         voice: bool,
+        #[arg(long)]
+        internet: bool,
+    },
+    Invite {
+        #[arg(long)]
+        channel: String,
+    },
+    Join {
+        #[arg(long)]
+        invite: String,
+        #[arg(long, default_value_t = 0)]
+        port: u16,
+        #[arg(long)]
+        voice: bool,
     },
 }
 
@@ -57,7 +79,10 @@ async fn main() -> Result<()> {
             password,
             port,
             voice,
-        } => cmd_create(channel, password, port, voice).await,
+            internet,
+        } => cmd_create(channel, password, port, voice, internet).await,
+        Commands::Invite { channel } => cmd_invite(channel).await,
+        Commands::Join { invite, port, voice } => cmd_join(invite, port, voice).await,
     }
 }
 
@@ -78,21 +103,65 @@ async fn cmd_init_identity() -> Result<()> {
     }
 }
 
-async fn cmd_create(channel: String, password: Option<String>, port: u16, voice: bool) -> Result<()> {
+async fn cmd_create(
+    channel: String,
+    password: Option<String>,
+    port: u16,
+    voice: bool,
+    internet: bool,
+) -> Result<()> {
     let identity = Identity::load(None).context("identity not found, run init-identity first")?;
 
     let config = MeshConfig {
-        channel_name: channel,
-        password,
+        channel_name: channel.clone(),
+        password: password.clone(),
         listen_port: port,
     };
 
     let mut mesh = Mesh::new(identity, config).await?;
-    mesh.start_discovery()?;
+
+    if internet {
+        let invite = generate_invite(&channel, password.as_deref(), Vec::new());
+        let invite_str = encode_invite(&invite);
+        save_invite_string(&channel, &invite_str)?;
+        mesh.enable_nat(default_nat_config(port)).await;
+        println!("Invite saved. Use `rift invite --channel {}` to print it.", channel);
+    } else {
+        mesh.start_lan_discovery()?;
+    }
+
+    run_chat_loop(mesh, voice).await
+}
+
+async fn cmd_invite(channel: String) -> Result<()> {
+    let invite = load_invite_string(&channel)
+        .with_context(|| format!("invite for channel '{}' not found", channel))?;
+    println!("{}", invite);
+    Ok(())
+}
+
+async fn cmd_join(invite_str: String, port: u16, voice: bool) -> Result<()> {
+    let invite = decode_invite(&invite_str)?;
+    let identity = Identity::load(None).context("identity not found, run init-identity first")?;
+
+    let config = MeshConfig {
+        channel_name: invite.channel_name.clone(),
+        password: invite.password.clone(),
+        listen_port: port,
+    };
+
+    let mut mesh = Mesh::new(identity, config).await?;
+    let nat_cfg = default_nat_config(port);
+    mesh.join_invite(invite, nat_cfg).await?;
+
+    run_chat_loop(mesh, voice).await
+}
+
+async fn run_chat_loop(mut mesh: Mesh, voice: bool) -> Result<()> {
     println!("Listening on {}", mesh.local_addr()?);
     println!("Type a message and press enter to send.");
 
-    let (audio_in, mut audio_rx, mut opus_enc, mut opus_dec, audio_out, mixer) = if voice {
+    let (_audio_in, mut audio_rx, mut opus_enc, mut opus_dec, audio_out, mixer) = if voice {
         let audio_config = AudioConfig::default();
         let (audio_in, audio_rx) = AudioIn::new(&audio_config)?;
         let opus_enc = OpusEncoder::new(&audio_config)?;
@@ -202,8 +271,6 @@ async fn cmd_create(channel: String, password: Option<String>, port: u16, voice:
         }
     }
 
-    drop(audio_in);
-
     Ok(())
 }
 
@@ -218,4 +285,32 @@ fn peer_to_stream_id(peer: &rift_core::PeerId) -> u64 {
     let mut bytes = [0u8; 8];
     bytes.copy_from_slice(&peer.0[..8]);
     u64::from_le_bytes(bytes)
+}
+
+fn invite_path(channel: &str) -> Result<PathBuf> {
+    let base = dirs::config_dir().context("config directory not found")?;
+    Ok(base.join("rift").join("invites").join(format!("{channel}.txt")))
+}
+
+fn save_invite_string(channel: &str, invite: &str) -> Result<()> {
+    let path = invite_path(channel)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, invite)?;
+    Ok(())
+}
+
+fn load_invite_string(channel: &str) -> Result<String> {
+    let path = invite_path(channel)?;
+    let content = fs::read_to_string(path)?;
+    Ok(content)
+}
+
+fn default_nat_config(port: u16) -> NatConfig {
+    let mut ports = Vec::new();
+    ports.push(port);
+    ports.push(port.saturating_add(1));
+    ports.push(port.saturating_add(2));
+    NatConfig { local_ports: ports }
 }
