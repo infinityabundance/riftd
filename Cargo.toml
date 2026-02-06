@@ -1,6 +1,8 @@
 [workspace]
 members = [
   "crates/rift-core",
+  "crates/rift-discovery",
+  "crates/rift-mesh",
   "bin/rift",
 ]
 resolver = "2"

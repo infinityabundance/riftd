@@ -1,0 +1,11 @@
+[package]
+name = "rift-mesh"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+rift-core = { path = "../rift-core" }
+rift-discovery = { path = "../rift-discovery" }
+tokio = { version = "1", features = ["macros", "net", "rt", "sync", "time"] }
+tokio-stream = "0.1"
