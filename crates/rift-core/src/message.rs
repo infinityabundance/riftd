@@ -79,6 +79,17 @@ pub enum ControlMessage {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum WireMessage {
+    Control(ControlMessage),
+    Voice {
+        from: PeerId,
+        seq: u32,
+        timestamp: u64,
+        payload: Vec<u8>,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum CoreMessage {
     Chat { from: PeerId, nonce: u64, text: String },
 }
@@ -96,5 +107,13 @@ pub fn encode_control_message(msg: &ControlMessage) -> Vec<u8> {
 }
 
 pub fn decode_control_message(bytes: &[u8]) -> Result<ControlMessage, CoreError> {
+    Ok(bincode::deserialize(bytes)?)
+}
+
+pub fn encode_wire_message(msg: &WireMessage) -> Vec<u8> {
+    bincode::serialize(msg).expect("serialize WireMessage")
+}
+
+pub fn decode_wire_message(bytes: &[u8]) -> Result<WireMessage, CoreError> {
     Ok(bincode::deserialize(bytes)?)
 }

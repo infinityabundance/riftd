@@ -8,4 +8,5 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 rift-core = { path = "../../crates/rift-core" }
 rift-mesh = { path = "../../crates/rift-mesh" }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "io-util", "signal"] }
+rift-media = { path = "../../crates/rift-media" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "io-util", "signal", "time", "sync"] }

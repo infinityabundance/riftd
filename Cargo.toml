@@ -3,6 +3,7 @@ members = [
   "crates/rift-core",
   "crates/rift-discovery",
   "crates/rift-mesh",
+  "crates/rift-media",
   "bin/rift",
 ]
 resolver = "2"

@@ -9,7 +9,7 @@ use tokio::sync::{mpsc, Mutex};
 use tokio_stream::StreamExt;
 
 use rift_core::message::{
-    decode_control_message, encode_control_message, ChatMessage, ControlMessage, MessageId,
+    decode_wire_message, encode_wire_message, ChatMessage, ControlMessage, MessageId, WireMessage,
 };
 use rift_core::noise::{noise_builder, NoiseSession};
 use rift_core::{Identity, PeerId};
@@ -29,6 +29,12 @@ pub enum MeshEvent {
     PeerJoined(PeerId),
     PeerLeft(PeerId),
     ChatReceived(ChatMessage),
+    VoiceFrame {
+        from: PeerId,
+        seq: u32,
+        timestamp: u64,
+        payload: Vec<u8>,
+    },
 }
 
 pub struct Mesh {
@@ -38,6 +44,11 @@ pub struct Mesh {
     _mdns: Option<MdnsHandle>,
 }
 
+#[derive(Clone)]
+pub struct MeshHandle {
+    inner: Arc<MeshInner>,
+}
+
 struct MeshInner {
     socket: Arc<UdpSocket>,
     identity: Identity,
@@ -45,6 +56,7 @@ struct MeshInner {
     connections: Mutex<HashMap<SocketAddr, PeerConnection>>,
     pending: Mutex<HashMap<SocketAddr, PendingHandshake>>,
     cache: Mutex<HashSet<MessageId>>,
+    voice_seq: Mutex<HashMap<PeerId, u32>>,
     events_tx: mpsc::Sender<MeshEvent>,
 }
 
@@ -74,6 +86,7 @@ impl Mesh {
             connections: Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
             cache: Mutex::new(HashSet::new()),
+            voice_seq: Mutex::new(HashMap::new()),
             events_tx,
         });
 
@@ -108,7 +121,7 @@ impl Mesh {
     pub async fn broadcast_chat(&self, text: String) -> Result<()> {
         let timestamp = now_timestamp();
         let chat = ChatMessage::new(self.inner.identity.peer_id, timestamp, text);
-        let msg = ControlMessage::Chat(chat.clone());
+        let msg = WireMessage::Control(ControlMessage::Chat(chat.clone()));
 
         let mut cache = self.inner.cache.lock().await;
         cache.insert(chat.id);
@@ -120,14 +133,26 @@ impl Mesh {
         };
 
         for addr in addrs {
-            self.inner.send_control(addr, &msg).await?;
+            self.inner.send_wire(addr, &msg).await?;
         }
 
         Ok(())
     }
 
+    pub async fn broadcast_voice(&self, seq: u32, timestamp: u64, payload: Vec<u8>) -> Result<()> {
+        self.inner
+            .broadcast_voice(self.inner.identity.peer_id, seq, timestamp, payload)
+            .await
+    }
+
     pub async fn next_event(&mut self) -> Option<MeshEvent> {
         self.events_rx.recv().await
+    }
+
+    pub fn handle(&self) -> MeshHandle {
+        MeshHandle {
+            inner: self.inner.clone(),
+        }
     }
 }
 
@@ -213,8 +238,8 @@ impl MeshInner {
             }
         };
 
-        let msg = decode_control_message(&plaintext)?;
-        self.handle_control(addr, msg).await?;
+        let msg = decode_wire_message(&plaintext)?;
+        self.handle_wire(addr, msg).await?;
         Ok(())
     }
 
@@ -275,15 +300,15 @@ impl MeshInner {
         connections.insert(addr, conn);
         drop(connections);
 
-        let join = ControlMessage::Join {
+        let join = WireMessage::Control(ControlMessage::Join {
             peer_id: self.identity.peer_id,
-        };
-        self.send_control(addr, &join).await?;
+        });
+        self.send_wire(addr, &join).await?;
         Ok(())
     }
 
-    async fn send_control(&self, addr: SocketAddr, msg: &ControlMessage) -> Result<()> {
-        let plaintext = encode_control_message(msg);
+    async fn send_wire(&self, addr: SocketAddr, msg: &WireMessage) -> Result<()> {
+        let plaintext = encode_wire_message(msg);
         let ciphertext = {
             let mut connections = self.connections.lock().await;
             let Some(conn) = connections.get_mut(&addr) else {
@@ -298,9 +323,32 @@ impl MeshInner {
         Ok(())
     }
 
-    async fn handle_control(&self, addr: SocketAddr, msg: ControlMessage) -> Result<()> {
+    async fn broadcast_voice(
+        &self,
+        from: PeerId,
+        seq: u32,
+        timestamp: u64,
+        payload: Vec<u8>,
+    ) -> Result<()> {
+        let msg = WireMessage::Voice {
+            from,
+            seq,
+            timestamp,
+            payload,
+        };
+        let addrs: Vec<SocketAddr> = {
+            let connections = self.connections.lock().await;
+            connections.keys().copied().collect()
+        };
+        for addr in addrs {
+            self.send_wire(addr, &msg).await?;
+        }
+        Ok(())
+    }
+
+    async fn handle_wire(&self, addr: SocketAddr, msg: WireMessage) -> Result<()> {
         match msg {
-            ControlMessage::Join { peer_id } => {
+            WireMessage::Control(ControlMessage::Join { peer_id }) => {
                 let mut connections = self.connections.lock().await;
                 if let Some(conn) = connections.get_mut(&addr) {
                     conn.peer_id = Some(peer_id);
@@ -313,13 +361,13 @@ impl MeshInner {
 
                 let _ = self.events_tx.send(MeshEvent::PeerJoined(peer_id)).await;
             }
-            ControlMessage::Leave { peer_id } => {
+            WireMessage::Control(ControlMessage::Leave { peer_id }) => {
                 let mut peers = self.peers_by_id.lock().await;
                 peers.remove(&peer_id);
                 drop(peers);
                 let _ = self.events_tx.send(MeshEvent::PeerLeft(peer_id)).await;
             }
-            ControlMessage::Chat(chat) => {
+            WireMessage::Control(ControlMessage::Chat(chat)) => {
                 let mut cache = self.cache.lock().await;
                 if cache.contains(&chat.id) {
                     return Ok(());
@@ -332,13 +380,50 @@ impl MeshInner {
                     .send(MeshEvent::ChatReceived(chat.clone()))
                     .await;
 
-                self.gossip(addr, ControlMessage::Chat(chat)).await?;
+                self.gossip(addr, WireMessage::Control(ControlMessage::Chat(chat)))
+                    .await?;
+            }
+            WireMessage::Voice {
+                from,
+                seq,
+                timestamp,
+                payload,
+            } => {
+                let mut seqs = self.voice_seq.lock().await;
+                if let Some(last) = seqs.get(&from) {
+                    if seq <= *last {
+                        return Ok(());
+                    }
+                }
+                seqs.insert(from, seq);
+                drop(seqs);
+
+                let _ = self
+                    .events_tx
+                    .send(MeshEvent::VoiceFrame {
+                        from,
+                        seq,
+                        timestamp,
+                        payload: payload.clone(),
+                    })
+                    .await;
+
+                self.gossip(
+                    addr,
+                    WireMessage::Voice {
+                        from,
+                        seq,
+                        timestamp,
+                        payload,
+                    },
+                )
+                .await?;
             }
         }
         Ok(())
     }
 
-    async fn gossip(&self, from: SocketAddr, msg: ControlMessage) -> Result<()> {
+    async fn gossip(&self, from: SocketAddr, msg: WireMessage) -> Result<()> {
         let addrs: Vec<SocketAddr> = {
             let connections = self.connections.lock().await;
             connections
@@ -348,11 +433,19 @@ impl MeshInner {
                 .collect()
         };
         for addr in addrs {
-            if let Err(err) = self.send_control(addr, &msg).await {
+            if let Err(err) = self.send_wire(addr, &msg).await {
                 eprintln!("gossip send to {} failed: {err}", addr);
             }
         }
         Ok(())
+    }
+}
+
+impl MeshHandle {
+    pub async fn broadcast_voice(&self, seq: u32, timestamp: u64, payload: Vec<u8>) -> Result<()> {
+        self.inner
+            .broadcast_voice(self.inner.identity.peer_id, seq, timestamp, payload)
+            .await
     }
 }
 
