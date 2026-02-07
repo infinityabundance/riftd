@@ -15,6 +15,7 @@ use serde::Deserialize;
 // quality = "medium"
 // ptt = true
 // ptt_key = "f1" # f1..f12, space, ctrl_space, alt_space, ctrl_backtick, ctrl_semicolon
+// vad = true
 // mute_output = false
 //
 // [network]
@@ -49,6 +50,7 @@ pub struct AudioSection {
     pub quality: Option<String>,
     pub ptt: Option<bool>,
     pub ptt_key: Option<String>,
+    pub vad: Option<bool>,
     pub mute_output: Option<bool>,
 }
 
@@ -60,6 +62,7 @@ impl Default for AudioSection {
             quality: Some("medium".to_string()),
             ptt: Some(false),
             ptt_key: Some("f1".to_string()),
+            vad: Some(true),
             mute_output: Some(false),
         }
     }

@@ -8,13 +8,13 @@ use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, Mutex};
 use tokio_stream::StreamExt;
 
-use rift_core::message::{
-    decode_wire_message, encode_wire_message, ChatMessage, ControlMessage, MessageId, PeerInfo,
-    WireMessage,
-};
-use rift_core::{Identity, Invite, PeerId};
+use rift_core::{Identity, Invite, PeerId, MessageId};
 use rift_discovery::{discover_peers, start_mdns_advertisement, DiscoveryConfig, MdnsHandle};
 use rift_nat::{attempt_hole_punch, NatConfig, PeerEndpoint};
+use rift_protocol::{
+    decode_frame, encode_frame, ChatMessage, ControlMessage, PeerInfo, ProtocolVersion, RiftFrameHeader,
+    RiftPayload, StreamKind, VoicePacket,
+};
 
 const MAX_PACKET: usize = 2048;
 
@@ -202,7 +202,7 @@ impl MeshInner {
     async fn broadcast_chat(&self, text: String) -> Result<()> {
         let timestamp = now_timestamp();
         let chat = ChatMessage::new(self.identity.peer_id, timestamp, text);
-        let msg = WireMessage::Control(ControlMessage::Chat(chat.clone()));
+        let payload = RiftPayload::Control(ControlMessage::Chat(chat.clone()));
 
         let mut cache = self.cache.lock().await;
         cache.insert(chat.id);
@@ -213,7 +213,10 @@ impl MeshInner {
             if peer_id == self.identity.peer_id {
                 continue;
             }
-            if let Err(err) = self.send_to_peer(peer_id, route, msg.clone()).await {
+            if let Err(err) = self
+                .send_to_peer(peer_id, route, payload.clone(), 0, timestamp)
+                .await
+            {
                 tracing::debug!(peer = %peer_id, "chat send failed: {err}");
             }
         }
@@ -402,8 +405,8 @@ impl MeshInner {
             }
         };
 
-        let msg = decode_wire_message(&plaintext)?;
-        self.handle_wire(addr, msg).await?;
+        let (header, payload) = decode_frame(&plaintext)?;
+        self.handle_frame(addr, header, payload).await?;
         Ok(())
     }
 
@@ -481,11 +484,29 @@ impl MeshInner {
         connections.insert(addr, conn);
         drop(connections);
 
-        let join = WireMessage::Control(ControlMessage::Join {
+        let join = ControlMessage::Join {
+            peer_id: self.identity.peer_id,
+            display_name: None,
+        };
+        self.send_payload(
+            addr,
+            RiftPayload::Control(join),
+            0,
+            now_timestamp(),
+        )
+        .await?;
+
+        let state = ControlMessage::PeerState {
             peer_id: self.identity.peer_id,
             relay_capable: self.relay_capable,
-        });
-        self.send_wire(addr, &join).await?;
+        };
+        self.send_payload(
+            addr,
+            RiftPayload::Control(state),
+            0,
+            now_timestamp(),
+        )
+        .await?;
 
         self.send_peer_list(addr).await?;
         Ok(())
@@ -504,12 +525,38 @@ impl MeshInner {
                 })
                 .collect()
         };
-        let msg = WireMessage::Control(ControlMessage::PeerList { peers });
-        self.send_wire(addr, &msg).await
+        let msg = RiftPayload::Control(ControlMessage::PeerList { peers });
+        self.send_payload(addr, msg, 0, now_timestamp()).await
     }
 
-    async fn send_wire(&self, addr: SocketAddr, msg: &WireMessage) -> Result<()> {
-        let plaintext = encode_wire_message(msg);
+    async fn send_payload(
+        &self,
+        addr: SocketAddr,
+        payload: RiftPayload,
+        seq: u32,
+        timestamp: u64,
+    ) -> Result<()> {
+        self.send_payload_with_source(addr, payload, seq, timestamp, self.identity.peer_id)
+            .await
+    }
+
+    async fn send_payload_with_source(
+        &self,
+        addr: SocketAddr,
+        payload: RiftPayload,
+        seq: u32,
+        timestamp: u64,
+        source: PeerId,
+    ) -> Result<()> {
+        let header = RiftFrameHeader {
+            version: ProtocolVersion::V1,
+            stream: stream_for_payload(&payload),
+            flags: 0,
+            seq,
+            timestamp,
+            source,
+        };
+        let plaintext = encode_frame(&header, &payload);
         let (ciphertext, socket_idx) = {
             let mut connections = self.connections.lock().await;
             let Some(conn) = connections.get_mut(&addr) else {
@@ -525,12 +572,14 @@ impl MeshInner {
         Ok(())
     }
 
-    async fn handle_wire(self: Arc<Self>, addr: SocketAddr, msg: WireMessage) -> Result<()> {
-        match msg {
-            WireMessage::Control(ControlMessage::Join {
-                peer_id,
-                relay_capable,
-            }) => {
+    async fn handle_frame(
+        self: Arc<Self>,
+        addr: SocketAddr,
+        header: RiftFrameHeader,
+        payload: RiftPayload,
+    ) -> Result<()> {
+        match payload {
+            RiftPayload::Control(ControlMessage::Join { peer_id, .. }) => {
                 let mut connections = self.connections.lock().await;
                 if let Some(conn) = connections.get_mut(&addr) {
                     conn.peer_id = Some(peer_id);
@@ -540,10 +589,6 @@ impl MeshInner {
                 let mut peers = self.peers_by_id.lock().await;
                 peers.insert(peer_id, addr);
                 drop(peers);
-
-                let mut peer_caps = self.peer_caps.lock().await;
-                peer_caps.insert(peer_id, relay_capable);
-                drop(peer_caps);
 
                 let mut peer_addrs = self.peer_addrs.lock().await;
                 peer_addrs.insert(peer_id, addr);
@@ -569,7 +614,15 @@ impl MeshInner {
 
                 self.send_peer_list(addr).await?;
             }
-            WireMessage::Control(ControlMessage::Leave { peer_id }) => {
+            RiftPayload::Control(ControlMessage::PeerState {
+                peer_id,
+                relay_capable,
+            }) => {
+                let mut peer_caps = self.peer_caps.lock().await;
+                peer_caps.insert(peer_id, relay_capable);
+                drop(peer_caps);
+            }
+            RiftPayload::Control(ControlMessage::Leave { peer_id }) => {
                 let mut peers = self.peers_by_id.lock().await;
                 peers.remove(&peer_id);
                 drop(peers);
@@ -594,7 +647,7 @@ impl MeshInner {
                 drop(peer_addrs);
                 let _ = self.events_tx.send(MeshEvent::PeerLeft(peer_id)).await;
             }
-            WireMessage::Control(ControlMessage::Chat(chat)) => {
+            RiftPayload::Control(ControlMessage::Chat(chat)) => {
                 let mut cache = self.cache.lock().await;
                 if cache.contains(&chat.id) {
                     return Ok(());
@@ -607,15 +660,13 @@ impl MeshInner {
                     .send(MeshEvent::ChatReceived(chat.clone()))
                     .await;
             }
-            WireMessage::Control(ControlMessage::PeerList { peers }) => {
+            RiftPayload::Control(ControlMessage::PeerList { peers }) => {
                 self.handle_peer_list(addr, peers).await?;
             }
-            WireMessage::Voice {
-                from,
-                seq,
-                timestamp,
-                payload,
-            } => {
+            RiftPayload::Voice(VoicePacket { payload, .. }) => {
+                let from = header.source;
+                let seq = header.seq;
+                let timestamp = header.timestamp;
                 let mut seqs = self.voice_seq.lock().await;
                 if let Some(last) = seqs.get(&from) {
                     if seq <= *last {
@@ -635,13 +686,27 @@ impl MeshInner {
                     })
                     .await;
             }
-            WireMessage::Relay { target, inner } => {
+            RiftPayload::Relay { target, inner } => {
                 if target == self.identity.peer_id {
-                    Box::pin(self.handle_wire(addr, *inner)).await?;
+                    Box::pin(self.handle_frame(addr, header, *inner)).await?;
                 } else {
-                    self.forward_relay(target, *inner).await?;
+                    self.forward_relay(target, header, *inner).await?;
                 }
             }
+            RiftPayload::Text(chat) => {
+                let mut cache = self.cache.lock().await;
+                if cache.contains(&chat.id) {
+                    return Ok(());
+                }
+                cache.insert(chat.id);
+                drop(cache);
+                let _ = self
+                    .events_tx
+                    .send(MeshEvent::ChatReceived(chat.clone()))
+                    .await;
+            }
+            RiftPayload::Control(ControlMessage::RouteInfo { .. })
+            | RiftPayload::Control(ControlMessage::Capabilities(_)) => {}
         }
         Ok(())
     }
@@ -735,23 +800,19 @@ impl MeshInner {
 
     async fn broadcast_voice(
         &self,
-        from: PeerId,
+        _from: PeerId,
         seq: u32,
         timestamp: u64,
         payload: Vec<u8>,
     ) -> Result<()> {
-        let msg = WireMessage::Voice {
-            from,
-            seq,
-            timestamp,
-            payload,
-        };
+        let msg = RiftPayload::Voice(VoicePacket { codec_id: 1, payload });
         let routes = self.routes_snapshot().await;
         for (peer_id, route) in routes {
             if peer_id == self.identity.peer_id {
                 continue;
             }
-            if let Err(err) = self.send_to_peer(peer_id, route, msg.clone()).await {
+            if let Err(err) = self.send_to_peer(peer_id, route, msg.clone(), seq, timestamp).await
+            {
                 tracing::debug!(peer = %peer_id, "voice send failed: {err}");
             }
         }
@@ -762,9 +823,16 @@ impl MeshInner {
         self.routes.lock().await.clone()
     }
 
-    async fn send_to_peer(&self, peer_id: PeerId, route: PeerRoute, msg: WireMessage) -> Result<()> {
+    async fn send_to_peer(
+        &self,
+        peer_id: PeerId,
+        route: PeerRoute,
+        payload: RiftPayload,
+        seq: u32,
+        timestamp: u64,
+    ) -> Result<()> {
         match route {
-            PeerRoute::Direct { addr } => self.send_wire(addr, &msg).await,
+            PeerRoute::Direct { addr } => self.send_payload(addr, payload, seq, timestamp).await,
             PeerRoute::Relayed { via } => {
                 let relay_addr = {
                     let peers = self.peers_by_id.lock().await;
@@ -773,16 +841,21 @@ impl MeshInner {
                 let Some(relay_addr) = relay_addr else {
                     return Err(anyhow!("missing relay addr"));
                 };
-                let envelope = WireMessage::Relay {
+                let envelope = RiftPayload::Relay {
                     target: peer_id,
-                    inner: Box::new(msg),
+                    inner: Box::new(payload),
                 };
-                self.send_wire(relay_addr, &envelope).await
+                self.send_payload(relay_addr, envelope, seq, timestamp).await
             }
         }
     }
 
-    async fn forward_relay(&self, target: PeerId, inner: WireMessage) -> Result<()> {
+    async fn forward_relay(
+        &self,
+        target: PeerId,
+        header: RiftFrameHeader,
+        inner: RiftPayload,
+    ) -> Result<()> {
         let route = {
             let routes = self.routes.lock().await;
             routes.get(&target).cloned()
@@ -792,11 +865,18 @@ impl MeshInner {
         };
         match route {
             PeerRoute::Direct { addr } => {
-                let envelope = WireMessage::Relay {
+                let envelope = RiftPayload::Relay {
                     target,
                     inner: Box::new(inner),
                 };
-                self.send_wire(addr, &envelope).await?;
+                self.send_payload_with_source(
+                    addr,
+                    envelope,
+                    header.seq,
+                    header.timestamp,
+                    header.source,
+                )
+                .await?;
             }
             PeerRoute::Relayed { via } => {
                 let relay_addr = {
@@ -804,11 +884,18 @@ impl MeshInner {
                     peers.get(&via).copied()
                 };
                 if let Some(relay_addr) = relay_addr {
-                    let envelope = WireMessage::Relay {
+                    let envelope = RiftPayload::Relay {
                         target,
                         inner: Box::new(inner),
                     };
-                    self.send_wire(relay_addr, &envelope).await?;
+                    self.send_payload_with_source(
+                        relay_addr,
+                        envelope,
+                        header.seq,
+                        header.timestamp,
+                        header.source,
+                    )
+                    .await?;
                 }
             }
         }
@@ -833,4 +920,13 @@ fn now_timestamp() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+fn stream_for_payload(payload: &RiftPayload) -> StreamKind {
+    match payload {
+        RiftPayload::Control(_) => StreamKind::Control,
+        RiftPayload::Voice(_) => StreamKind::Voice,
+        RiftPayload::Text(_) => StreamKind::Text,
+        RiftPayload::Relay { inner, .. } => stream_for_payload(inner),
+    }
 }
