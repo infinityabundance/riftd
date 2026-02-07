@@ -1,6 +1,7 @@
 //! Rift SDK: high-level API for embedding Rift VoIP in other applications.
 
 use std::path::PathBuf;
+use std::net::SocketAddr;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex as StdMutex,
@@ -13,9 +14,14 @@ use tokio::sync::{mpsc, Mutex};
 use tokio::time::Instant;
 
 use rift_core::{decode_invite, generate_invite, Identity, Invite, PeerId};
-use rift_media::{decode_frame, encode_frame, AudioConfig, AudioIn, AudioMixer, AudioOut, OpusDecoder, OpusEncoder};
+use rift_dht::{DhtConfig as RiftDhtConfig, DhtHandle, PeerEndpointInfo};
+use rift_discovery::local_ipv4_addrs;
+use rift_media::{
+    decode_frame, encode_frame, AudioConfig, AudioIn, AudioMixer, AudioOut, OpusDecoder,
+    OpusEncoder,
+};
 use rift_mesh::{Mesh, MeshConfig, MeshEvent, MeshHandle};
-use rift_nat::NatConfig;
+use rift_nat::{attempt_hole_punch, NatConfig, PeerEndpoint};
 use rift_protocol::{CallState, Capabilities, SessionId};
 
 pub use rift_core::PeerId as RiftPeerId;
@@ -31,6 +37,7 @@ pub struct RiftConfig {
     pub user_name: Option<String>,
     pub preferred_codecs: Vec<CodecId>,
     pub preferred_features: Vec<FeatureFlag>,
+    pub dht: DhtConfigSdk,
     pub audio: AudioConfigSdk,
     pub network: NetworkConfigSdk,
 }
@@ -55,6 +62,13 @@ pub struct NetworkConfigSdk {
     pub invite: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DhtConfigSdk {
+    pub enabled: bool,
+    pub bootstrap_nodes: Vec<String>,
+    pub listen_addr: Option<String>,
+}
+
 impl Default for RiftConfig {
     fn default() -> Self {
         Self {
@@ -64,6 +78,7 @@ impl Default for RiftConfig {
             user_name: None,
             preferred_codecs: vec![CodecId::Opus, CodecId::PCM16],
             preferred_features: vec![FeatureFlag::Voice, FeatureFlag::Text, FeatureFlag::Relay],
+            dht: DhtConfigSdk::default(),
             audio: AudioConfigSdk::default(),
             network: NetworkConfigSdk::default(),
         }
@@ -92,6 +107,16 @@ impl Default for NetworkConfigSdk {
             local_ports: None,
             known_peers: Vec::new(),
             invite: None,
+        }
+    }
+}
+
+impl Default for DhtConfigSdk {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bootstrap_nodes: Vec::new(),
+            listen_addr: None,
         }
     }
 }
@@ -137,6 +162,7 @@ struct SessionRuntime {
     _channel: String,
     handle: MeshHandle,
     _voice: Option<VoiceRuntime>,
+    _dht: Option<DhtHandle>,
 }
 
 pub struct RiftHandle {
@@ -246,6 +272,81 @@ impl RiftHandle {
             None
         };
 
+        let dht = if self.config.dht.enabled {
+            let dht_config = RiftDhtConfig {
+                bootstrap_nodes: parse_socket_addrs(&self.config.dht.bootstrap_nodes),
+                listen_addr: self
+                    .config
+                    .dht
+                    .listen_addr
+                    .as_deref()
+                    .and_then(parse_socket_addr)
+                    .unwrap_or_else(|| {
+                        SocketAddr::from(([0, 0, 0, 0], self.config.listen_port.saturating_add(100)))
+                    }),
+            };
+            let handle_dht = DhtHandle::new(dht_config)
+                .await
+                .map_err(|e| RiftError::Other(format!("{e}")))?;
+
+            let channel_id = rift_core::ChannelId::from_channel(&channel, password);
+            let addrs = local_ipv4_addrs()
+                .map_err(|e| RiftError::Other(format!("{e}")))?
+                .into_iter()
+                .map(|ip| SocketAddr::new(ip, self.config.listen_port))
+                .collect::<Vec<_>>();
+            let info = PeerEndpointInfo {
+                peer_id: self.local_peer_id,
+                addrs,
+            };
+            let _ = handle_dht.announce(channel_id, info.clone()).await;
+
+            let announce_handle = handle_dht.clone();
+            let announce_info = info.clone();
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(Duration::from_secs(30));
+                loop {
+                    tick.tick().await;
+                    let _ = announce_handle
+                        .announce(channel_id, announce_info.clone())
+                        .await;
+                }
+            });
+
+            let lookup_handle = handle_dht.clone();
+            let mesh_handle = handle.clone();
+            let nat_cfg = default_nat_config(self.config.listen_port, self.config.network.local_ports.clone());
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(Duration::from_secs(12));
+                loop {
+                    tick.tick().await;
+                    if let Ok(peers) = lookup_handle.lookup(channel_id).await {
+                        for peer in peers {
+                            if peer.peer_id == info.peer_id {
+                                continue;
+                            }
+                            for addr in peer.addrs.iter().copied() {
+                                let endpoint = PeerEndpoint {
+                                    peer_id: peer.peer_id,
+                                    external_addrs: vec![addr],
+                                    punch_ports: vec![addr.port()],
+                                };
+                                if let Ok((socket, remote)) = attempt_hole_punch(&nat_cfg, &endpoint).await {
+                                    let _ = mesh_handle.connect_with_socket(socket, remote).await;
+                                } else {
+                                    let _ = mesh_handle.connect_addr(addr).await;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+
+            Some(handle_dht)
+        } else {
+            None
+        };
+
         let voice_state = voice.as_ref().map(|v| VoiceRuntimeRef {
             mixer: v.mixer.clone(),
             frame_samples: v.frame_samples,
@@ -331,6 +432,7 @@ impl RiftHandle {
             _channel: channel,
             handle,
             _voice: voice,
+            _dht: dht,
         });
         Ok(())
     }
@@ -576,6 +678,14 @@ fn default_nat_config(port: u16, ports: Option<Vec<u16>>) -> NatConfig {
         local_ports.push(port.saturating_add(2));
     }
     NatConfig { local_ports }
+}
+
+fn parse_socket_addr(input: &str) -> Option<SocketAddr> {
+    input.parse::<SocketAddr>().ok()
+}
+
+fn parse_socket_addrs(inputs: &[String]) -> Vec<SocketAddr> {
+    inputs.iter().filter_map(|s| parse_socket_addr(s)).collect()
 }
 
 #[cfg(feature = "ffi")]

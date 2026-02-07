@@ -51,6 +51,8 @@ enum Commands {
         internet: bool,
         #[arg(long)]
         relay: bool,
+        #[arg(long)]
+        dht: bool,
     },
     Call {
         #[arg(long)]
@@ -67,6 +69,8 @@ enum Commands {
         internet: bool,
         #[arg(long)]
         relay: bool,
+        #[arg(long)]
+        dht: bool,
         #[arg(long)]
         invite: Option<String>,
     },
@@ -85,6 +89,8 @@ enum Commands {
         internet: bool,
         #[arg(long)]
         relay: bool,
+        #[arg(long)]
+        dht: bool,
         #[arg(long)]
         invite: Option<String>,
     },
@@ -106,6 +112,8 @@ enum Commands {
         #[arg(long)]
         relay: bool,
         #[arg(long)]
+        dht: bool,
+        #[arg(long)]
         invite: Option<String>,
     },
     Invite {
@@ -121,6 +129,8 @@ enum Commands {
         voice: bool,
         #[arg(long)]
         relay: bool,
+        #[arg(long)]
+        dht: bool,
     },
 }
 
@@ -138,7 +148,8 @@ async fn main() -> Result<()> {
             voice,
             internet,
             relay,
-        } => cmd_create(channel, password, port, voice, internet, relay, StartupAction::None).await,
+            dht,
+        } => cmd_create(channel, password, port, voice, internet, relay, dht, StartupAction::None).await,
         Commands::Call {
             peer,
             channel,
@@ -147,14 +158,15 @@ async fn main() -> Result<()> {
             voice,
             internet,
             relay,
+            dht,
             invite,
         } => {
             let action = StartupAction::Call { peer };
             if let Some(invite) = invite {
-                cmd_join(invite, port, voice, relay, action).await
+                cmd_join(invite, port, voice, relay, dht, action).await
             } else {
                 let channel = channel.context("--channel is required without --invite")?;
-                cmd_create(channel, password, port, voice, internet, relay, action).await
+                cmd_create(channel, password, port, voice, internet, relay, dht, action).await
             }
         }
         Commands::Accept {
@@ -165,15 +177,16 @@ async fn main() -> Result<()> {
             voice,
             internet,
             relay,
+            dht,
             invite,
         } => {
             let session = parse_session_id(&session)?;
             let action = StartupAction::Accept { session };
             if let Some(invite) = invite {
-                cmd_join(invite, port, voice, relay, action).await
+                cmd_join(invite, port, voice, relay, dht, action).await
             } else {
                 let channel = channel.context("--channel is required without --invite")?;
-                cmd_create(channel, password, port, voice, internet, relay, action).await
+                cmd_create(channel, password, port, voice, internet, relay, dht, action).await
             }
         }
         Commands::Decline {
@@ -185,15 +198,16 @@ async fn main() -> Result<()> {
             voice,
             internet,
             relay,
+            dht,
             invite,
         } => {
             let session = parse_session_id(&session)?;
             let action = StartupAction::Decline { session, reason };
             if let Some(invite) = invite {
-                cmd_join(invite, port, voice, relay, action).await
+                cmd_join(invite, port, voice, relay, dht, action).await
             } else {
                 let channel = channel.context("--channel is required without --invite")?;
-                cmd_create(channel, password, port, voice, internet, relay, action).await
+                cmd_create(channel, password, port, voice, internet, relay, dht, action).await
             }
         }
         Commands::Invite { channel } => cmd_invite(channel).await,
@@ -202,7 +216,8 @@ async fn main() -> Result<()> {
             port,
             voice,
             relay,
-        } => cmd_join(invite, port, voice, relay, StartupAction::None).await,
+            dht,
+        } => cmd_join(invite, port, voice, relay, dht, StartupAction::None).await,
     }
 }
 
@@ -250,6 +265,7 @@ async fn cmd_create(
     voice: bool,
     internet: bool,
     relay: bool,
+    dht: bool,
     startup: StartupAction,
 ) -> Result<()> {
     let user_cfg = UserConfig::load()?;
@@ -261,7 +277,7 @@ async fn cmd_create(
         save_invite_string(&channel, &invite_str)?;
     }
 
-    let config = build_sdk_config(&user_cfg, port, relay_enabled, voice, None);
+    let config = build_sdk_config(&user_cfg, port, relay_enabled, voice, dht, None);
     let handle = RiftHandle::new(config).await?;
     handle
         .join_channel(&channel, password.as_deref(), internet)
@@ -282,6 +298,7 @@ async fn cmd_join(
     port: u16,
     voice: bool,
     relay: bool,
+    dht: bool,
     startup: StartupAction,
 ) -> Result<()> {
     let invite = decode_invite(&invite_str)?;
@@ -290,7 +307,7 @@ async fn cmd_join(
     let channel_name = invite.channel_name.clone();
     let password = invite.password.clone();
 
-    let config = build_sdk_config(&user_cfg, port, relay_enabled, voice, Some(invite_str));
+    let config = build_sdk_config(&user_cfg, port, relay_enabled, voice, dht, Some(invite_str));
 
     let handle = RiftHandle::new(config).await?;
     handle
@@ -1166,6 +1183,7 @@ fn build_sdk_config(
     port: u16,
     relay: bool,
     voice: bool,
+    dht: bool,
     invite: Option<String>,
 ) -> RiftConfig {
     RiftConfig {
@@ -1175,6 +1193,11 @@ fn build_sdk_config(
         user_name: user_cfg.user.name.clone(),
         preferred_codecs: vec![CodecId::Opus, CodecId::PCM16],
         preferred_features: vec![FeatureFlag::Voice, FeatureFlag::Text, FeatureFlag::Relay],
+        dht: rift_sdk::DhtConfigSdk {
+            enabled: dht || user_cfg.dht.enabled.unwrap_or(false),
+            bootstrap_nodes: user_cfg.dht.bootstrap_nodes.clone().unwrap_or_default(),
+            listen_addr: None,
+        },
         audio: AudioConfigSdk {
             enabled: voice,
             input_device: user_cfg.audio.input_device.clone(),

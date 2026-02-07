@@ -1424,6 +1424,15 @@ impl MeshHandle {
     pub async fn group_codec(&self) -> CodecId {
         *self.inner.group_codec.lock().await
     }
+
+    pub async fn connect_addr(&self, addr: SocketAddr) -> Result<()> {
+        self.inner.initiate_handshake(addr, 0).await
+    }
+
+    pub async fn connect_with_socket(&self, socket: UdpSocket, addr: SocketAddr) -> Result<()> {
+        let socket_idx = self.inner.add_socket(socket).await?;
+        self.inner.initiate_handshake(addr, socket_idx).await
+    }
 }
 
 fn now_timestamp() -> u64 {
