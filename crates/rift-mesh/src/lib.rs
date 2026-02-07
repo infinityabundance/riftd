@@ -75,9 +75,7 @@ struct MeshInner {
     relay_capable: bool,
 }
 
-#[derive(Debug)]
 struct PeerConnection {
-    addr: SocketAddr,
     peer_id: Option<PeerId>,
     session: rift_core::noise::NoiseSession,
     socket_idx: usize,
@@ -99,6 +97,7 @@ impl Mesh {
         let addr = SocketAddr::from(([0, 0, 0, 0], config.listen_port));
         let socket = UdpSocket::bind(addr).await?;
         let socket = Arc::new(socket);
+        let peer_id = identity.peer_id;
 
         let (events_tx, events_rx) = mpsc::channel(256);
         let inner = Arc::new(MeshInner {
@@ -126,13 +125,17 @@ impl Mesh {
             discovery_config: DiscoveryConfig {
                 channel_name: config.channel_name,
                 password: config.password,
-                peer_id: identity.peer_id,
+                peer_id,
                 listen_port: socket.local_addr()?.port(),
             },
             _mdns: None,
         };
 
         Ok(mesh)
+    }
+
+    pub fn local_peer_id(&self) -> PeerId {
+        self.inner.identity.peer_id
     }
 
     pub fn local_addr(&self) -> Result<SocketAddr> {
@@ -167,7 +170,7 @@ impl Mesh {
             if let Ok((socket, remote)) = attempt_hole_punch(&nat_cfg, &endpoint).await {
                 let socket_idx = self.inner.add_socket(socket).await?;
                 if let Err(err) = self.inner.initiate_handshake(remote, socket_idx).await {
-                    eprintln!("handshake to {} failed: {err}", remote);
+                    tracing::warn!("handshake to {} failed: {err}", remote);
                 }
             }
         }
@@ -175,25 +178,7 @@ impl Mesh {
     }
 
     pub async fn broadcast_chat(&self, text: String) -> Result<()> {
-        let timestamp = now_timestamp();
-        let chat = ChatMessage::new(self.inner.identity.peer_id, timestamp, text);
-        let msg = WireMessage::Control(ControlMessage::Chat(chat.clone()));
-
-        let mut cache = self.inner.cache.lock().await;
-        cache.insert(chat.id);
-        drop(cache);
-
-        let routes = self.inner.routes_snapshot().await;
-        for (peer_id, route) in routes {
-            if peer_id == self.inner.identity.peer_id {
-                continue;
-            }
-            if let Err(err) = self.inner.send_to_peer(peer_id, route, msg.clone()).await {
-                tracing::debug!(peer = %peer_id, "chat send failed: {err}");
-            }
-        }
-
-        Ok(())
+        self.inner.broadcast_chat(text).await
     }
 
     pub async fn broadcast_voice(&self, seq: u32, timestamp: u64, payload: Vec<u8>) -> Result<()> {
@@ -214,6 +199,27 @@ impl Mesh {
 }
 
 impl MeshInner {
+    async fn broadcast_chat(&self, text: String) -> Result<()> {
+        let timestamp = now_timestamp();
+        let chat = ChatMessage::new(self.identity.peer_id, timestamp, text);
+        let msg = WireMessage::Control(ControlMessage::Chat(chat.clone()));
+
+        let mut cache = self.cache.lock().await;
+        cache.insert(chat.id);
+        drop(cache);
+
+        let routes = self.routes_snapshot().await;
+        for (peer_id, route) in routes {
+            if peer_id == self.identity.peer_id {
+                continue;
+            }
+            if let Err(err) = self.send_to_peer(peer_id, route, msg.clone()).await {
+                tracing::debug!(peer = %peer_id, "chat send failed: {err}");
+            }
+        }
+
+        Ok(())
+    }
     fn spawn_receiver(inner: Arc<Self>, socket_idx: usize, socket: Arc<UdpSocket>) {
         tokio::spawn(async move {
             let mut buf = [0u8; MAX_PACKET];
@@ -227,7 +233,7 @@ impl MeshInner {
                     .handle_packet(socket_idx, addr, &buf[..len])
                     .await
                 {
-                    eprintln!("mesh recv error: {err}");
+                    tracing::warn!("mesh recv error: {err}");
                 }
             }
         });
@@ -235,28 +241,66 @@ impl MeshInner {
 
     fn spawn_discovery(inner: Arc<Self>, config: DiscoveryConfig) {
         tokio::spawn(async move {
-            let stream = match discover_peers(config) {
-                Ok(stream) => stream,
-                Err(err) => {
-                    eprintln!("discovery failed: {err}");
-                    return;
-                }
-            };
-            tokio::pin!(stream);
-            while let Some(peer) = stream.next().await {
-                if peer.peer_id == inner.identity.peer_id {
-                    continue;
-                }
-                let already = {
-                    let connections = inner.connections.lock().await;
-                    connections.contains_key(&peer.addr)
+            loop {
+                let stream = match discover_peers(config.clone()) {
+                    Ok(stream) => stream,
+                    Err(err) => {
+                        tracing::warn!("discovery failed: {err}");
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                        continue;
+                    }
                 };
-                if already {
-                    continue;
+                tokio::pin!(stream);
+                let mut window = tokio::time::interval(Duration::from_millis(200));
+                let window_deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+                loop {
+                    tokio::select! {
+                        maybe = stream.next() => {
+                            let Some(peer) = maybe else { break; };
+                            if peer.peer_id == inner.identity.peer_id {
+                                continue;
+                            }
+                            let already = {
+                                let connections = inner.connections.lock().await;
+                                connections.contains_key(&peer.addr)
+                            };
+                            if already {
+                                continue;
+                            }
+                            if let Err(err) = inner.initiate_handshake(peer.addr, 0).await {
+                                tracing::warn!("handshake to {} failed: {err}", peer.addr);
+                                let inner_retry = inner.clone();
+                                tokio::spawn(async move {
+                                    for attempt in 1..=10 {
+                                        tokio::time::sleep(Duration::from_secs(1)).await;
+                                        let already = {
+                                            let connections = inner_retry.connections.lock().await;
+                                            connections.contains_key(&peer.addr)
+                                        };
+                                        if already {
+                                            break;
+                                        }
+                                        if let Err(err) = inner_retry.initiate_handshake(peer.addr, 0).await {
+                                            tracing::debug!(
+                                                "handshake retry {} to {} failed: {err}",
+                                                attempt,
+                                                peer.addr
+                                            );
+                                        } else {
+                                            break;
+                                        }
+                                    }
+                                });
+                            }
+                        }
+                        _ = window.tick() => {
+                            if tokio::time::Instant::now() >= window_deadline {
+                                break;
+                            }
+                        }
+                    }
                 }
-                if let Err(err) = inner.initiate_handshake(peer.addr, 0).await {
-                    eprintln!("handshake to {} failed: {err}", peer.addr);
-                }
+                tokio::time::sleep(Duration::from_secs(3)).await;
             }
         });
     }
@@ -429,7 +473,6 @@ impl MeshInner {
         socket_idx: usize,
     ) -> Result<()> {
         let conn = PeerConnection {
-            addr,
             peer_id: None,
             session: rift_core::noise::NoiseSession::new(transport),
             socket_idx,
@@ -594,7 +637,7 @@ impl MeshInner {
             }
             WireMessage::Relay { target, inner } => {
                 if target == self.identity.peer_id {
-                    self.handle_wire(addr, *inner).await?;
+                    Box::pin(self.handle_wire(addr, *inner)).await?;
                 } else {
                     self.forward_relay(target, *inner).await?;
                 }
@@ -653,7 +696,7 @@ impl MeshInner {
             if let Ok((socket, remote)) = attempt_hole_punch(&nat_cfg, &endpoint).await {
                 if let Ok(socket_idx) = self.add_socket(socket).await {
                     if let Err(err) = self.initiate_handshake(remote, socket_idx).await {
-                        eprintln!("handshake to {} failed: {err}", remote);
+                        tracing::warn!("handshake to {} failed: {err}", remote);
                     }
                 }
             } else if relay_capable {
@@ -778,6 +821,10 @@ impl MeshHandle {
         self.inner
             .broadcast_voice(self.inner.identity.peer_id, seq, timestamp, payload)
             .await
+    }
+
+    pub async fn broadcast_chat(&self, text: String) -> Result<()> {
+        self.inner.broadcast_chat(text).await
     }
 }
 

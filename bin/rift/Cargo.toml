@@ -7,6 +7,10 @@ edition = "2021"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 dirs = "5"
+ratatui = "0.26"
+crossterm = "0.27"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
 rift-core = { path = "../../crates/rift-core" }
 rift-mesh = { path = "../../crates/rift-mesh" }
 rift-media = { path = "../../crates/rift-media" }

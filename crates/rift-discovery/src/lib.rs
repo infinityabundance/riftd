@@ -1,4 +1,4 @@
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
@@ -64,12 +64,13 @@ pub fn start_mdns_advertisement(config: DiscoveryConfig) -> Result<MdnsHandle, D
     let host_name = format!("{}.local.", instance_name);
 
     let props = [("channel", channel_hex.as_str()), ("peer", peer_hex.as_str())];
-    let addrs: [IpAddr; 0] = [];
+    let addrs = local_ipv4_addrs()
+        .unwrap_or_else(|_| vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]);
     let service = ServiceInfo::new(
         SERVICE_TYPE,
         &instance_name,
         &host_name,
-        &addrs,
+        addrs.as_slice(),
         config.listen_port,
         &props[..],
     )?;
@@ -103,11 +104,11 @@ pub fn discover_peers(
 }
 
 fn peer_info_from_service(info: &ServiceInfo, channel_hex: &str) -> Option<PeerInfo> {
-    let channel = info.get_property("channel")?;
+    let channel = info.get_property_val_str("channel")?;
     if channel != channel_hex {
         return None;
     }
-    let peer_hex = info.get_property("peer")?;
+    let peer_hex = info.get_property_val_str("peer")?;
     let peer_bytes = hex::decode(peer_hex).ok()?;
     if peer_bytes.len() != 32 {
         return None;
@@ -146,4 +147,19 @@ impl Stream for MdnsStream {
     }
 }
 
-pub use rift_core::ChannelId;
+fn local_ipv4_addrs() -> Result<Vec<IpAddr>, DiscoveryError> {
+    let mut addrs = Vec::new();
+    let interfaces = if_addrs::get_if_addrs()
+        .map_err(|e| DiscoveryError::Mdns(mdns_sd::Error::Msg(e.to_string())))?;
+    for iface in interfaces {
+        if let IpAddr::V4(ip) = iface.ip() {
+            if !ip.is_unspecified() {
+                addrs.push(IpAddr::V4(ip));
+            }
+        }
+    }
+    if addrs.is_empty() {
+        addrs.push(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    }
+    Ok(addrs)
+}
