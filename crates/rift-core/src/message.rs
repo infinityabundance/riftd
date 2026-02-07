@@ -74,11 +74,18 @@ impl ChatMessage {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PeerInfo {
+    pub peer_id: PeerId,
+    pub addr: SocketAddr,
+    pub relay_capable: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ControlMessage {
-    Join { peer_id: PeerId },
+    Join { peer_id: PeerId, relay_capable: bool },
     Leave { peer_id: PeerId },
     Chat(ChatMessage),
-    PeerList { peers: Vec<SocketAddr> },
+    PeerList { peers: Vec<PeerInfo> },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -89,6 +96,10 @@ pub enum WireMessage {
         seq: u32,
         timestamp: u64,
         payload: Vec<u8>,
+    },
+    Relay {
+        target: PeerId,
+        inner: Box<WireMessage>,
     },
 }
 

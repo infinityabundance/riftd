@@ -233,6 +233,11 @@ impl OpusEncoder {
         let len = self.inner.encode(frame, out)?;
         Ok(len)
     }
+
+    pub fn encode_f32(&mut self, frame: &[f32], out: &mut [u8]) -> Result<usize> {
+        let len = self.inner.encode_float(frame, out)?;
+        Ok(len)
+    }
 }
 
 pub struct OpusDecoder {
@@ -252,6 +257,11 @@ impl OpusDecoder {
 
     pub fn decode_i16(&mut self, data: &[u8], out: &mut [i16]) -> Result<usize> {
         let len = self.inner.decode(data, out, false)?;
+        Ok(len)
+    }
+
+    pub fn decode_f32(&mut self, data: &[u8], out: &mut [f32]) -> Result<usize> {
+        let len = self.inner.decode_float(data, out, false)?;
         Ok(len)
     }
 }

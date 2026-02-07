@@ -10,3 +10,4 @@ rift-discovery = { path = "../rift-discovery" }
 rift-nat = { path = "../rift-nat" }
 tokio = { version = "1", features = ["macros", "net", "rt", "sync", "time"] }
 tokio-stream = "0.1"
+tracing = "0.1"
