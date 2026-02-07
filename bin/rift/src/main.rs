@@ -16,8 +16,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 use tokio::sync::mpsc;
+use tokio::io::AsyncWriteExt;
 use tokio::time::Instant;
 use tokio::task::LocalSet;
+use tracing_subscriber::{fmt::writer::BoxMakeWriter, EnvFilter};
 
 use rift_core::{decode_invite, encode_invite, generate_invite, Identity};
 use rift_sdk::{
@@ -38,6 +40,7 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Commands {
     InitIdentity,
+    Stats,
     Create {
         #[arg(long)]
         channel: String,
@@ -141,6 +144,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::InitIdentity => cmd_init_identity().await,
+        Commands::Stats => cmd_stats().await,
         Commands::Create {
             channel,
             password,
@@ -222,23 +226,62 @@ async fn main() -> Result<()> {
 }
 
 fn init_logging() {
-    let log_path = dirs::config_dir()
-        .map(|base| base.join("rift").join("rift.log"));
-    if let Some(path) = log_path {
+    let cfg = UserConfig::load().unwrap_or_default();
+    let level = cfg
+        .logging
+        .level
+        .clone()
+        .unwrap_or_else(|| "info".to_string());
+    let target = cfg
+        .logging
+        .target
+        .clone()
+        .unwrap_or_else(|| "stderr".to_string());
+    let filter = EnvFilter::try_new(level).unwrap_or_else(|_| EnvFilter::new("info"));
+
+    let writer = if target == "stderr" {
+        None
+    } else {
+        let path = if let Some(path) = target.strip_prefix("file:") {
+            PathBuf::from(path)
+        } else if target == "file" {
+            dirs::config_dir()
+                .map(|base| base.join("rift").join("rift.log"))
+                .unwrap_or_else(|| PathBuf::from("rift.log"))
+        } else {
+            PathBuf::from(target)
+        };
         if let Some(parent) = path.parent() {
             let _ = fs::create_dir_all(parent);
         }
-        if let Ok(file) = std::fs::OpenOptions::new()
+        std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&path)
-        {
-            let writer = tracing_subscriber::fmt::writer::BoxMakeWriter::new(file);
-            tracing_subscriber::fmt().with_writer(writer).init();
-            return;
-        }
+            .ok()
+    };
+
+    if let Some(file) = writer {
+        let writer = BoxMakeWriter::new(file);
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(writer)
+            .init();
+    } else {
+        tracing_subscriber::fmt().with_env_filter(filter).init();
     }
-    tracing_subscriber::fmt::init();
+}
+
+async fn cmd_stats() -> Result<()> {
+    let path = metrics_socket_path()?;
+    let mut stream = tokio::net::UnixStream::connect(&path)
+        .await
+        .context("stats socket not available (is rift running?)")?;
+    let mut buf = Vec::new();
+    tokio::io::AsyncReadExt::read_to_end(&mut stream, &mut buf).await?;
+    let text = String::from_utf8_lossy(&buf);
+    println!("{text}");
+    Ok(())
 }
 
 async fn cmd_init_identity() -> Result<()> {
@@ -329,6 +372,13 @@ struct PeerEntry {
     display: String,
     last_voice: Option<Instant>,
     stats: Option<rift_sdk::LinkStats>,
+    route: Option<RouteInfo>,
+}
+
+#[derive(Debug, Clone)]
+struct RouteInfo {
+    relayed: bool,
+    via: Option<rift_core::PeerId>,
 }
 
 #[derive(Debug)]
@@ -426,6 +476,7 @@ struct UiState {
     muted: bool,
     peers: HashMap<rift_core::PeerId, PeerEntry>,
     qos_profile: rift_sdk::RiftQosProfile,
+    global_stats: Option<rift_sdk::GlobalStats>,
     chat: VecDeque<ChatLine>,
     mic_active: bool,
     ptt_enabled: bool,
@@ -439,6 +490,7 @@ struct UiState {
     audio_bitrate: u32,
     theme: String,
     prefer_p2p: bool,
+    show_stats: bool,
 }
 
 fn next_quality(current: &str) -> &'static str {
@@ -476,6 +528,7 @@ impl UiState {
             muted: false,
             peers: HashMap::new(),
             qos_profile,
+            global_stats: None,
             chat: VecDeque::with_capacity(200),
             mic_active: false,
             ptt_enabled,
@@ -489,6 +542,7 @@ impl UiState {
             audio_bitrate: 0,
             theme,
             prefer_p2p,
+            show_stats: false,
         }
     }
 
@@ -512,6 +566,7 @@ impl UiState {
                 display: short_peer(&peer_id),
                 last_voice: None,
                 stats: None,
+                route: None,
             });
         entry.last_voice = Some(Instant::now());
     }
@@ -548,6 +603,7 @@ async fn run_tui_inner(
     let theme = user_cfg.ui.theme.clone().unwrap_or_else(|| "dark".to_string());
     let prefer_p2p = user_cfg.network.prefer_p2p.unwrap_or(true);
     let qos_profile = user_cfg.qos.to_profile();
+    let metrics_enabled = user_cfg.metrics.enabled.unwrap_or(true);
 
     // tx/rx pulse timestamps tracked in UiState
 
@@ -569,6 +625,12 @@ async fn run_tui_inner(
         }
         let _ = ui_tx_clone.send(UiEvent::Tick);
     });
+
+    if metrics_enabled {
+        if let Ok(path) = metrics_socket_path() {
+            spawn_metrics_server(path);
+        }
+    }
 
     let local_peer_id = handle.local_peer_id();
     let channel_session = RiftSessionId::from_channel(&channel, password.as_deref());
@@ -647,6 +709,7 @@ async fn run_tui_inner(
                                     display: short_peer(&peer_id),
                                     last_voice: None,
                                     stats: None,
+                                    route: None,
                                 });
                                 state.last_rx = Some(Instant::now());
                             }
@@ -675,13 +738,33 @@ async fn run_tui_inner(
                             RiftEvent::AudioBitrate { bitrate } => {
                                 state.audio_bitrate = bitrate;
                             }
-                            RiftEvent::LinkStatsUpdated { peer, stats } => {
+                            RiftEvent::StatsUpdate { peer, stats, global } => {
                                 let entry = state.peers.entry(peer).or_insert(PeerEntry {
                                     display: short_peer(&peer),
                                     last_voice: None,
                                     stats: None,
+                                    route: None,
                                 });
                                 entry.stats = Some(stats);
+                                state.global_stats = Some(global);
+                            }
+                            RiftEvent::RouteUpdated { peer, route } => {
+                                let entry = state.peers.entry(peer).or_insert(PeerEntry {
+                                    display: short_peer(&peer),
+                                    last_voice: None,
+                                    stats: None,
+                                    route: None,
+                                });
+                                entry.route = Some(match route {
+                                    rift_sdk::RouteKind::Direct => RouteInfo {
+                                        relayed: false,
+                                        via: None,
+                                    },
+                                    rift_sdk::RouteKind::Relayed { via } => RouteInfo {
+                                        relayed: true,
+                                        via: Some(via),
+                                    },
+                                });
                             }
                             RiftEvent::VoiceFrame { .. } => {}
                             RiftEvent::IncomingCall { session, from } => {
@@ -792,6 +875,9 @@ fn handle_key_event(
     }
 
     match key.code {
+        KeyCode::F(2) => {
+            state.show_stats = !state.show_stats;
+        }
         KeyCode::Tab => {
             state.focus = match state.focus {
                 Focus::Input => Focus::Peers,
@@ -965,7 +1051,16 @@ fn draw_ui(f: &mut Frame, state: &UiState) {
         .split(chunks[0]);
 
     draw_peers(f, body[0], state);
-    draw_chat(f, body[1], state);
+    if state.show_stats {
+        let right = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(6), Constraint::Length(9)])
+            .split(body[1]);
+        draw_chat(f, right[0], state);
+        draw_stats(f, right[1], state);
+    } else {
+        draw_chat(f, body[1], state);
+    }
     draw_status(f, chunks[1], state);
     draw_input(f, chunks[2], state);
     if state.focus == Focus::Input {
@@ -1044,6 +1139,71 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &UiState) {
     }
     let block = Block::default().title("Chat").borders(Borders::ALL);
     let paragraph = Paragraph::new(lines).block(block).wrap(Wrap { trim: false });
+    f.render_widget(paragraph, area);
+}
+
+fn draw_stats(f: &mut Frame, area: Rect, state: &UiState) {
+    let mut lines = Vec::new();
+    if let Some(global) = state.global_stats {
+        lines.push(Line::from(vec![
+            Span::styled("peers: ", Style::default().fg(Color::Cyan)),
+            Span::styled(global.num_peers.to_string(), Style::default().fg(Color::White)),
+            Span::raw("  "),
+            Span::styled("sessions: ", Style::default().fg(Color::Cyan)),
+            Span::styled(global.num_sessions.to_string(), Style::default().fg(Color::White)),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("pkts: ", Style::default().fg(Color::Cyan)),
+            Span::styled(
+                format!("{}/{}", global.packets_sent, global.packets_received),
+                Style::default().fg(Color::White),
+            ),
+            Span::raw("  "),
+            Span::styled("bytes: ", Style::default().fg(Color::Cyan)),
+            Span::styled(
+                format!("{}/{}", global.bytes_sent, global.bytes_received),
+                Style::default().fg(Color::White),
+            ),
+        ]));
+    }
+    for (peer_id, peer) in state.peers.iter() {
+        if *peer_id == state.local_peer_id {
+            continue;
+        }
+        let route = match peer.route.as_ref() {
+            Some(route) if route.relayed => {
+                if let Some(via) = route.via {
+                    format!("relay {}", short_peer(&via))
+                } else {
+                    "relay".to_string()
+                }
+            }
+            Some(_) => "direct".to_string(),
+            None => "?".to_string(),
+        };
+        let (rtt, loss, jitter) = if let Some(stats) = peer.stats {
+            (
+                format!("{:.0}ms", stats.rtt_ms),
+                format!("{:.0}%", stats.loss * 100.0),
+                format!("{:.0}ms", stats.jitter_ms),
+            )
+        } else {
+            ("?".to_string(), "?".to_string(), "?".to_string())
+        };
+        lines.push(Line::from(vec![
+            Span::styled(short_peer(peer_id), Style::default().fg(Color::Blue)),
+            Span::raw(" "),
+            Span::styled(route, Style::default().fg(Color::White)),
+            Span::raw(" rtt "),
+            Span::styled(rtt, Style::default().fg(Color::White)),
+            Span::raw(" loss "),
+            Span::styled(loss, Style::default().fg(Color::White)),
+            Span::raw(" jit "),
+            Span::styled(jitter, Style::default().fg(Color::White)),
+        ]));
+    }
+    let block = Block::default().title("Stats").borders(Borders::ALL);
+    let paragraph = Paragraph::new(lines).block(block).wrap(Wrap { trim: true });
     f.render_widget(paragraph, area);
 }
 
@@ -1147,6 +1307,8 @@ fn draw_status(f: &mut Frame, area: Rect, state: &UiState) {
         Span::raw(" quit "),
         Span::styled("ctrl+a", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
         Span::raw(" quality "),
+        Span::styled("F2", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+        Span::raw(" stats "),
         Span::styled("m", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
         Span::raw(" mute "),
         Span::styled("tab", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
@@ -1249,6 +1411,7 @@ fn build_sdk_config(
         preferred_codecs: vec![CodecId::Opus, CodecId::PCM16],
         preferred_features: vec![FeatureFlag::Voice, FeatureFlag::Text, FeatureFlag::Relay],
         qos: user_cfg.qos.to_profile(),
+        metrics_enabled: user_cfg.metrics.enabled.unwrap_or(true),
         dht: rift_sdk::DhtConfigSdk {
             enabled: dht || user_cfg.dht.enabled.unwrap_or(false),
             bootstrap_nodes: user_cfg.dht.bootstrap_nodes.clone().unwrap_or_default(),
@@ -1314,4 +1477,34 @@ fn format_time(ts: u64) -> String {
     let m = (secs / 60) % 60;
     let s = secs % 60;
     format!("{:02}:{:02}:{:02}", h, m, s)
+}
+
+fn metrics_socket_path() -> Result<PathBuf> {
+    let base = dirs::config_dir().context("config directory not found")?;
+    Ok(base.join("rift").join("metrics.sock"))
+}
+
+fn spawn_metrics_server(path: PathBuf) {
+    let _ = fs::create_dir_all(
+        path.parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from(".")),
+    );
+    let _ = fs::remove_file(&path);
+    tokio::spawn(async move {
+        let listener = match tokio::net::UnixListener::bind(&path) {
+            Ok(listener) => listener,
+            Err(err) => {
+                tracing::warn!("metrics socket bind failed: {err}");
+                return;
+            }
+        };
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                continue;
+            };
+            let payload = rift_metrics::render_text();
+            let _ = stream.write_all(payload.as_bytes()).await;
+        }
+    });
 }

@@ -12,3 +12,5 @@ tokio = { version = "1", features = ["sync", "time", "macros", "rt"] }
 futures = "0.3"
 libp2p = { version = "0.53", features = ["kad", "tcp", "dns", "noise", "yamux", "tokio", "identify", "macros"] }
 rift-core = { path = "../rift-core" }
+rift-metrics = { path = "../rift-metrics" }
+tracing = "0.1"

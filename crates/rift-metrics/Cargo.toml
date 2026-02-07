@@ -1,0 +1,9 @@
+[package]
+name = "rift-metrics"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+once_cell = "1"
+parking_lot = "0.12"
+serde = { version = "1", features = ["derive"] }

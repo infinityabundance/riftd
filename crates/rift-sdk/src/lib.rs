@@ -41,6 +41,8 @@ pub struct RiftConfig {
     pub preferred_features: Vec<FeatureFlag>,
     #[serde(default)]
     pub qos: QosProfile,
+    #[serde(default)]
+    pub metrics_enabled: bool,
     pub dht: DhtConfigSdk,
     pub audio: AudioConfigSdk,
     pub network: NetworkConfigSdk,
@@ -83,6 +85,7 @@ impl Default for RiftConfig {
             preferred_codecs: vec![CodecId::Opus, CodecId::PCM16],
             preferred_features: vec![FeatureFlag::Voice, FeatureFlag::Text, FeatureFlag::Relay],
             qos: QosProfile::default(),
+            metrics_enabled: true,
             dht: DhtConfigSdk::default(),
             audio: AudioConfigSdk::default(),
             network: NetworkConfigSdk::default(),
@@ -133,6 +136,22 @@ pub struct LinkStats {
     pub jitter_ms: f32,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct GlobalStats {
+    pub num_peers: usize,
+    pub num_sessions: usize,
+    pub packets_sent: u64,
+    pub packets_received: u64,
+    pub bytes_sent: u64,
+    pub bytes_received: u64,
+}
+
+#[derive(Debug, Clone)]
+pub enum RouteKind {
+    Direct,
+    Relayed { via: PeerId },
+}
+
 #[derive(Debug, Clone)]
 pub enum RiftEvent {
     IncomingChat(ChatMessage),
@@ -144,7 +163,8 @@ pub enum RiftEvent {
     AudioLevel { peer: PeerId, level: f32 },
     CodecSelected { codec: CodecId },
     AudioBitrate { bitrate: u32 },
-    LinkStatsUpdated { peer: PeerId, stats: LinkStats },
+    StatsUpdate { peer: PeerId, stats: LinkStats, global: GlobalStats },
+    RouteUpdated { peer: PeerId, route: RouteKind },
     VoiceFrame { peer: PeerId, samples: Vec<i16> },
 }
 
@@ -207,6 +227,7 @@ pub struct RiftHandle {
 
 impl RiftHandle {
     pub async fn new(config: RiftConfig) -> Result<Self, RiftError> {
+        rift_metrics::set_enabled(config.metrics_enabled);
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let identity = Identity::load(config.identity_path.as_deref())
             .context("identity not found")
@@ -467,13 +488,25 @@ impl RiftHandle {
                     MeshEvent::GroupCodec(codec) => {
                         let _ = event_tx.send(RiftEvent::CodecSelected { codec });
                     }
-                    MeshEvent::LinkStatsUpdated { peer, stats } => {
+                    MeshEvent::StatsUpdate { peer, stats, global } => {
                         let sdk_stats = LinkStats {
                             rtt_ms: stats.rtt_ms,
                             loss: stats.loss,
                             jitter_ms: stats.jitter_ms,
                         };
-                        let _ = event_tx.send(RiftEvent::LinkStatsUpdated { peer, stats: sdk_stats });
+                        let sdk_global = GlobalStats {
+                            num_peers: global.num_peers,
+                            num_sessions: global.num_sessions,
+                            packets_sent: global.packets_sent,
+                            packets_received: global.packets_received,
+                            bytes_sent: global.bytes_sent,
+                            bytes_received: global.bytes_received,
+                        };
+                        let _ = event_tx.send(RiftEvent::StatsUpdate {
+                            peer,
+                            stats: sdk_stats,
+                            global: sdk_global,
+                        });
                         if let (Some(state), Some(qos)) = (voice_state.as_ref(), qos_state.as_mut()) {
                             qos.peer_stats.insert(peer, sdk_stats);
                             if let Some(next) = compute_next_tuning(qos) {
@@ -486,9 +519,17 @@ impl RiftHandle {
                             }
                         }
                     }
-                    MeshEvent::PeerSessionConfig { .. }
-                    | MeshEvent::RouteUpdated { .. }
-                    | MeshEvent::RouteUpgraded(_) => {}
+                    MeshEvent::RouteUpdated { peer_id, route } => {
+                        let route = match route {
+                            rift_mesh::PeerRoute::Direct { .. } => RouteKind::Direct,
+                            rift_mesh::PeerRoute::Relayed { via } => RouteKind::Relayed { via },
+                        };
+                        let _ = event_tx.send(RiftEvent::RouteUpdated {
+                            peer: peer_id,
+                            route,
+                        });
+                    }
+                    MeshEvent::PeerSessionConfig { .. } | MeshEvent::RouteUpgraded(_) => {}
                 }
             }
         });
@@ -603,6 +644,7 @@ fn start_audio_pipeline(
     audio_config.bitrate = initial_bitrate
         .clamp(config.qos.min_bitrate, config.qos.max_bitrate)
         .max(8_000);
+    rift_metrics::set_gauge("rift_audio_bitrate", &[], audio_config.bitrate as f64);
     let (audio_in, mut audio_rx) = AudioIn::new_with_device(&audio_config, config.audio.input_device.as_deref())
         .map_err(|e| RiftError::Audio(format!("{e}")))?;
     let mut encoder = OpusEncoder::new(&audio_config).map_err(|e| RiftError::Audio(format!("{e}")))?;
@@ -790,6 +832,13 @@ fn compute_next_tuning(qos: &mut QosState) -> Option<AudioTuning> {
         || next.fec != qos.current.fec
         || next.loss_pct != qos.current.loss_pct
     {
+        rift_metrics::set_gauge("rift_audio_bitrate", &[], next.bitrate as f64);
+        tracing::info!(
+            bitrate = next.bitrate,
+            fec = next.fec,
+            loss_pct = next.loss_pct,
+            "qos audio tuning updated"
+        );
         qos.current = next.clone();
         qos.last_adjust = now;
         return Some(next);

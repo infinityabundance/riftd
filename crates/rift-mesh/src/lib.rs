@@ -16,6 +16,7 @@ use rift_protocol::{
     ControlMessage, FeatureFlag, PeerInfo, ProtocolVersion, QosProfile, RiftFrameHeader,
     RiftPayload, SessionId, StreamKind, VoicePacket,
 };
+use rift_metrics as metrics;
 
 const MAX_PACKET: usize = 2048;
 
@@ -52,7 +53,7 @@ pub enum MeshEvent {
     PeerCapabilities { peer_id: PeerId, capabilities: Capabilities },
     PeerSessionConfig { peer_id: PeerId, codec: CodecId, frame_ms: u16 },
     GroupCodec(CodecId),
-    LinkStatsUpdated { peer: PeerId, stats: LinkStats },
+    StatsUpdate { peer: PeerId, stats: LinkStats, global: GlobalStats },
     IncomingCall { session: SessionId, from: PeerId },
     CallAccepted { session: SessionId, from: PeerId },
     CallDeclined {
@@ -68,6 +69,16 @@ pub struct LinkStats {
     pub rtt_ms: f32,
     pub loss: f32,
     pub jitter_ms: f32,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct GlobalStats {
+    pub num_peers: usize,
+    pub num_sessions: usize,
+    pub packets_sent: u64,
+    pub packets_received: u64,
+    pub bytes_sent: u64,
+    pub bytes_received: u64,
 }
 
 pub struct Mesh {
@@ -102,12 +113,22 @@ struct MeshInner {
     nat_cfg: Mutex<Option<NatConfig>>,
     qos: QosProfile,
     link_stats: Mutex<HashMap<PeerId, LinkStatsState>>,
+    peer_traffic: Mutex<HashMap<PeerId, TrafficStats>>,
+    global_traffic: Mutex<TrafficStats>,
     events_tx: mpsc::Sender<MeshEvent>,
     relay_capable: bool,
     session_mgr: Mutex<SessionManager>,
     active_session: Mutex<SessionId>,
     channel_session: SessionId,
     group_codec: Mutex<CodecId>,
+}
+
+#[derive(Debug, Default, Clone)]
+struct TrafficStats {
+    packets_sent: u64,
+    packets_received: u64,
+    bytes_sent: u64,
+    bytes_received: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -299,6 +320,8 @@ impl Mesh {
             nat_cfg: Mutex::new(None),
             qos: config.qos,
             link_stats: Mutex::new(HashMap::new()),
+            peer_traffic: Mutex::new(HashMap::new()),
+            global_traffic: Mutex::new(TrafficStats::default()),
             events_tx,
             relay_capable: config.relay_capable,
             session_mgr: Mutex::new(session_mgr),
@@ -644,6 +667,7 @@ impl MeshInner {
             }
         };
 
+        self.record_recv(addr, data.len()).await;
         let (header, payload) = decode_frame(&plaintext)?;
         self.update_link_stats(header.source, header.seq, header.timestamp)
             .await;
@@ -946,10 +970,30 @@ impl MeshInner {
         }
         drop(stats_map);
         if should_emit {
+            let global = self.global_stats_snapshot().await;
             let _ = self
                 .events_tx
-                .send(MeshEvent::LinkStatsUpdated { peer: peer_id, stats })
+                .send(MeshEvent::StatsUpdate {
+                    peer: peer_id,
+                    stats,
+                    global,
+                })
                 .await;
+            metrics::observe_histogram(
+                "rift_rtt_ms",
+                &[("peer", &peer_id.to_hex())],
+                stats.rtt_ms as f64,
+            );
+            metrics::set_gauge(
+                "rift_packet_loss",
+                &[("peer", &peer_id.to_hex())],
+                stats.loss as f64,
+            );
+            metrics::set_gauge(
+                "rift_jitter_ms",
+                &[("peer", &peer_id.to_hex())],
+                stats.jitter_ms as f64,
+            );
             self.consider_route(peer_id, stats).await;
         }
     }
@@ -962,11 +1006,89 @@ impl MeshInner {
         state.update_rtt(rtt_ms);
         let stats = state.snapshot();
         drop(stats_map);
+        let global = self.global_stats_snapshot().await;
         let _ = self
             .events_tx
-            .send(MeshEvent::LinkStatsUpdated { peer: peer_id, stats })
+            .send(MeshEvent::StatsUpdate {
+                peer: peer_id,
+                stats,
+                global,
+            })
             .await;
+        metrics::observe_histogram(
+            "rift_rtt_ms",
+            &[("peer", &peer_id.to_hex())],
+            stats.rtt_ms as f64,
+        );
         self.consider_route(peer_id, stats).await;
+    }
+
+    async fn record_send(&self, addr: SocketAddr, bytes: usize) {
+        let peer_id = {
+            let connections = self.connections.lock().await;
+            connections.get(&addr).and_then(|conn| conn.peer_id)
+        };
+        let mut global = self.global_traffic.lock().await;
+        global.packets_sent = global.packets_sent.saturating_add(1);
+        global.bytes_sent = global.bytes_sent.saturating_add(bytes as u64);
+        drop(global);
+        metrics::inc_counter("rift_packets_sent", &[]);
+        metrics::add_counter("rift_bytes_sent", &[], bytes as u64);
+        if let Some(peer_id) = peer_id {
+            let mut peer = self.peer_traffic.lock().await;
+            let entry = peer.entry(peer_id).or_default();
+            entry.packets_sent = entry.packets_sent.saturating_add(1);
+            entry.bytes_sent = entry.bytes_sent.saturating_add(bytes as u64);
+            drop(peer);
+            metrics::inc_counter("rift_packets_sent", &[("peer", &peer_id.to_hex())]);
+            metrics::add_counter("rift_bytes_sent", &[("peer", &peer_id.to_hex())], bytes as u64);
+        }
+    }
+
+    async fn record_recv(&self, addr: SocketAddr, bytes: usize) {
+        let peer_id = {
+            let connections = self.connections.lock().await;
+            connections.get(&addr).and_then(|conn| conn.peer_id)
+        };
+        let mut global = self.global_traffic.lock().await;
+        global.packets_received = global.packets_received.saturating_add(1);
+        global.bytes_received = global.bytes_received.saturating_add(bytes as u64);
+        drop(global);
+        metrics::inc_counter("rift_packets_received", &[]);
+        metrics::add_counter("rift_bytes_received", &[], bytes as u64);
+        if let Some(peer_id) = peer_id {
+            let mut peer = self.peer_traffic.lock().await;
+            let entry = peer.entry(peer_id).or_default();
+            entry.packets_received = entry.packets_received.saturating_add(1);
+            entry.bytes_received = entry.bytes_received.saturating_add(bytes as u64);
+            drop(peer);
+            metrics::inc_counter("rift_packets_received", &[("peer", &peer_id.to_hex())]);
+            metrics::add_counter(
+                "rift_bytes_received",
+                &[("peer", &peer_id.to_hex())],
+                bytes as u64,
+            );
+        }
+    }
+
+    async fn global_stats_snapshot(&self) -> GlobalStats {
+        let global = self.global_traffic.lock().await.clone();
+        let peers = self.peers_by_id.lock().await.len() + 1;
+        let sessions = self.session_mgr.lock().await.sessions.len();
+        GlobalStats {
+            num_peers: peers,
+            num_sessions: sessions,
+            packets_sent: global.packets_sent,
+            packets_received: global.packets_received,
+            bytes_sent: global.bytes_sent,
+            bytes_received: global.bytes_received,
+        }
+    }
+
+    async fn emit_global_metrics(&self) {
+        let global = self.global_stats_snapshot().await;
+        metrics::set_gauge("rift_number_of_peers", &[], global.num_peers as f64);
+        metrics::set_gauge("rift_number_of_sessions", &[], global.num_sessions as f64);
     }
 
     async fn consider_route(&self, peer_id: PeerId, stats: LinkStats) {
@@ -1073,6 +1195,7 @@ impl MeshInner {
         };
         let socket = self.socket_by_idx(socket_idx).await?;
         socket.send_to(&ciphertext, addr).await?;
+        self.record_send(addr, ciphertext.len()).await;
         Ok(())
     }
 
@@ -1120,6 +1243,7 @@ impl MeshInner {
                         route: PeerRoute::Direct { addr },
                     })
                     .await;
+                self.emit_global_metrics().await;
                 if upgraded {
                     let _ = self.events_tx.send(MeshEvent::RouteUpgraded(peer_id)).await;
                     tracing::info!(peer = %peer_id, "route upgraded to direct");
@@ -1175,6 +1299,7 @@ impl MeshInner {
                 sessions.remove_participant_all(peer_id);
                 drop(sessions);
                 let _ = self.events_tx.send(MeshEvent::PeerLeft(peer_id)).await;
+                self.emit_global_metrics().await;
             }
             RiftPayload::Control(ControlMessage::Chat(chat)) => {
                 let mut cache = self.cache.lock().await;
@@ -1344,12 +1469,14 @@ impl MeshInner {
 
     async fn start_call(&self, to: PeerId) -> Result<SessionId> {
         let session = SessionId::random();
+        tracing::info!(to = %to, session = ?session, "call start");
         {
             let mut sessions = self.session_mgr.lock().await;
             sessions.set_state(session, CallState::Ringing);
             sessions.add_participant(session, self.identity.peer_id);
             sessions.add_participant(session, to);
         }
+        self.emit_global_metrics().await;
         let call = CallControl::Invite {
             session,
             from: self.identity.peer_id,
@@ -1361,11 +1488,13 @@ impl MeshInner {
     }
 
     async fn accept_call(&self, session: SessionId) -> Result<()> {
+        tracing::info!(session = ?session, "call accept");
         {
             let mut sessions = self.session_mgr.lock().await;
             sessions.set_state(session, CallState::Active);
             sessions.add_participant(session, self.identity.peer_id);
         }
+        self.emit_global_metrics().await;
         let participants = {
             let sessions = self.session_mgr.lock().await;
             sessions.participants(session)
@@ -1386,10 +1515,12 @@ impl MeshInner {
     }
 
     async fn decline_call(&self, session: SessionId, reason: Option<String>) -> Result<()> {
+        tracing::info!(session = ?session, ?reason, "call decline");
         {
             let mut sessions = self.session_mgr.lock().await;
             sessions.set_state(session, CallState::Ended);
         }
+        self.emit_global_metrics().await;
         let participants = {
             let sessions = self.session_mgr.lock().await;
             sessions.participants(session)
@@ -1413,10 +1544,12 @@ impl MeshInner {
     }
 
     async fn end_call(&self, session: SessionId) -> Result<()> {
+        tracing::info!(session = ?session, "call end");
         {
             let mut sessions = self.session_mgr.lock().await;
             sessions.set_state(session, CallState::Ended);
         }
+        self.emit_global_metrics().await;
         let participants = {
             let sessions = self.session_mgr.lock().await;
             sessions.participants(session)

@@ -9,6 +9,7 @@ rift-core = { path = "../rift-core" }
 rift-discovery = { path = "../rift-discovery" }
 rift-nat = { path = "../rift-nat" }
 rift-protocol = { path = "../rift-protocol" }
+rift-metrics = { path = "../rift-metrics" }
 snow = "0.9"
 tokio = { version = "1", features = ["macros", "net", "rt", "sync", "time"] }
 tokio-stream = "0.1"

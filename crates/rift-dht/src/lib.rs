@@ -13,6 +13,8 @@ use libp2p::noise;
 use libp2p::swarm::{NetworkBehaviour, Swarm, SwarmEvent};
 use libp2p::{tcp, yamux, Multiaddr, PeerId, Transport};
 use rift_core::{ChannelId, PeerId as RiftPeerId};
+use rift_metrics as metrics;
+use tracing::debug;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 use futures::StreamExt;
@@ -247,10 +249,13 @@ impl DhtHandle {
             }
         });
 
+        metrics::inc_counter("rift_dht_started", &[]);
         Ok(DhtHandle { cmd_tx })
     }
 
     pub async fn announce(&self, key: ChannelId, info: PeerEndpointInfo) -> Result<(), DhtError> {
+        metrics::inc_counter("rift_dht_announce", &[]);
+        debug!(channel = %key.to_hex(), "dht announce");
         let (tx, rx) = oneshot::channel();
         let cmd = Command::Announce { key, info, resp: tx };
         let _ = self.cmd_tx.send(cmd).await;
@@ -258,6 +263,8 @@ impl DhtHandle {
     }
 
     pub async fn lookup(&self, key: ChannelId) -> Result<Vec<PeerEndpointInfo>, DhtError> {
+        metrics::inc_counter("rift_dht_lookup", &[]);
+        debug!(channel = %key.to_hex(), "dht lookup");
         let (tx, rx) = oneshot::channel();
         let cmd = Command::Lookup { key, resp: tx };
         let _ = self.cmd_tx.send(cmd).await;

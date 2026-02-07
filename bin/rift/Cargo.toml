@@ -14,6 +14,7 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 rift-core = { path = "../../crates/rift-core" }
 rift-sdk = { path = "../../crates/rift-sdk" }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "io-util", "signal", "time", "sync"] }
+rift-metrics = { path = "../../crates/rift-metrics" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "io-util", "signal", "time", "sync", "net"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["fmt"] }
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
