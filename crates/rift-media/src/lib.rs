@@ -41,12 +41,22 @@ pub struct AudioIn {
 
 impl AudioIn {
     pub fn new(config: &AudioConfig) -> Result<(Self, tokio::sync::mpsc::Receiver<Vec<i16>>)> {
-        let host = cpal::default_host();
-        let device = host
-            .default_input_device()
-            .ok_or_else(|| anyhow!("no default input device"))?;
+        Self::new_with_device(config, None)
+    }
 
-        let mut supported_config = device.default_input_config()?;
+    pub fn new_with_device(
+        config: &AudioConfig,
+        device_name: Option<&str>,
+    ) -> Result<(Self, tokio::sync::mpsc::Receiver<Vec<i16>>)> {
+        let host = cpal::default_host();
+        let device = if let Some(name) = device_name {
+            find_input_device(&host, name)?
+        } else {
+            host.default_input_device()
+                .ok_or_else(|| anyhow!("no default input device"))?
+        };
+
+        let supported_config = device.default_input_config()?;
         let sample_format = supported_config.sample_format();
         let mut stream_config: cpal::StreamConfig = supported_config.into();
         stream_config.channels = config.channels;
@@ -57,7 +67,7 @@ impl AudioIn {
         let buffer = Arc::new(Mutex::new(Vec::with_capacity(frame_samples * 2)));
         let buffer_clone = buffer.clone();
 
-        let err_fn = |err| eprintln!("audio input error: {err}");
+        let err_fn = |err| tracing::error!("audio input error: {err}");
 
         let stream = match sample_format {
             cpal::SampleFormat::I16 => device.build_input_stream(
@@ -89,6 +99,7 @@ impl AudioIn {
                 err_fn,
                 None,
             )?,
+            _ => return Err(anyhow!("unsupported input sample format")),
         };
 
         stream.play()?;
@@ -119,12 +130,19 @@ pub struct AudioOut {
 
 impl AudioOut {
     pub fn new(config: &AudioConfig) -> Result<Self> {
-        let host = cpal::default_host();
-        let device = host
-            .default_output_device()
-            .ok_or_else(|| anyhow!("no default output device"))?;
+        Self::new_with_device(config, None)
+    }
 
-        let mut supported_config = device.default_output_config()?;
+    pub fn new_with_device(config: &AudioConfig, device_name: Option<&str>) -> Result<Self> {
+        let host = cpal::default_host();
+        let device = if let Some(name) = device_name {
+            find_output_device(&host, name)?
+        } else {
+            host.default_output_device()
+                .ok_or_else(|| anyhow!("no default output device"))?
+        };
+
+        let supported_config = device.default_output_config()?;
         let sample_format = supported_config.sample_format();
         let mut stream_config: cpal::StreamConfig = supported_config.into();
         stream_config.channels = config.channels;
@@ -135,7 +153,7 @@ impl AudioOut {
         let frame_samples = config.frame_samples();
         let channels = config.channels;
 
-        let err_fn = |err| eprintln!("audio output error: {err}");
+        let err_fn = |err| tracing::error!("audio output error: {err}");
 
         let stream = match sample_format {
             cpal::SampleFormat::I16 => device.build_output_stream(
@@ -162,6 +180,7 @@ impl AudioOut {
                 err_fn,
                 None,
             )?,
+            _ => return Err(anyhow!("unsupported output sample format")),
         };
 
         stream.play()?;
@@ -188,6 +207,28 @@ impl AudioOut {
     pub fn channels(&self) -> u16 {
         self.channels
     }
+}
+
+fn find_input_device(host: &cpal::Host, name: &str) -> Result<cpal::Device> {
+    for device in host.input_devices()? {
+        if let Ok(dev_name) = device.name() {
+            if dev_name == name {
+                return Ok(device);
+            }
+        }
+    }
+    Err(anyhow!("input device not found: {}", name))
+}
+
+fn find_output_device(host: &cpal::Host, name: &str) -> Result<cpal::Device> {
+    for device in host.output_devices()? {
+        if let Ok(dev_name) = device.name() {
+            if dev_name == name {
+                return Ok(device);
+            }
+        }
+    }
+    Err(anyhow!("output device not found: {}", name))
 }
 
 fn audio_out_callback_i16(data: &mut [i16], queue: &Arc<Mutex<VecDeque<i16>>>) {
@@ -275,20 +316,34 @@ pub struct VoiceFrame {
 
 pub struct AudioMixer {
     frame_samples: usize,
-    streams: HashMap<u64, VecDeque<Vec<i16>>>,
+    prebuffer_frames: usize,
+    streams: HashMap<u64, StreamState>,
+}
+
+struct StreamState {
+    queue: VecDeque<Vec<i16>>,
+    prebuffer: usize,
 }
 
 impl AudioMixer {
     pub fn new(frame_samples: usize) -> Self {
+        Self::with_prebuffer(frame_samples, 0)
+    }
+
+    pub fn with_prebuffer(frame_samples: usize, prebuffer_frames: usize) -> Self {
         Self {
             frame_samples,
+            prebuffer_frames,
             streams: HashMap::new(),
         }
     }
 
     pub fn push(&mut self, stream_id: u64, frame: Vec<i16>) {
-        let entry = self.streams.entry(stream_id).or_default();
-        entry.push_back(frame);
+        let entry = self.streams.entry(stream_id).or_insert_with(|| StreamState {
+            queue: VecDeque::new(),
+            prebuffer: self.prebuffer_frames,
+        });
+        entry.queue.push_back(frame);
     }
 
     pub fn mix_next(&mut self) -> Vec<i16> {
@@ -297,12 +352,22 @@ impl AudioMixer {
 
         let mut remove = Vec::new();
         for (id, queue) in self.streams.iter_mut() {
-            if let Some(frame) = queue.pop_front() {
+            if queue.prebuffer > 0 {
+                if queue.queue.len() >= queue.prebuffer {
+                    queue.prebuffer = 0;
+                } else {
+                    continue;
+                }
+            }
+
+            if let Some(frame) = queue.queue.pop_front() {
                 active += 1;
                 for (i, sample) in frame.iter().enumerate() {
                     mix[i] += *sample as i32;
                 }
-            } else if queue.is_empty() {
+            }
+
+            if queue.queue.is_empty() && queue.prebuffer == 0 {
                 remove.push(*id);
             }
         }

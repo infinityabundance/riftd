@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use std::time::Duration;
 
@@ -47,7 +47,7 @@ pub async fn attempt_hole_punch(
 
     let mut sockets = Vec::new();
     for port in ports {
-        if let Ok(socket) = UdpSocket::bind(([0, 0, 0, 0], port)).await {
+        if let Ok(socket) = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, port)).await {
             sockets.push(socket);
         }
     }

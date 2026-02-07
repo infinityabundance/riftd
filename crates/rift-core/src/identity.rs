@@ -7,7 +7,7 @@ use rand::rngs::OsRng;
 
 use crate::{CoreError, PeerId};
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Identity {
     pub keypair: Keypair,
     pub peer_id: PeerId,
