@@ -9,6 +9,7 @@ This document describes how the repository is organized and how the major pieces
 - `crates/rift-nat`: UDP hole punching for NAT traversal.
 - `crates/rift-mesh`: mesh routing, relays, call/session handling.
 - `crates/rift-media`: audio capture/playback, Opus encode/decode, mixing.
+- `crates/rift-sdk`: high-level SDK (Rust API + C FFI).
 
 ## Key Concepts
 - **PeerId**: stable identity for a peer. Generated once and stored locally.
@@ -86,6 +87,15 @@ Terminal UI:
 Where to start:
 - `bin/rift/src/main.rs`
 - `bin/rift/src/config.rs`
+
+### `rift-sdk`
+SDK layer:
+- High-level Rust API for joining channels, calls, chat, and events.
+- C FFI bindings + `rift.h` header.
+
+Where to start:
+- `crates/rift-sdk/src/lib.rs`
+- `crates/rift-sdk/src/ffi.rs`
 
 ## Data Flow Overview
 1. **Discovery**

@@ -1,10 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::path::PathBuf;
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
-};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -19,14 +16,11 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 use tokio::sync::mpsc;
-use tokio::task::LocalSet;
 use tokio::time::Instant;
+use tokio::task::LocalSet;
 
 use rift_core::{decode_invite, encode_invite, generate_invite, Identity};
-use rift_media::{AudioConfig, AudioIn, AudioMixer, AudioOut, OpusDecoder, OpusEncoder};
-use rift_mesh::{Mesh, MeshConfig, MeshEvent, PeerRoute};
-use rift_nat::NatConfig;
-use rift_protocol::SessionId;
+use rift_sdk::{AudioConfigSdk, NetworkConfigSdk, RiftConfig, RiftEvent, RiftHandle, RiftSessionId};
 
 mod config;
 use config::UserConfig;
@@ -255,30 +249,22 @@ async fn cmd_create(
     relay: bool,
     startup: StartupAction,
 ) -> Result<()> {
-    let identity = Identity::load(None).context("identity not found, run init-identity first")?;
     let user_cfg = UserConfig::load()?;
     let relay_enabled = relay || user_cfg.network.relay.unwrap_or(false);
-
-    let config = MeshConfig {
-        channel_name: channel.clone(),
-        password: password.clone(),
-        listen_port: port,
-        relay_capable: relay_enabled,
-    };
-
-    let mut mesh = Mesh::new(identity, config).await?;
 
     if internet {
         let invite = generate_invite(&channel, password.as_deref(), Vec::new());
         let invite_str = encode_invite(&invite);
         save_invite_string(&channel, &invite_str)?;
-        let nat_cfg = default_nat_config(port, user_cfg.network.local_ports.clone());
-        mesh.enable_nat(nat_cfg).await;
-    } else {
-        mesh.start_lan_discovery()?;
     }
 
-    run_tui(mesh, voice, user_cfg, channel, startup).await
+    let config = build_sdk_config(&user_cfg, port, relay_enabled, voice, None);
+    let handle = RiftHandle::new(config).await?;
+    handle
+        .join_channel(&channel, password.as_deref(), internet)
+        .await?;
+
+    run_tui(handle, user_cfg, channel, password, startup).await
 }
 
 async fn cmd_invite(channel: String) -> Result<()> {
@@ -296,23 +282,19 @@ async fn cmd_join(
     startup: StartupAction,
 ) -> Result<()> {
     let invite = decode_invite(&invite_str)?;
-    let identity = Identity::load(None).context("identity not found, run init-identity first")?;
     let user_cfg = UserConfig::load()?;
     let relay_enabled = relay || user_cfg.network.relay.unwrap_or(false);
     let channel_name = invite.channel_name.clone();
+    let password = invite.password.clone();
 
-    let config = MeshConfig {
-        channel_name: invite.channel_name.clone(),
-        password: invite.password.clone(),
-        listen_port: port,
-        relay_capable: relay_enabled,
-    };
+    let config = build_sdk_config(&user_cfg, port, relay_enabled, voice, Some(invite_str));
 
-    let mut mesh = Mesh::new(identity, config).await?;
-    let nat_cfg = default_nat_config(port, user_cfg.network.local_ports.clone());
-    mesh.join_invite(invite, nat_cfg).await?;
+    let handle = RiftHandle::new(config).await?;
+    handle
+        .join_channel(&channel_name, password.as_deref(), true)
+        .await?;
 
-    run_tui(mesh, voice, user_cfg, channel_name, startup).await
+    run_tui(handle, user_cfg, channel_name, password, startup).await
 }
 
 #[derive(Debug, Clone)]
@@ -325,7 +307,6 @@ struct ChatLine {
 #[derive(Debug, Clone)]
 struct PeerEntry {
     display: String,
-    route: Option<PeerRoute>,
     last_voice: Option<Instant>,
 }
 
@@ -333,17 +314,16 @@ struct PeerEntry {
 enum UiEvent {
     Input(KeyEvent),
     Tick,
-    Mesh(MeshEvent),
-    TxPulse,
+    Sdk(RiftEvent),
 }
 
 #[derive(Debug)]
 enum UiAction {
     SendChat(String),
     StartCall(rift_core::PeerId),
-    AcceptCall(SessionId),
-    DeclineCall(SessionId, Option<String>),
-    EndCall(SessionId),
+    AcceptCall(RiftSessionId),
+    DeclineCall(RiftSessionId, Option<String>),
+    EndCall(RiftSessionId),
     ToggleMute,
 }
 
@@ -351,8 +331,8 @@ enum UiAction {
 enum StartupAction {
     None,
     Call { peer: String },
-    Accept { session: SessionId },
-    Decline { session: SessionId, reason: Option<String> },
+    Accept { session: RiftSessionId },
+    Decline { session: RiftSessionId, reason: Option<String> },
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -417,14 +397,13 @@ struct UiState {
     focus: Focus,
     local_peer_id: rift_core::PeerId,
     local_display: String,
-    channel_session: SessionId,
-    active_session: SessionId,
-    incoming_call: Option<(SessionId, rift_core::PeerId)>,
+    channel_session: RiftSessionId,
+    active_session: RiftSessionId,
+    incoming_call: Option<(RiftSessionId, rift_core::PeerId)>,
     active_call_peer: Option<rift_core::PeerId>,
-    pending_call: Option<(SessionId, rift_core::PeerId)>,
+    pending_call: Option<(RiftSessionId, rift_core::PeerId)>,
     muted: bool,
     peers: HashMap<rift_core::PeerId, PeerEntry>,
-    routes: HashMap<rift_core::PeerId, PeerRoute>,
     chat: VecDeque<ChatLine>,
     mic_active: bool,
     ptt_enabled: bool,
@@ -456,7 +435,7 @@ impl UiState {
         theme: String,
         prefer_p2p: bool,
         local_peer_id: rift_core::PeerId,
-        channel_session: SessionId,
+        channel_session: RiftSessionId,
     ) -> Self {
         Self {
             channel,
@@ -471,7 +450,6 @@ impl UiState {
             pending_call: None,
             muted: false,
             peers: HashMap::new(),
-            routes: HashMap::new(),
             chat: VecDeque::with_capacity(200),
             mic_active: false,
             ptt_enabled,
@@ -498,20 +476,12 @@ impl UiState {
         self.chat.push_back(line);
     }
 
-    fn update_route(&mut self, peer_id: rift_core::PeerId, route: PeerRoute) {
-        self.routes.insert(peer_id, route.clone());
-        if let Some(peer) = self.peers.get_mut(&peer_id) {
-            peer.route = Some(route);
-        }
-    }
-
     fn update_peer_voice(&mut self, peer_id: rift_core::PeerId) {
         let entry = self
             .peers
             .entry(peer_id)
             .or_insert_with(|| PeerEntry {
                 display: short_peer(&peer_id),
-                route: None,
                 last_voice: None,
             });
         entry.last_voice = Some(Instant::now());
@@ -519,32 +489,28 @@ impl UiState {
 }
 
 async fn run_tui(
-    mesh: Mesh,
-    voice: bool,
+    handle: RiftHandle,
     user_cfg: UserConfig,
     channel: String,
+    password: Option<String>,
     startup: StartupAction,
 ) -> Result<()> {
     let local = LocalSet::new();
     local
-        .run_until(run_tui_inner(mesh, voice, user_cfg, channel, startup))
+        .run_until(run_tui_inner(handle, user_cfg, channel, password, startup))
         .await
 }
 
 async fn run_tui_inner(
-    mesh: Mesh,
-    voice: bool,
+    handle: RiftHandle,
     user_cfg: UserConfig,
     channel: String,
+    password: Option<String>,
     startup: StartupAction,
 ) -> Result<()> {
     let audio_quality = user_cfg.audio.quality.clone().unwrap_or_else(|| "medium".to_string());
     let ptt_enabled = user_cfg.audio.ptt.unwrap_or(false);
     let ptt_key = PttKey::from_config(user_cfg.audio.ptt_key.as_deref());
-    let vad_enabled = user_cfg.audio.vad.unwrap_or(true);
-    let input_device = user_cfg.audio.input_device.clone();
-    let output_device = user_cfg.audio.output_device.clone();
-    let mute_output = user_cfg.audio.mute_output.unwrap_or(false);
     let user_name = user_cfg
         .user
         .name
@@ -556,128 +522,9 @@ async fn run_tui_inner(
     // tx/rx pulse timestamps tracked in UiState
 
     let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
-    let (chat_tx, mut chat_rx) = mpsc::unbounded_channel::<String>();
-
-    let (_audio_in, mut audio_rx, mut opus_enc, opus_dec, audio_out, mixer, audio_config) = if voice {
-        let mut audio_config = AudioConfig::default();
-        audio_config.bitrate = map_quality_to_bitrate(Some(&audio_quality));
-        let (audio_in, audio_rx) =
-            AudioIn::new_with_device(&audio_config, input_device.as_deref())?;
-        let opus_enc = OpusEncoder::new(&audio_config)?;
-        let opus_dec = OpusDecoder::new(&audio_config)?;
-        let audio_out = if mute_output {
-            None
-        } else {
-            Some(AudioOut::new_with_device(
-                &audio_config,
-                output_device.as_deref(),
-            )?)
-        };
-        let mixer = Arc::new(Mutex::new(AudioMixer::with_prebuffer(
-            audio_config.frame_samples(),
-            8,
-        )));
-        (
-            Some(audio_in),
-            Some(audio_rx),
-            Some(opus_enc),
-            Some(opus_dec),
-            audio_out,
-            Some(mixer),
-            audio_config,
-        )
-    } else {
-        (None, None, None, None, None, None, AudioConfig::default())
-    };
-
-    let ptt_active = Arc::new(AtomicBool::new(!ptt_enabled));
-    let mute_active = Arc::new(AtomicBool::new(false));
-    if voice {
-        let mesh_handle = mesh.handle();
-        let mut encoder = opus_enc.take().unwrap();
-        let mut audio_rx = audio_rx.take().unwrap();
-        let ptt_active = ptt_active.clone();
-        let mute_active = mute_active.clone();
-        let ptt_enabled = ptt_enabled;
-        let ui_tx_voice = ui_tx.clone();
-        let frame_duration = audio_config.frame_duration();
-        tokio::spawn(async move {
-            let mut seq: u32 = 0;
-            let mut hangover: u8 = 0;
-            while let Some(frame) = audio_rx.recv().await {
-                if ptt_enabled && !ptt_active.load(Ordering::Relaxed) {
-                    continue;
-                }
-                if mute_active.load(Ordering::Relaxed) {
-                    continue;
-                }
-                if !ptt_enabled && vad_enabled {
-                    let active = is_frame_active(&frame);
-                    if active {
-                        hangover = 4;
-                    } else if hangover > 0 {
-                        hangover -= 1;
-                    }
-                    if !active && hangover == 0 {
-                        continue;
-                    }
-                }
-                if frame_duration > Duration::from_millis(20) {
-                    tokio::time::sleep(frame_duration - Duration::from_millis(20)).await;
-                }
-                let mut out = vec![0u8; 4000];
-                let len = match encoder.encode_i16(&frame, &mut out) {
-                    Ok(len) => len,
-                    Err(err) => {
-                        tracing::debug!("opus encode error: {err}");
-                        continue;
-                    }
-                };
-                out.truncate(len);
-                let timestamp = now_timestamp();
-                if let Err(err) = mesh_handle.broadcast_voice(seq, timestamp, out).await {
-                    tracing::debug!("voice send error: {err}");
-                } else {
-                    let _ = ui_tx_voice.send(UiEvent::TxPulse);
-                }
-                seq = seq.wrapping_add(1);
-            }
-        });
-
-        if let Some(audio_out) = audio_out {
-            let mixer = mixer.clone().unwrap();
-            let frame_samples = audio_out.frame_samples();
-            let frame_duration = audio_config.frame_duration();
-            let target_frames = 6usize;
-            let mut last_frame = vec![0i16; frame_samples];
-            let mut last_active = Instant::now() - Duration::from_secs(1);
-            tokio::task::spawn_local(async move {
-                let mut tick = tokio::time::interval(frame_duration);
-                loop {
-                    tick.tick().await;
-                    while audio_out.queued_samples() < target_frames * frame_samples {
-                        let (frame, active) = {
-                            let mut mixer = mixer.lock().unwrap();
-                            mixer.mix_next_with_activity()
-                        };
-                        let out_frame = if active {
-                            last_active = Instant::now();
-                            last_frame.clone_from(&frame);
-                            frame
-                        } else if last_active.elapsed() <= Duration::from_millis(300) {
-                            last_frame.clone()
-                        } else {
-                            frame
-                        };
-                        if out_frame.len() == frame_samples {
-                            audio_out.push_frame(&out_frame);
-                        } else {
-                            break;
-                        }
-                    }
-                }
-            });
-        }
+    let handle = Arc::new(handle);
+    if ptt_enabled {
+        handle.set_ptt_active(false);
     }
 
     let ui_tx_clone = ui_tx.clone();
@@ -693,25 +540,14 @@ async fn run_tui_inner(
         let _ = ui_tx_clone.send(UiEvent::Tick);
     });
 
-    let local_peer_id = mesh.local_peer_id();
-    let channel_session = mesh.active_session().await;
-    let ui_tx_mesh = ui_tx.clone();
-    let chat_handle = mesh.handle();
-    let mesh_handle = mesh.handle();
-    tokio::spawn(async move {
-        let mut mesh = mesh;
+    let local_peer_id = handle.local_peer_id();
+    let channel_session = RiftSessionId::from_channel(&channel, password.as_deref());
+    let ui_tx_sdk = ui_tx.clone();
+    let handle_events = handle.clone();
+    tokio::task::spawn_local(async move {
         loop {
-            if let Some(event) = mesh.next_event().await {
-                let _ = ui_tx_mesh.send(UiEvent::Mesh(event));
-            } else {
-                break;
-            }
-        }
-    });
-    tokio::spawn(async move {
-        while let Some(text) = chat_rx.recv().await {
-            if let Err(err) = chat_handle.broadcast_chat(text).await {
-                tracing::debug!("chat send error: {err}");
+            if let Some(event) = handle_events.next_event().await {
+                let _ = ui_tx_sdk.send(UiEvent::Sdk(event));
             }
         }
     });
@@ -733,9 +569,6 @@ async fn run_tui_inner(
         local_peer_id,
         channel_session,
     );
-    let mut decoder = opus_dec;
-    let mixer = mixer;
-    let frame_samples = audio_config.frame_samples();
     let mut startup = startup;
 
     let mut should_quit = false;
@@ -749,11 +582,10 @@ async fn run_tui_inner(
                         if let Some(action) = handle_key_event(
                             key,
                             &mut state,
-                            ptt_active.clone(),
+                            handle.as_ref(),
                             &mut should_quit,
                         )? {
-                            apply_action(action, &mut state, &chat_tx, &mesh_handle, &mute_active)
-                                .await;
+                            apply_action(action, &mut state, handle.as_ref()).await;
                         }
                     }
                     UiEvent::Tick => {
@@ -761,7 +593,7 @@ async fn run_tui_inner(
                             if let Some(last) = state.ptt_last_signal {
                                 if last.elapsed() > Duration::from_millis(400) {
                                     state.mic_active = false;
-                                    ptt_active.store(false, Ordering::Relaxed);
+                                    handle.set_ptt_active(false);
                                 }
                             }
                         }
@@ -776,61 +608,48 @@ async fn run_tui_inner(
                             }
                         }
                     }
-                    UiEvent::Mesh(event) => {
+                    UiEvent::Sdk(event) => {
                         match event {
-                            MeshEvent::PeerJoined(peer_id) => {
+                            RiftEvent::PeerJoinedChannel { peer, .. } => {
+                                let peer_id = peer;
                                 state.peers.entry(peer_id).or_insert(PeerEntry {
                                     display: short_peer(&peer_id),
-                                    route: state.routes.get(&peer_id).cloned(),
                                     last_voice: None,
                                 });
                                 state.last_rx = Some(Instant::now());
                             }
-                            MeshEvent::PeerLeft(peer_id) => {
+                            RiftEvent::PeerLeftChannel { peer, .. } => {
+                                let peer_id = peer;
                                 state.peers.remove(&peer_id);
-                                state.routes.remove(&peer_id);
                                 state.last_rx = Some(Instant::now());
                             }
-                            MeshEvent::ChatReceived(chat) => {
+                            RiftEvent::IncomingChat(chat) => {
                                 state.add_chat_line(short_peer(&chat.from), chat.text);
                                 state.last_rx = Some(Instant::now());
                             }
-                            MeshEvent::VoiceFrame { from, payload, .. } => {
-                                if let (Some(decoder), Some(mixer)) = (decoder.as_mut(), mixer.as_ref()) {
-                                    let mut out = vec![0i16; frame_samples];
-                                    match decoder.decode_i16(&payload, &mut out) {
-                                        Ok(len) => {
-                                            out.truncate(len);
-                                            let stream_id = peer_to_stream_id(&from);
-                                            let mut mixer = mixer.lock().unwrap();
-                                            mixer.push(stream_id, out.clone());
-                                            if is_frame_active(&out) {
-                                                state.update_peer_voice(from);
-                                            }
-                                            state.last_rx = Some(Instant::now());
-                                        }
-                                        Err(err) => {
-                                            tracing::debug!("opus decode error: {err}");
-                                        }
-                                    }
+                            RiftEvent::AudioLevel { peer, level } => {
+                                if level > 0.02 {
+                                    state.update_peer_voice(peer);
                                 }
+                                state.last_rx = Some(Instant::now());
                             }
-                            MeshEvent::IncomingCall { session, from } => {
+                            RiftEvent::VoiceFrame { .. } => {}
+                            RiftEvent::IncomingCall { session, from } => {
                                 state.incoming_call = Some((session, from));
                                 state.last_rx = Some(Instant::now());
                             }
-                            MeshEvent::CallAccepted { session, from } => {
+                            RiftEvent::CallStateChanged { session, state: rift_sdk::RiftCallState::Active } => {
                                 state.active_session = session;
                                 state.pending_call = None;
-                                state.active_call_peer = Some(from);
-                                if let Some((incoming, _)) = state.incoming_call {
+                                if let Some((incoming, from)) = state.incoming_call {
                                     if incoming == session {
+                                        state.active_call_peer = Some(from);
                                         state.incoming_call = None;
                                     }
                                 }
                                 state.last_rx = Some(Instant::now());
                             }
-                            MeshEvent::CallDeclined { session, from: _, reason: _ } => {
+                            RiftEvent::CallStateChanged { session, state: rift_sdk::RiftCallState::Ended } => {
                                 if let Some((pending, _)) = state.pending_call {
                                     if pending == session {
                                         state.pending_call = None;
@@ -842,23 +661,8 @@ async fn run_tui_inner(
                                 }
                                 state.last_rx = Some(Instant::now());
                             }
-                            MeshEvent::CallEnded { session } => {
-                                if state.active_session == session {
-                                    state.active_session = state.channel_session;
-                                    state.active_call_peer = None;
-                                }
-                                state.last_rx = Some(Instant::now());
-                            }
-                            MeshEvent::RouteUpdated { peer_id, route } => {
-                                state.update_route(peer_id, route);
-                            }
-                            MeshEvent::RouteUpgraded(peer_id) => {
-                                tracing::info!(peer = %peer_id, "route upgraded to direct");
-                            }
+                            RiftEvent::CallStateChanged { .. } => {}
                         }
-                    }
-                    UiEvent::TxPulse => {
-                        state.last_tx = Some(Instant::now());
                     }
                 }
             }
@@ -868,7 +672,7 @@ async fn run_tui_inner(
         }
 
         if let Some(action) = take_startup_action(&mut startup, &state) {
-            apply_action(action, &mut state, &chat_tx, &mesh_handle, &mute_active).await;
+            apply_action(action, &mut state, handle.as_ref()).await;
         }
     }
 
@@ -882,7 +686,7 @@ async fn run_tui_inner(
 fn handle_key_event(
     key: KeyEvent,
     state: &mut UiState,
-    ptt_active: Arc<AtomicBool>,
+    handle: &RiftHandle,
     should_quit: &mut bool,
 ) -> Result<Option<UiAction>> {
     if state.ptt_enabled {
@@ -914,12 +718,12 @@ fn handle_key_event(
             match key.kind {
                 KeyEventKind::Press | KeyEventKind::Repeat => {
                     state.mic_active = true;
-                    ptt_active.store(true, Ordering::Relaxed);
+                    handle.set_ptt_active(true);
                     state.ptt_last_signal = Some(Instant::now());
                 }
                 KeyEventKind::Release => {
                     state.mic_active = false;
-                    ptt_active.store(false, Ordering::Relaxed);
+                    handle.set_ptt_active(false);
                     state.ptt_last_signal = None;
                 }
             }
@@ -996,18 +800,18 @@ fn handle_key_event(
 async fn apply_action(
     action: UiAction,
     state: &mut UiState,
-    chat_tx: &mpsc::UnboundedSender<String>,
-    mesh_handle: &rift_mesh::MeshHandle,
-    mute_active: &Arc<AtomicBool>,
+    handle: &RiftHandle,
 ) {
     match action {
         UiAction::SendChat(text) => {
             state.add_chat_line(state.user_name.clone(), text.clone());
-            let _ = chat_tx.send(text);
+            if let Err(err) = handle.send_chat(&text).await {
+                tracing::debug!("chat send error: {err}");
+            }
             state.last_tx = Some(Instant::now());
         }
         UiAction::StartCall(peer_id) => {
-            if let Ok(session) = mesh_handle.start_call(peer_id).await {
+            if let Ok(session) = handle.start_call(peer_id).await {
                 state.active_call_peer = Some(peer_id);
                 state.incoming_call = None;
                 state.pending_call = Some((session, peer_id));
@@ -1015,7 +819,7 @@ async fn apply_action(
             }
         }
         UiAction::AcceptCall(session) => {
-            if let Err(err) = mesh_handle.accept_call(session).await {
+            if let Err(err) = handle.accept_call(session).await {
                 tracing::debug!("accept call error: {err}");
             } else {
                 if let Some((incoming, from)) = state.incoming_call {
@@ -1030,7 +834,7 @@ async fn apply_action(
             }
         }
         UiAction::DeclineCall(session, reason) => {
-            if let Err(err) = mesh_handle.decline_call(session, reason).await {
+            if let Err(err) = handle.decline_call(session, reason.as_deref()).await {
                 tracing::debug!("decline call error: {err}");
             } else {
                 state.incoming_call = None;
@@ -1047,7 +851,7 @@ async fn apply_action(
             }
         }
         UiAction::EndCall(session) => {
-            if let Err(err) = mesh_handle.end_call(session).await {
+            if let Err(err) = handle.end_call(session).await {
                 tracing::debug!("end call error: {err}");
             } else if state.active_session == session {
                 state.active_session = state.channel_session;
@@ -1057,7 +861,7 @@ async fn apply_action(
         }
         UiAction::ToggleMute => {
             state.muted = !state.muted;
-            mute_active.store(state.muted, Ordering::Relaxed);
+            handle.set_mute(state.muted);
         }
     }
 }
@@ -1321,12 +1125,6 @@ fn now_timestamp() -> u64 {
         .unwrap_or(0)
 }
 
-fn peer_to_stream_id(peer: &rift_core::PeerId) -> u64 {
-    let mut bytes = [0u8; 8];
-    bytes.copy_from_slice(&peer.0[..8]);
-    u64::from_le_bytes(bytes)
-}
-
 fn invite_path(channel: &str) -> Result<PathBuf> {
     let base = dirs::config_dir().context("config directory not found")?;
     Ok(base.join("rift").join("invites").join(format!("{channel}.txt")))
@@ -1347,14 +1145,35 @@ fn load_invite_string(channel: &str) -> Result<String> {
     Ok(content)
 }
 
-fn default_nat_config(port: u16, ports: Option<Vec<u16>>) -> NatConfig {
-    let mut local_ports = ports.unwrap_or_default();
-    if local_ports.is_empty() {
-        local_ports.push(port);
-        local_ports.push(port.saturating_add(1));
-        local_ports.push(port.saturating_add(2));
+fn build_sdk_config(
+    user_cfg: &UserConfig,
+    port: u16,
+    relay: bool,
+    voice: bool,
+    invite: Option<String>,
+) -> RiftConfig {
+    RiftConfig {
+        identity_path: None,
+        listen_port: port,
+        relay,
+        user_name: user_cfg.user.name.clone(),
+        audio: AudioConfigSdk {
+            enabled: voice,
+            input_device: user_cfg.audio.input_device.clone(),
+            output_device: user_cfg.audio.output_device.clone(),
+            quality: user_cfg.audio.quality.clone().unwrap_or_else(|| "medium".to_string()),
+            ptt: user_cfg.audio.ptt.unwrap_or(false),
+            vad: user_cfg.audio.vad.unwrap_or(true),
+            mute_output: user_cfg.audio.mute_output.unwrap_or(false),
+            emit_voice_frames: false,
+        },
+        network: NetworkConfigSdk {
+            prefer_p2p: user_cfg.network.prefer_p2p.unwrap_or(true),
+            local_ports: user_cfg.network.local_ports.clone(),
+            known_peers: Vec::new(),
+            invite,
+        },
     }
-    NatConfig { local_ports }
 }
 
 fn short_peer(peer: &rift_core::PeerId) -> String {
@@ -1363,7 +1182,7 @@ fn short_peer(peer: &rift_core::PeerId) -> String {
     short.to_string()
 }
 
-fn parse_session_id(input: &str) -> Result<SessionId> {
+fn parse_session_id(input: &str) -> Result<RiftSessionId> {
     let trimmed = input.trim().trim_start_matches("0x");
     let bytes = hex::decode(trimmed).context("invalid session hex")?;
     if bytes.len() != 32 {
@@ -1371,7 +1190,7 @@ fn parse_session_id(input: &str) -> Result<SessionId> {
     }
     let mut raw = [0u8; 32];
     raw.copy_from_slice(&bytes);
-    Ok(SessionId(raw))
+    Ok(RiftSessionId(raw))
 }
 
 fn resolve_peer_input(state: &UiState, input: &str) -> Option<rift_core::PeerId> {
@@ -1390,23 +1209,6 @@ fn resolve_peer_input(state: &UiState, input: &str) -> Option<rift_core::PeerId>
         }
     }
     None
-}
-
-fn is_frame_active(frame: &[i16]) -> bool {
-    let mut sum = 0i64;
-    for s in frame {
-        sum += (*s as i64).abs();
-    }
-    let avg = sum / frame.len().max(1) as i64;
-    avg > 250
-}
-
-fn map_quality_to_bitrate(quality: Option<&str>) -> u32 {
-    match quality.unwrap_or("medium") {
-        "low" => 24_000,
-        "high" => 96_000,
-        _ => 48_000,
-    }
 }
 
 fn format_time(ts: u64) -> String {
