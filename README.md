@@ -101,6 +101,7 @@ theme = "dark"
 - `rift-mesh`: mesh routing, relay, call/session handling.
 - `rift-media`: audio capture/playback and Opus codec.
 - `bin/rift`: TUI client.
+- `rift-sdk`: high-level SDK for embedding Rift (Rust + C FFI).
 
 ## Docs
 - `CODE.md`: high-level code map.
