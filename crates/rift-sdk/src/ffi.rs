@@ -321,7 +321,11 @@ pub extern "C" fn rift_next_event(handle: *mut RiftHandleC, out_event: *mut Rift
             (*out_event).peer = peer_to_c(peer);
             (*out_event).level = level;
         },
-        RiftEvent::VoiceFrame { .. } => {}
+        RiftEvent::CodecSelected { .. }
+        | RiftEvent::PeerCapabilities { .. }
+        | RiftEvent::AudioBitrate { .. }
+        | RiftEvent::LinkStatsUpdated { .. }
+        | RiftEvent::VoiceFrame { .. } => {}
     }
     1
 }

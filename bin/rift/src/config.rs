@@ -29,6 +29,13 @@ use serde::Deserialize;
 // [dht]
 // enabled = false
 // bootstrap_nodes = ["1.2.3.4:4001"]
+//
+// [qos]
+// target_latency_ms = 50
+// max_latency_ms = 200
+// min_bitrate = 16000
+// max_bitrate = 96000
+// packet_loss_tolerance = 0.08
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct UserConfig {
@@ -40,6 +47,8 @@ pub struct UserConfig {
     pub network: NetworkSection,
     #[serde(default)]
     pub dht: DhtSection,
+    #[serde(default)]
+    pub qos: QosSection,
     #[serde(default)]
     pub ui: UiSection,
 }
@@ -97,6 +106,27 @@ pub struct UiSection {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct QosSection {
+    pub target_latency_ms: Option<u32>,
+    pub max_latency_ms: Option<u32>,
+    pub min_bitrate: Option<u32>,
+    pub max_bitrate: Option<u32>,
+    pub packet_loss_tolerance: Option<f32>,
+}
+
+impl Default for QosSection {
+    fn default() -> Self {
+        Self {
+            target_latency_ms: Some(50),
+            max_latency_ms: Some(200),
+            min_bitrate: Some(16_000),
+            max_bitrate: Some(96_000),
+            packet_loss_tolerance: Some(0.08),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct DhtSection {
     pub enabled: Option<bool>,
     pub bootstrap_nodes: Option<Vec<String>>,
@@ -115,6 +145,18 @@ impl Default for UiSection {
     fn default() -> Self {
         Self {
             theme: Some("dark".to_string()),
+        }
+    }
+}
+
+impl QosSection {
+    pub fn to_profile(&self) -> rift_sdk::RiftQosProfile {
+        rift_sdk::RiftQosProfile {
+            target_latency_ms: self.target_latency_ms.unwrap_or(50),
+            max_latency_ms: self.max_latency_ms.unwrap_or(200),
+            min_bitrate: self.min_bitrate.unwrap_or(16_000),
+            max_bitrate: self.max_bitrate.unwrap_or(96_000),
+            packet_loss_tolerance: self.packet_loss_tolerance.unwrap_or(0.08),
         }
     }
 }

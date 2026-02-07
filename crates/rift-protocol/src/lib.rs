@@ -175,6 +175,8 @@ pub enum ControlMessage {
     Leave { peer_id: PeerId },
     PeerState { peer_id: PeerId, relay_capable: bool },
     Chat(ChatMessage),
+    Ping { nonce: u64, sent_at_ms: u64 },
+    Pong { nonce: u64, sent_at_ms: u64 },
     RouteInfo { from: PeerId, to: PeerId, relayed: bool },
     Capabilities(Capabilities),
     CapabilitiesUpdate(Capabilities),
@@ -193,6 +195,27 @@ pub struct PeerInfo {
 pub struct VoicePacket {
     pub codec_id: CodecId,
     pub payload: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QosProfile {
+    pub target_latency_ms: u32,
+    pub max_latency_ms: u32,
+    pub min_bitrate: u32,
+    pub max_bitrate: u32,
+    pub packet_loss_tolerance: f32,
+}
+
+impl Default for QosProfile {
+    fn default() -> Self {
+        Self {
+            target_latency_ms: 50,
+            max_latency_ms: 200,
+            min_bitrate: 16_000,
+            max_bitrate: 96_000,
+            packet_loss_tolerance: 0.08,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
