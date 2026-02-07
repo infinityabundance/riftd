@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use rift_protocol::CodecId;
 
 #[derive(Debug, Clone)]
 pub struct AudioConfig {
@@ -32,6 +33,49 @@ impl AudioConfig {
 
     pub fn frame_duration(&self) -> Duration {
         Duration::from_millis(self.frame_duration_ms as u64)
+    }
+}
+
+pub fn encode_frame(codec: CodecId, frame: &[i16], encoder: &mut OpusEncoder) -> Result<Vec<u8>> {
+    match codec {
+        CodecId::Opus => {
+            let mut out = vec![0u8; 4000];
+            let len = encoder.encode_i16(frame, &mut out)?;
+            out.truncate(len);
+            Ok(out)
+        }
+        CodecId::PCM16 => {
+            let mut out = Vec::with_capacity(frame.len() * 2);
+            for sample in frame {
+                out.extend_from_slice(&sample.to_le_bytes());
+            }
+            Ok(out)
+        }
+        CodecId::Experimental(_) => Err(anyhow!("unsupported codec")),
+    }
+}
+
+pub fn decode_frame(
+    codec: CodecId,
+    payload: &[u8],
+    decoder: &mut OpusDecoder,
+    frame_samples: usize,
+) -> Result<Vec<i16>> {
+    match codec {
+        CodecId::Opus => {
+            let mut out = vec![0i16; frame_samples];
+            let len = decoder.decode_i16(payload, &mut out)?;
+            out.truncate(len);
+            Ok(out)
+        }
+        CodecId::PCM16 => {
+            let mut out = Vec::with_capacity(payload.len() / 2);
+            for chunk in payload.chunks_exact(2) {
+                out.push(i16::from_le_bytes([chunk[0], chunk[1]]));
+            }
+            Ok(out)
+        }
+        CodecId::Experimental(_) => Err(anyhow!("unsupported codec")),
     }
 }
 

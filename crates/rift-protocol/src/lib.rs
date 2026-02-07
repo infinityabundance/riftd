@@ -48,6 +48,22 @@ pub enum StreamKind {
     Custom(u16),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CodecId {
+    Opus,
+    PCM16,
+    Experimental(u16),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FeatureFlag {
+    Voice,
+    Text,
+    Relay,
+    ScreenShare,
+    DataChannel,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SessionId(pub [u8; 32]);
 
@@ -112,8 +128,11 @@ impl ChatMessage {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Capabilities {
-    pub versions: Vec<ProtocolVersion>,
-    pub streams: Vec<StreamKind>,
+    pub supported_versions: Vec<ProtocolVersion>,
+    pub audio_codecs: Vec<CodecId>,
+    pub features: Vec<FeatureFlag>,
+    pub max_bitrate: Option<u32>,
+    pub preferred_frame_duration_ms: Option<u16>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -152,11 +171,13 @@ pub enum CallControl {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ControlMessage {
     Join { peer_id: PeerId, display_name: Option<String> },
+    Hello { peer_id: PeerId, capabilities: Capabilities },
     Leave { peer_id: PeerId },
     PeerState { peer_id: PeerId, relay_capable: bool },
     Chat(ChatMessage),
     RouteInfo { from: PeerId, to: PeerId, relayed: bool },
     Capabilities(Capabilities),
+    CapabilitiesUpdate(Capabilities),
     PeerList { peers: Vec<PeerInfo> },
     Call(CallControl),
 }
@@ -170,7 +191,7 @@ pub struct PeerInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VoicePacket {
-    pub codec_id: u8,
+    pub codec_id: CodecId,
     pub payload: Vec<u8>,
 }
 

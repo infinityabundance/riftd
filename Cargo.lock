@@ -1501,6 +1501,7 @@ dependencies = [
  "anyhow",
  "cpal",
  "opus",
+ "rift-protocol",
  "tokio",
  "tracing",
 ]

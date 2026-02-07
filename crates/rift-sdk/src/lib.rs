@@ -13,13 +13,15 @@ use tokio::sync::{mpsc, Mutex};
 use tokio::time::Instant;
 
 use rift_core::{decode_invite, generate_invite, Identity, Invite, PeerId};
-use rift_media::{AudioConfig, AudioIn, AudioMixer, AudioOut, OpusDecoder, OpusEncoder};
+use rift_media::{decode_frame, encode_frame, AudioConfig, AudioIn, AudioMixer, AudioOut, OpusDecoder, OpusEncoder};
 use rift_mesh::{Mesh, MeshConfig, MeshEvent, MeshHandle};
 use rift_nat::NatConfig;
-use rift_protocol::{CallState, SessionId};
+use rift_protocol::{CallState, Capabilities, SessionId};
 
 pub use rift_core::PeerId as RiftPeerId;
-pub use rift_protocol::{CallState as RiftCallState, ChatMessage, SessionId as RiftSessionId};
+pub use rift_protocol::{
+    CallState as RiftCallState, ChatMessage, CodecId, FeatureFlag, SessionId as RiftSessionId,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RiftConfig {
@@ -27,6 +29,8 @@ pub struct RiftConfig {
     pub listen_port: u16,
     pub relay: bool,
     pub user_name: Option<String>,
+    pub preferred_codecs: Vec<CodecId>,
+    pub preferred_features: Vec<FeatureFlag>,
     pub audio: AudioConfigSdk,
     pub network: NetworkConfigSdk,
 }
@@ -58,6 +62,8 @@ impl Default for RiftConfig {
             listen_port: 7777,
             relay: false,
             user_name: None,
+            preferred_codecs: vec![CodecId::Opus, CodecId::PCM16],
+            preferred_features: vec![FeatureFlag::Voice, FeatureFlag::Text, FeatureFlag::Relay],
             audio: AudioConfigSdk::default(),
             network: NetworkConfigSdk::default(),
         }
@@ -97,7 +103,9 @@ pub enum RiftEvent {
     CallStateChanged { session: SessionId, state: CallState },
     PeerJoinedChannel { peer: PeerId, channel: String },
     PeerLeftChannel { peer: PeerId, channel: String },
+    PeerCapabilities { peer: PeerId, capabilities: Capabilities },
     AudioLevel { peer: PeerId, level: f32 },
+    CodecSelected { codec: CodecId },
     VoiceFrame { peer: PeerId, samples: Vec<i16> },
 }
 
@@ -191,6 +199,14 @@ impl RiftHandle {
             .await
             .map_err(|e| RiftError::Mesh(format!("{e}")))?;
 
+        let handle = mesh.handle();
+        handle
+            .set_preferred_codecs(self.config.preferred_codecs.clone())
+            .await;
+        handle
+            .set_preferred_features(self.config.preferred_features.clone())
+            .await;
+
         if internet {
             let nat_cfg = default_nat_config(self.config.listen_port, self.config.network.local_ports.clone());
             mesh.enable_nat(nat_cfg.clone()).await;
@@ -216,7 +232,6 @@ impl RiftHandle {
                 .map_err(|e| RiftError::Mesh(format!("{e}")))?;
         }
 
-        let handle = mesh.handle();
         let event_tx = self.event_tx.clone();
         let channel = name.to_string();
         let channel_for_task = channel.clone();
@@ -286,11 +301,9 @@ impl RiftHandle {
                             state: CallState::Ended,
                         });
                     }
-                    MeshEvent::VoiceFrame { from, payload, .. } => {
+                    MeshEvent::VoiceFrame { from, codec, payload, .. } => {
                         if let (Some(state), Some(decoder)) = (voice_state.as_ref(), decoder.as_mut()) {
-                            let mut out = vec![0i16; state.frame_samples];
-                            if let Ok(len) = decoder.decode_i16(&payload, &mut out) {
-                                out.truncate(len);
+                            if let Ok(out) = decode_frame(codec, &payload, decoder, state.frame_samples) {
                                 let mut mixer = state.mixer.lock().unwrap();
                                 mixer.push(peer_to_stream_id(&from), out.clone());
                                 let level = audio_level(&out);
@@ -301,7 +314,15 @@ impl RiftHandle {
                             }
                         }
                     }
-                    MeshEvent::RouteUpdated { .. } | MeshEvent::RouteUpgraded(_) => {}
+                    MeshEvent::PeerCapabilities { peer_id, capabilities } => {
+                        let _ = event_tx.send(RiftEvent::PeerCapabilities { peer: peer_id, capabilities });
+                    }
+                    MeshEvent::GroupCodec(codec) => {
+                        let _ = event_tx.send(RiftEvent::CodecSelected { codec });
+                    }
+                    MeshEvent::PeerSessionConfig { .. }
+                    | MeshEvent::RouteUpdated { .. }
+                    | MeshEvent::RouteUpgraded(_) => {}
                 }
             }
         });
@@ -447,12 +468,11 @@ fn start_audio_pipeline(
             if frame_duration > Duration::from_millis(20) {
                 tokio::time::sleep(frame_duration - Duration::from_millis(20)).await;
             }
-            let mut out = vec![0u8; 4000];
-            let len = match encoder.encode_i16(&frame, &mut out) {
-                Ok(len) => len,
+            let codec = handle.group_codec().await;
+            let out = match encode_frame(codec, &frame, &mut encoder) {
+                Ok(out) => out,
                 Err(_) => continue,
             };
-            out.truncate(len);
             let timestamp = now_timestamp();
             let _ = handle.broadcast_voice(seq, timestamp, out).await;
             seq = seq.wrapping_add(1);
