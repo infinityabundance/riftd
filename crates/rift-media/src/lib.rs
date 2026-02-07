@@ -207,6 +207,11 @@ impl AudioOut {
     pub fn channels(&self) -> u16 {
         self.channels
     }
+
+    pub fn queued_samples(&self) -> usize {
+        let queue = self.queue.lock().unwrap();
+        queue.len()
+    }
 }
 
 fn find_input_device(host: &cpal::Host, name: &str) -> Result<cpal::Device> {
@@ -347,6 +352,11 @@ impl AudioMixer {
     }
 
     pub fn mix_next(&mut self) -> Vec<i16> {
+        let (frame, _active) = self.mix_next_with_activity();
+        frame
+    }
+
+    pub fn mix_next_with_activity(&mut self) -> (Vec<i16>, bool) {
         let mut active = 0usize;
         let mut mix = vec![0i32; self.frame_samples];
 
@@ -377,11 +387,12 @@ impl AudioMixer {
         }
 
         let scale = if active > 0 { active as i32 } else { 1 };
-        mix.into_iter()
+        let frame = mix.into_iter()
             .map(|v| {
                 let scaled = v / scale;
                 scaled.clamp(i16::MIN as i32, i16::MAX as i32) as i16
             })
-            .collect()
+            .collect();
+        (frame, active > 0)
     }
 }

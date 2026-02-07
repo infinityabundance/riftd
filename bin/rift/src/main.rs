@@ -213,6 +213,7 @@ enum UiEvent {
     Input(KeyEvent),
     Tick,
     Mesh(MeshEvent),
+    TxPulse,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -284,10 +285,20 @@ struct UiState {
     ptt_enabled: bool,
     ptt_key: PttKey,
     ptt_last_signal: Option<Instant>,
+    last_tx: Option<Instant>,
+    last_rx: Option<Instant>,
     user_name: String,
     audio_quality: String,
     theme: String,
     prefer_p2p: bool,
+}
+
+fn next_quality(current: &str) -> &'static str {
+    match current {
+        "low" => "medium",
+        "medium" => "high",
+        _ => "low",
+    }
 }
 
 impl UiState {
@@ -314,6 +325,8 @@ impl UiState {
             ptt_enabled,
             ptt_key,
             ptt_last_signal: None,
+            last_tx: None,
+            last_rx: None,
             user_name,
             audio_quality,
             theme,
@@ -369,6 +382,7 @@ async fn run_tui_inner(
     let audio_quality = user_cfg.audio.quality.clone().unwrap_or_else(|| "medium".to_string());
     let ptt_enabled = user_cfg.audio.ptt.unwrap_or(false);
     let ptt_key = PttKey::from_config(user_cfg.audio.ptt_key.as_deref());
+    let vad_enabled = user_cfg.audio.vad.unwrap_or(true);
     let input_device = user_cfg.audio.input_device.clone();
     let output_device = user_cfg.audio.output_device.clone();
     let mute_output = user_cfg.audio.mute_output.unwrap_or(false);
@@ -380,7 +394,12 @@ async fn run_tui_inner(
     let theme = user_cfg.ui.theme.clone().unwrap_or_else(|| "dark".to_string());
     let prefer_p2p = user_cfg.network.prefer_p2p.unwrap_or(true);
 
-    let (_audio_in, mut audio_rx, mut opus_enc, opus_dec, audio_out, mixer) = if voice {
+    // tx/rx pulse timestamps tracked in UiState
+
+    let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
+    let (chat_tx, mut chat_rx) = mpsc::unbounded_channel::<String>();
+
+    let (_audio_in, mut audio_rx, mut opus_enc, opus_dec, audio_out, mixer, audio_config) = if voice {
         let mut audio_config = AudioConfig::default();
         audio_config.bitrate = map_quality_to_bitrate(Some(&audio_quality));
         let (audio_in, audio_rx) =
@@ -397,7 +416,7 @@ async fn run_tui_inner(
         };
         let mixer = Arc::new(Mutex::new(AudioMixer::with_prebuffer(
             audio_config.frame_samples(),
-            3,
+            8,
         )));
         (
             Some(audio_in),
@@ -406,9 +425,10 @@ async fn run_tui_inner(
             Some(opus_dec),
             audio_out,
             Some(mixer),
+            audio_config,
         )
     } else {
-        (None, None, None, None, None, None)
+        (None, None, None, None, None, None, AudioConfig::default())
     };
 
     let ptt_active = Arc::new(AtomicBool::new(!ptt_enabled));
@@ -418,11 +438,28 @@ async fn run_tui_inner(
         let mut audio_rx = audio_rx.take().unwrap();
         let ptt_active = ptt_active.clone();
         let ptt_enabled = ptt_enabled;
+        let ui_tx_voice = ui_tx.clone();
+        let frame_duration = audio_config.frame_duration();
         tokio::spawn(async move {
             let mut seq: u32 = 0;
+            let mut hangover: u8 = 0;
             while let Some(frame) = audio_rx.recv().await {
                 if ptt_enabled && !ptt_active.load(Ordering::Relaxed) {
                     continue;
+                }
+                if !ptt_enabled && vad_enabled {
+                    let active = is_frame_active(&frame);
+                    if active {
+                        hangover = 4;
+                    } else if hangover > 0 {
+                        hangover -= 1;
+                    }
+                    if !active && hangover == 0 {
+                        continue;
+                    }
+                }
+                if frame_duration > Duration::from_millis(20) {
+                    tokio::time::sleep(frame_duration - Duration::from_millis(20)).await;
                 }
                 let mut out = vec![0u8; 4000];
                 let len = match encoder.encode_i16(&frame, &mut out) {
@@ -436,6 +473,8 @@ async fn run_tui_inner(
                 let timestamp = now_timestamp();
                 if let Err(err) = mesh_handle.broadcast_voice(seq, timestamp, out).await {
                     tracing::debug!("voice send error: {err}");
+                } else {
+                    let _ = ui_tx_voice.send(UiEvent::TxPulse);
                 }
                 seq = seq.wrapping_add(1);
             }
@@ -444,24 +483,39 @@ async fn run_tui_inner(
         if let Some(audio_out) = audio_out {
             let mixer = mixer.clone().unwrap();
             let frame_samples = audio_out.frame_samples();
-            let frame_duration = AudioConfig::default().frame_duration();
+            let frame_duration = audio_config.frame_duration();
+            let target_frames = 6usize;
+            let mut last_frame = vec![0i16; frame_samples];
+            let mut last_active = Instant::now() - Duration::from_secs(1);
             tokio::task::spawn_local(async move {
+                let mut tick = tokio::time::interval(frame_duration);
                 loop {
-                    tokio::time::sleep(frame_duration).await;
-                    let frame = {
-                        let mut mixer = mixer.lock().unwrap();
-                        mixer.mix_next()
-                    };
-                    if frame.len() == frame_samples {
-                        audio_out.push_frame(&frame);
+                    tick.tick().await;
+                    while audio_out.queued_samples() < target_frames * frame_samples {
+                        let (frame, active) = {
+                            let mut mixer = mixer.lock().unwrap();
+                            mixer.mix_next_with_activity()
+                        };
+                        let out_frame = if active {
+                            last_active = Instant::now();
+                            last_frame.clone_from(&frame);
+                            frame
+                        } else if last_active.elapsed() <= Duration::from_millis(300) {
+                            last_frame.clone()
+                        } else {
+                            frame
+                        };
+                        if out_frame.len() == frame_samples {
+                            audio_out.push_frame(&out_frame);
+                        } else {
+                            break;
+                        }
                     }
                 }
             });
         }
     }
 
-    let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
-    let (chat_tx, mut chat_rx) = mpsc::unbounded_channel::<String>();
     let ui_tx_clone = ui_tx.clone();
 
     std::thread::spawn(move || loop {
@@ -514,6 +568,7 @@ async fn run_tui_inner(
     );
     let mut decoder = opus_dec;
     let mixer = mixer;
+    let frame_samples = audio_config.frame_samples();
 
     let mut should_quit = false;
     while !should_quit {
@@ -523,7 +578,13 @@ async fn run_tui_inner(
             Some(evt) = ui_rx.recv() => {
                 match evt {
                     UiEvent::Input(key) => {
-                        handle_key_event(key, &mut state, ptt_active.clone(), &chat_tx, &mut should_quit)?;
+                        handle_key_event(
+                            key,
+                            &mut state,
+                            ptt_active.clone(),
+                            &chat_tx,
+                            &mut should_quit,
+                        )?;
                     }
                     UiEvent::Tick => {
                         if state.ptt_enabled && state.mic_active {
@@ -532,6 +593,16 @@ async fn run_tui_inner(
                                     state.mic_active = false;
                                     ptt_active.store(false, Ordering::Relaxed);
                                 }
+                            }
+                        }
+                        if let Some(last) = state.last_tx {
+                            if last.elapsed() > Duration::from_millis(300) {
+                                state.last_tx = None;
+                            }
+                        }
+                        if let Some(last) = state.last_rx {
+                            if last.elapsed() > Duration::from_millis(300) {
+                                state.last_rx = None;
                             }
                         }
                     }
@@ -543,17 +614,20 @@ async fn run_tui_inner(
                                     route: state.routes.get(&peer_id).cloned(),
                                     last_voice: None,
                                 });
+                                state.last_rx = Some(Instant::now());
                             }
                             MeshEvent::PeerLeft(peer_id) => {
                                 state.peers.remove(&peer_id);
                                 state.routes.remove(&peer_id);
+                                state.last_rx = Some(Instant::now());
                             }
                             MeshEvent::ChatReceived(chat) => {
                                 state.add_chat_line(short_peer(&chat.from), chat.text);
+                                state.last_rx = Some(Instant::now());
                             }
                             MeshEvent::VoiceFrame { from, payload, .. } => {
                                 if let (Some(decoder), Some(mixer)) = (decoder.as_mut(), mixer.as_ref()) {
-                                    let mut out = vec![0i16; AudioConfig::default().frame_samples()];
+                                    let mut out = vec![0i16; frame_samples];
                                     match decoder.decode_i16(&payload, &mut out) {
                                         Ok(len) => {
                                             out.truncate(len);
@@ -563,6 +637,7 @@ async fn run_tui_inner(
                                             if is_frame_active(&out) {
                                                 state.update_peer_voice(from);
                                             }
+                                            state.last_rx = Some(Instant::now());
                                         }
                                         Err(err) => {
                                             tracing::debug!("opus decode error: {err}");
@@ -577,6 +652,9 @@ async fn run_tui_inner(
                                 tracing::info!(peer = %peer_id, "route upgraded to direct");
                             }
                         }
+                    }
+                    UiEvent::TxPulse => {
+                        state.last_tx = Some(Instant::now());
                     }
                 }
             }
@@ -656,11 +734,16 @@ fn handle_key_event(
                 state.input.push('q');
             }
         }
+        KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            let next = next_quality(&state.audio_quality);
+            state.audio_quality = next.to_string();
+        }
         KeyCode::Enter => {
             let text = state.input.trim().to_string();
             if !text.is_empty() {
                 state.add_chat_line(state.user_name.clone(), text.clone());
                 let _ = chat_tx.send(text);
+                state.last_tx = Some(Instant::now());
             }
             state.input.clear();
         }
@@ -765,6 +848,8 @@ fn draw_status(f: &mut Frame, area: Rect, state: &UiState) {
     } else {
         "ptt: off".to_string()
     };
+    let rx_on = pulse_active(state.last_rx, Duration::from_millis(300));
+    let tx_on = pulse_active(state.last_tx, Duration::from_millis(300));
     let header = Line::from(vec![
         Span::styled("channel: ", Style::default().fg(Color::Cyan)),
         Span::styled(
@@ -793,9 +878,23 @@ fn draw_status(f: &mut Frame, area: Rect, state: &UiState) {
             Style::default().fg(Color::White),
         ),
         Span::raw(" | "),
+        Span::styled("RX ", Style::default().fg(Color::Cyan)),
+        Span::styled(
+            "●",
+            Style::default().fg(if rx_on { Color::Green } else { Color::DarkGray }),
+        ),
+        Span::raw(" "),
+        Span::styled("TX ", Style::default().fg(Color::Cyan)),
+        Span::styled(
+            "●",
+            Style::default().fg(if tx_on { Color::Red } else { Color::DarkGray }),
+        ),
+        Span::raw(" | "),
         Span::styled("keys: ", Style::default().fg(Color::Magenta)),
         Span::styled("ctrl+q", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
         Span::raw(" quit "),
+        Span::styled("ctrl+a", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+        Span::raw(" quality "),
         Span::styled("tab", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
         Span::raw(" focus "),
         Span::styled("enter", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
@@ -833,6 +932,10 @@ fn set_input_cursor(f: &mut Frame, area: Rect, state: &UiState) {
     let x = inner.x + 2 + state.input.len() as u16;
     let y = inner.y;
     f.set_cursor(x.min(inner.right().saturating_sub(1)), y);
+}
+
+fn pulse_active(last: Option<Instant>, window: Duration) -> bool {
+    last.map(|t| t.elapsed() <= window).unwrap_or(false)
 }
 
 fn now_timestamp() -> u64 {
