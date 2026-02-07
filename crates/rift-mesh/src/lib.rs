@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Result};
 use tokio::net::UdpSocket;
@@ -9,7 +9,8 @@ use tokio::sync::{mpsc, Mutex};
 use tokio_stream::StreamExt;
 
 use rift_core::message::{
-    decode_wire_message, encode_wire_message, ChatMessage, ControlMessage, MessageId, WireMessage,
+    decode_wire_message, encode_wire_message, ChatMessage, ControlMessage, MessageId, PeerInfo,
+    WireMessage,
 };
 use rift_core::{Identity, Invite, PeerId};
 use rift_discovery::{discover_peers, start_mdns_advertisement, DiscoveryConfig, MdnsHandle};
@@ -22,6 +23,13 @@ pub struct MeshConfig {
     pub channel_name: String,
     pub password: Option<String>,
     pub listen_port: u16,
+    pub relay_capable: bool,
+}
+
+#[derive(Debug, Clone)]
+pub enum PeerRoute {
+    Direct { addr: SocketAddr },
+    Relayed { via: PeerId },
 }
 
 #[derive(Debug, Clone)]
@@ -35,6 +43,8 @@ pub enum MeshEvent {
         timestamp: u64,
         payload: Vec<u8>,
     },
+    RouteUpdated { peer_id: PeerId, route: PeerRoute },
+    RouteUpgraded(PeerId),
 }
 
 pub struct Mesh {
@@ -53,12 +63,16 @@ struct MeshInner {
     sockets: Mutex<Vec<Arc<UdpSocket>>>,
     identity: Identity,
     peers_by_id: Mutex<HashMap<PeerId, SocketAddr>>,
+    peer_caps: Mutex<HashMap<PeerId, bool>>,
+    routes: Mutex<HashMap<PeerId, PeerRoute>>,
+    peer_addrs: Mutex<HashMap<PeerId, SocketAddr>>,
     connections: Mutex<HashMap<SocketAddr, PeerConnection>>,
     pending: Mutex<HashMap<PendingKey, PendingHandshake>>,
     cache: Mutex<HashSet<MessageId>>,
     voice_seq: Mutex<HashMap<PeerId, u32>>,
     nat_cfg: Mutex<Option<NatConfig>>,
     events_tx: mpsc::Sender<MeshEvent>,
+    relay_capable: bool,
 }
 
 #[derive(Debug)]
@@ -91,15 +105,20 @@ impl Mesh {
             sockets: Mutex::new(vec![socket.clone()]),
             identity,
             peers_by_id: Mutex::new(HashMap::new()),
+            peer_caps: Mutex::new(HashMap::new()),
+            routes: Mutex::new(HashMap::new()),
+            peer_addrs: Mutex::new(HashMap::new()),
             connections: Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
             cache: Mutex::new(HashSet::new()),
             voice_seq: Mutex::new(HashMap::new()),
             nat_cfg: Mutex::new(None),
             events_tx,
+            relay_capable: config.relay_capable,
         });
 
         MeshInner::spawn_receiver(inner.clone(), 0, socket.clone());
+        MeshInner::spawn_auto_upgrade(inner.clone());
 
         let mesh = Self {
             inner,
@@ -164,13 +183,14 @@ impl Mesh {
         cache.insert(chat.id);
         drop(cache);
 
-        let addrs: Vec<SocketAddr> = {
-            let connections = self.inner.connections.lock().await;
-            connections.keys().copied().collect()
-        };
-
-        for addr in addrs {
-            self.inner.send_wire(addr, &msg).await?;
+        let routes = self.inner.routes_snapshot().await;
+        for (peer_id, route) in routes {
+            if peer_id == self.inner.identity.peer_id {
+                continue;
+            }
+            if let Err(err) = self.inner.send_to_peer(peer_id, route, msg.clone()).await {
+                tracing::debug!(peer = %peer_id, "chat send failed: {err}");
+            }
         }
 
         Ok(())
@@ -236,6 +256,51 @@ impl MeshInner {
                 }
                 if let Err(err) = inner.initiate_handshake(peer.addr, 0).await {
                     eprintln!("handshake to {} failed: {err}", peer.addr);
+                }
+            }
+        });
+    }
+
+    fn spawn_auto_upgrade(inner: Arc<Self>) {
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(30));
+            loop {
+                tick.tick().await;
+                let nat_cfg = { inner.nat_cfg.lock().await.clone() };
+                let Some(nat_cfg) = nat_cfg else {
+                    continue;
+                };
+                let relayed: Vec<(PeerId, SocketAddr)> = {
+                    let routes = inner.routes.lock().await;
+                    let addrs = inner.peer_addrs.lock().await;
+                    routes
+                        .iter()
+                        .filter_map(|(peer_id, route)| match route {
+                            PeerRoute::Relayed { .. } => addrs
+                                .get(peer_id)
+                                .copied()
+                                .map(|addr| (*peer_id, addr)),
+                            _ => None,
+                        })
+                        .collect()
+                };
+
+                for (peer_id, addr) in relayed {
+                    let endpoint = PeerEndpoint {
+                        peer_id,
+                        external_addrs: vec![addr],
+                        punch_ports: vec![addr.port()],
+                    };
+                    if let Ok((socket, remote)) = attempt_hole_punch(&nat_cfg, &endpoint).await {
+                        if let Ok(socket_idx) = inner.add_socket(socket).await {
+                            if let Err(err) = inner.initiate_handshake(remote, socket_idx).await {
+                                tracing::debug!(
+                                    peer = %peer_id,
+                                    "auto-upgrade handshake failed: {err}"
+                                );
+                            }
+                        }
+                    }
                 }
             }
         });
@@ -375,6 +440,7 @@ impl MeshInner {
 
         let join = WireMessage::Control(ControlMessage::Join {
             peer_id: self.identity.peer_id,
+            relay_capable: self.relay_capable,
         });
         self.send_wire(addr, &join).await?;
 
@@ -383,9 +449,17 @@ impl MeshInner {
     }
 
     async fn send_peer_list(&self, addr: SocketAddr) -> Result<()> {
-        let peers: Vec<SocketAddr> = {
-            let connections = self.connections.lock().await;
-            connections.keys().copied().collect()
+        let peers: Vec<PeerInfo> = {
+            let peers_by_id = self.peers_by_id.lock().await;
+            let peer_caps = self.peer_caps.lock().await;
+            peers_by_id
+                .iter()
+                .map(|(peer_id, addr)| PeerInfo {
+                    peer_id: *peer_id,
+                    addr: *addr,
+                    relay_capable: *peer_caps.get(peer_id).unwrap_or(&false),
+                })
+                .collect()
         };
         let msg = WireMessage::Control(ControlMessage::PeerList { peers });
         self.send_wire(addr, &msg).await
@@ -410,7 +484,10 @@ impl MeshInner {
 
     async fn handle_wire(self: Arc<Self>, addr: SocketAddr, msg: WireMessage) -> Result<()> {
         match msg {
-            WireMessage::Control(ControlMessage::Join { peer_id }) => {
+            WireMessage::Control(ControlMessage::Join {
+                peer_id,
+                relay_capable,
+            }) => {
                 let mut connections = self.connections.lock().await;
                 if let Some(conn) = connections.get_mut(&addr) {
                     conn.peer_id = Some(peer_id);
@@ -421,7 +498,31 @@ impl MeshInner {
                 peers.insert(peer_id, addr);
                 drop(peers);
 
+                let mut peer_caps = self.peer_caps.lock().await;
+                peer_caps.insert(peer_id, relay_capable);
+                drop(peer_caps);
+
+                let mut peer_addrs = self.peer_addrs.lock().await;
+                peer_addrs.insert(peer_id, addr);
+                drop(peer_addrs);
+
+                let mut routes = self.routes.lock().await;
+                let upgraded = matches!(routes.get(&peer_id), Some(PeerRoute::Relayed { .. }));
+                routes.insert(peer_id, PeerRoute::Direct { addr });
+                drop(routes);
+
                 let _ = self.events_tx.send(MeshEvent::PeerJoined(peer_id)).await;
+                let _ = self
+                    .events_tx
+                    .send(MeshEvent::RouteUpdated {
+                        peer_id,
+                        route: PeerRoute::Direct { addr },
+                    })
+                    .await;
+                if upgraded {
+                    let _ = self.events_tx.send(MeshEvent::RouteUpgraded(peer_id)).await;
+                    tracing::info!(peer = %peer_id, "route upgraded to direct");
+                }
 
                 self.send_peer_list(addr).await?;
             }
@@ -429,6 +530,25 @@ impl MeshInner {
                 let mut peers = self.peers_by_id.lock().await;
                 peers.remove(&peer_id);
                 drop(peers);
+                let mut peer_caps = self.peer_caps.lock().await;
+                peer_caps.remove(&peer_id);
+                drop(peer_caps);
+                let mut routes = self.routes.lock().await;
+                routes.remove(&peer_id);
+                let removed: Vec<PeerId> = routes
+                    .iter()
+                    .filter_map(|(pid, route)| match route {
+                        PeerRoute::Relayed { via } if *via == peer_id => Some(*pid),
+                        _ => None,
+                    })
+                    .collect();
+                for pid in removed {
+                    routes.remove(&pid);
+                }
+                drop(routes);
+                let mut peer_addrs = self.peer_addrs.lock().await;
+                peer_addrs.remove(&peer_id);
+                drop(peer_addrs);
                 let _ = self.events_tx.send(MeshEvent::PeerLeft(peer_id)).await;
             }
             WireMessage::Control(ControlMessage::Chat(chat)) => {
@@ -443,12 +563,9 @@ impl MeshInner {
                     .events_tx
                     .send(MeshEvent::ChatReceived(chat.clone()))
                     .await;
-
-                self.gossip(addr, WireMessage::Control(ControlMessage::Chat(chat)))
-                    .await?;
             }
             WireMessage::Control(ControlMessage::PeerList { peers }) => {
-                self.handle_peer_list(peers).await?;
+                self.handle_peer_list(addr, peers).await?;
             }
             WireMessage::Voice {
                 from,
@@ -474,40 +591,64 @@ impl MeshInner {
                         payload: payload.clone(),
                     })
                     .await;
-
-                self.gossip(
-                    addr,
-                    WireMessage::Voice {
-                        from,
-                        seq,
-                        timestamp,
-                        payload,
-                    },
-                )
-                .await?;
+            }
+            WireMessage::Relay { target, inner } => {
+                if target == self.identity.peer_id {
+                    self.handle_wire(addr, *inner).await?;
+                } else {
+                    self.forward_relay(target, *inner).await?;
+                }
             }
         }
         Ok(())
     }
 
-    async fn handle_peer_list(self: Arc<Self>, peers: Vec<SocketAddr>) -> Result<()> {
+    async fn handle_peer_list(self: Arc<Self>, addr: SocketAddr, peers: Vec<PeerInfo>) -> Result<()> {
         let nat_cfg = { self.nat_cfg.lock().await.clone() };
         let Some(nat_cfg) = nat_cfg else {
             return Ok(());
         };
 
-        for addr in peers {
+        let relay_peer_id = {
+            let connections = self.connections.lock().await;
+            connections.get(&addr).and_then(|conn| conn.peer_id)
+        };
+        let relay_capable = if let Some(peer_id) = relay_peer_id {
+            let peer_caps = self.peer_caps.lock().await;
+            peer_caps.get(&peer_id).copied().unwrap_or(false)
+        } else {
+            false
+        };
+
+        for peer in peers {
+            if peer.peer_id == self.identity.peer_id {
+                continue;
+            }
+            let already = {
+                let peers_by_id = self.peers_by_id.lock().await;
+                peers_by_id.contains_key(&peer.peer_id)
+            };
+            let mut peer_caps = self.peer_caps.lock().await;
+            peer_caps.insert(peer.peer_id, peer.relay_capable);
+            drop(peer_caps);
+            let mut peer_addrs = self.peer_addrs.lock().await;
+            peer_addrs.insert(peer.peer_id, peer.addr);
+            drop(peer_addrs);
+
+            if already {
+                continue;
+            }
             let already = {
                 let connections = self.connections.lock().await;
-                connections.contains_key(&addr)
+                connections.contains_key(&peer.addr)
             };
             if already {
                 continue;
             }
             let endpoint = PeerEndpoint {
                 peer_id: PeerId([0u8; 32]),
-                external_addrs: vec![addr],
-                punch_ports: vec![addr.port()],
+                external_addrs: vec![peer.addr],
+                punch_ports: vec![peer.addr.port()],
             };
             if let Ok((socket, remote)) = attempt_hole_punch(&nat_cfg, &endpoint).await {
                 if let Ok(socket_idx) = self.add_socket(socket).await {
@@ -515,26 +656,29 @@ impl MeshInner {
                         eprintln!("handshake to {} failed: {err}", remote);
                     }
                 }
+            } else if relay_capable {
+                if let Some(relay_peer_id) = relay_peer_id {
+                    let mut routes = self.routes.lock().await;
+                    if !matches!(routes.get(&peer.peer_id), Some(PeerRoute::Direct { .. })) {
+                        routes.insert(peer.peer_id, PeerRoute::Relayed { via: relay_peer_id });
+                        drop(routes);
+                        let _ = self
+                            .events_tx
+                            .send(MeshEvent::RouteUpdated {
+                                peer_id: peer.peer_id,
+                                route: PeerRoute::Relayed { via: relay_peer_id },
+                            })
+                            .await;
+                        tracing::info!(
+                            peer = %peer.peer_id,
+                            relay = %relay_peer_id,
+                            "relay route established"
+                        );
+                    }
+                }
             }
         }
 
-        Ok(())
-    }
-
-    async fn gossip(&self, from: SocketAddr, msg: WireMessage) -> Result<()> {
-        let addrs: Vec<SocketAddr> = {
-            let connections = self.connections.lock().await;
-            connections
-                .keys()
-                .filter(|addr| **addr != from)
-                .copied()
-                .collect()
-        };
-        for addr in addrs {
-            if let Err(err) = self.send_wire(addr, &msg).await {
-                eprintln!("gossip send to {} failed: {err}", addr);
-            }
-        }
         Ok(())
     }
 
@@ -559,12 +703,71 @@ impl MeshInner {
             timestamp,
             payload,
         };
-        let addrs: Vec<SocketAddr> = {
-            let connections = self.connections.lock().await;
-            connections.keys().copied().collect()
+        let routes = self.routes_snapshot().await;
+        for (peer_id, route) in routes {
+            if peer_id == self.identity.peer_id {
+                continue;
+            }
+            if let Err(err) = self.send_to_peer(peer_id, route, msg.clone()).await {
+                tracing::debug!(peer = %peer_id, "voice send failed: {err}");
+            }
+        }
+        Ok(())
+    }
+
+    async fn routes_snapshot(&self) -> HashMap<PeerId, PeerRoute> {
+        self.routes.lock().await.clone()
+    }
+
+    async fn send_to_peer(&self, peer_id: PeerId, route: PeerRoute, msg: WireMessage) -> Result<()> {
+        match route {
+            PeerRoute::Direct { addr } => self.send_wire(addr, &msg).await,
+            PeerRoute::Relayed { via } => {
+                let relay_addr = {
+                    let peers = self.peers_by_id.lock().await;
+                    peers.get(&via).copied()
+                };
+                let Some(relay_addr) = relay_addr else {
+                    return Err(anyhow!("missing relay addr"));
+                };
+                let envelope = WireMessage::Relay {
+                    target: peer_id,
+                    inner: Box::new(msg),
+                };
+                self.send_wire(relay_addr, &envelope).await
+            }
+        }
+    }
+
+    async fn forward_relay(&self, target: PeerId, inner: WireMessage) -> Result<()> {
+        let route = {
+            let routes = self.routes.lock().await;
+            routes.get(&target).cloned()
         };
-        for addr in addrs {
-            self.send_wire(addr, &msg).await?;
+        let Some(route) = route else {
+            return Ok(());
+        };
+        match route {
+            PeerRoute::Direct { addr } => {
+                let envelope = WireMessage::Relay {
+                    target,
+                    inner: Box::new(inner),
+                };
+                self.send_wire(addr, &envelope).await?;
+            }
+            PeerRoute::Relayed { via } => {
+                let relay_addr = {
+                    let peers = self.peers_by_id.lock().await;
+                    peers.get(&via).copied()
+                };
+                if let Some(relay_addr) = relay_addr {
+                    let envelope = WireMessage::Relay {
+                        target,
+                        inner: Box::new(inner),
+                    };
+                    self.send_wire(relay_addr, &envelope).await?;
+                }
+            }
         }
         Ok(())
     }

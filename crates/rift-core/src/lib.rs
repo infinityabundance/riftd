@@ -8,5 +8,5 @@ pub use error::CoreError;
 pub use identity::Identity;
 pub use invite::{decode_invite, encode_invite, generate_invite, Invite};
 pub use message::{
-    ChannelId, ChatMessage, ControlMessage, CoreMessage, MessageId, PeerId, WireMessage,
+    ChannelId, ChatMessage, ControlMessage, CoreMessage, MessageId, PeerId, PeerInfo, WireMessage,
 };

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -9,7 +10,7 @@ use tokio::io::{self, AsyncBufReadExt, BufReader};
 
 use rift_core::{decode_invite, encode_invite, generate_invite, Identity};
 use rift_media::{AudioConfig, AudioIn, AudioMixer, AudioOut, OpusDecoder, OpusEncoder};
-use rift_mesh::{Mesh, MeshConfig, MeshEvent};
+use rift_mesh::{Mesh, MeshConfig, MeshEvent, PeerRoute};
 use rift_nat::NatConfig;
 
 /*
@@ -53,6 +54,8 @@ enum Commands {
         voice: bool,
         #[arg(long)]
         internet: bool,
+        #[arg(long)]
+        relay: bool,
     },
     Invite {
         #[arg(long)]
@@ -65,11 +68,14 @@ enum Commands {
         port: u16,
         #[arg(long)]
         voice: bool,
+        #[arg(long)]
+        relay: bool,
     },
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    tracing_subscriber::fmt::init();
     let cli = Cli::parse();
 
     match cli.command {
@@ -80,9 +86,15 @@ async fn main() -> Result<()> {
             port,
             voice,
             internet,
-        } => cmd_create(channel, password, port, voice, internet).await,
+            relay,
+        } => cmd_create(channel, password, port, voice, internet, relay).await,
         Commands::Invite { channel } => cmd_invite(channel).await,
-        Commands::Join { invite, port, voice } => cmd_join(invite, port, voice).await,
+        Commands::Join {
+            invite,
+            port,
+            voice,
+            relay,
+        } => cmd_join(invite, port, voice, relay).await,
     }
 }
 
@@ -109,6 +121,7 @@ async fn cmd_create(
     port: u16,
     voice: bool,
     internet: bool,
+    relay: bool,
 ) -> Result<()> {
     let identity = Identity::load(None).context("identity not found, run init-identity first")?;
 
@@ -116,6 +129,7 @@ async fn cmd_create(
         channel_name: channel.clone(),
         password: password.clone(),
         listen_port: port,
+        relay_capable: relay,
     };
 
     let mut mesh = Mesh::new(identity, config).await?;
@@ -140,7 +154,7 @@ async fn cmd_invite(channel: String) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_join(invite_str: String, port: u16, voice: bool) -> Result<()> {
+async fn cmd_join(invite_str: String, port: u16, voice: bool, relay: bool) -> Result<()> {
     let invite = decode_invite(&invite_str)?;
     let identity = Identity::load(None).context("identity not found, run init-identity first")?;
 
@@ -148,6 +162,7 @@ async fn cmd_join(invite_str: String, port: u16, voice: bool) -> Result<()> {
         channel_name: invite.channel_name.clone(),
         password: invite.password.clone(),
         listen_port: port,
+        relay_capable: relay,
     };
 
     let mut mesh = Mesh::new(identity, config).await?;
@@ -227,6 +242,7 @@ async fn run_chat_loop(mut mesh: Mesh, voice: bool) -> Result<()> {
 
     let mut decoder = opus_dec;
     let mixer = mixer;
+    let mut routes: HashMap<rift_core::PeerId, PeerRoute> = HashMap::new();
 
     loop {
         tokio::select! {
@@ -242,9 +258,14 @@ async fn run_chat_loop(mut mesh: Mesh, voice: bool) -> Result<()> {
                 let Some(event) = event else { break; };
                 match event {
                     MeshEvent::PeerJoined(peer_id) => {
-                        println!("[peer {} joined]", peer_id);
+                        if let Some(route) = routes.get(&peer_id) {
+                            println!("[peer {} joined] {}", peer_id, format_route(route));
+                        } else {
+                            println!("[peer {} joined]", peer_id);
+                        }
                     }
                     MeshEvent::PeerLeft(peer_id) => {
+                        routes.remove(&peer_id);
                         println!("[peer {} left]", peer_id);
                     }
                     MeshEvent::ChatReceived(chat) => {
@@ -265,6 +286,13 @@ async fn run_chat_loop(mut mesh: Mesh, voice: bool) -> Result<()> {
                                 }
                             }
                         }
+                    }
+                    MeshEvent::RouteUpdated { peer_id, route } => {
+                        routes.insert(peer_id, route.clone());
+                        println!("[route] {} {}", peer_id, format_route(&route));
+                    }
+                    MeshEvent::RouteUpgraded(peer_id) => {
+                        tracing::info!(peer = %peer_id, "route upgraded to direct");
                     }
                 }
             }
@@ -313,4 +341,11 @@ fn default_nat_config(port: u16) -> NatConfig {
     ports.push(port.saturating_add(1));
     ports.push(port.saturating_add(2));
     NatConfig { local_ports: ports }
+}
+
+fn format_route(route: &PeerRoute) -> String {
+    match route {
+        PeerRoute::Direct { .. } => "(direct)".to_string(),
+        PeerRoute::Relayed { via } => format!("(relayed via {via})"),
+    }
 }
