@@ -328,6 +328,7 @@ struct ChatLine {
 struct PeerEntry {
     display: String,
     last_voice: Option<Instant>,
+    stats: Option<rift_sdk::LinkStats>,
 }
 
 #[derive(Debug)]
@@ -424,6 +425,7 @@ struct UiState {
     pending_call: Option<(RiftSessionId, rift_core::PeerId)>,
     muted: bool,
     peers: HashMap<rift_core::PeerId, PeerEntry>,
+    qos_profile: rift_sdk::RiftQosProfile,
     chat: VecDeque<ChatLine>,
     mic_active: bool,
     ptt_enabled: bool,
@@ -434,6 +436,7 @@ struct UiState {
     user_name: String,
     audio_quality: String,
     current_codec: String,
+    audio_bitrate: u32,
     theme: String,
     prefer_p2p: bool,
 }
@@ -455,6 +458,7 @@ impl UiState {
         audio_quality: String,
         theme: String,
         prefer_p2p: bool,
+        qos_profile: rift_sdk::RiftQosProfile,
         local_peer_id: rift_core::PeerId,
         channel_session: RiftSessionId,
     ) -> Self {
@@ -471,6 +475,7 @@ impl UiState {
             pending_call: None,
             muted: false,
             peers: HashMap::new(),
+            qos_profile,
             chat: VecDeque::with_capacity(200),
             mic_active: false,
             ptt_enabled,
@@ -481,6 +486,7 @@ impl UiState {
             user_name,
             audio_quality,
             current_codec: "opus".to_string(),
+            audio_bitrate: 0,
             theme,
             prefer_p2p,
         }
@@ -505,6 +511,7 @@ impl UiState {
             .or_insert_with(|| PeerEntry {
                 display: short_peer(&peer_id),
                 last_voice: None,
+                stats: None,
             });
         entry.last_voice = Some(Instant::now());
     }
@@ -540,6 +547,7 @@ async fn run_tui_inner(
         .unwrap_or_else(|| "me".to_string());
     let theme = user_cfg.ui.theme.clone().unwrap_or_else(|| "dark".to_string());
     let prefer_p2p = user_cfg.network.prefer_p2p.unwrap_or(true);
+    let qos_profile = user_cfg.qos.to_profile();
 
     // tx/rx pulse timestamps tracked in UiState
 
@@ -588,6 +596,7 @@ async fn run_tui_inner(
         audio_quality,
         theme,
         prefer_p2p,
+        qos_profile,
         local_peer_id,
         channel_session,
     );
@@ -637,6 +646,7 @@ async fn run_tui_inner(
                                 state.peers.entry(peer_id).or_insert(PeerEntry {
                                     display: short_peer(&peer_id),
                                     last_voice: None,
+                                    stats: None,
                                 });
                                 state.last_rx = Some(Instant::now());
                             }
@@ -661,6 +671,17 @@ async fn run_tui_inner(
                                     CodecId::PCM16 => "pcm16".to_string(),
                                     CodecId::Experimental(id) => format!("exp-{id}"),
                                 };
+                            }
+                            RiftEvent::AudioBitrate { bitrate } => {
+                                state.audio_bitrate = bitrate;
+                            }
+                            RiftEvent::LinkStatsUpdated { peer, stats } => {
+                                let entry = state.peers.entry(peer).or_insert(PeerEntry {
+                                    display: short_peer(&peer),
+                                    last_voice: None,
+                                    stats: None,
+                                });
+                                entry.stats = Some(stats);
                             }
                             RiftEvent::VoiceFrame { .. } => {}
                             RiftEvent::IncomingCall { session, from } => {
@@ -967,19 +988,43 @@ fn draw_peers(f: &mut Frame, area: Rect, state: &UiState) {
             .last_voice
             .map(|t| t.elapsed() < Duration::from_millis(600))
             .unwrap_or(false);
-        let line = format!(
-            "{} {} peer",
-            peer.display,
-            if speaking { "●" } else { " " }
-        );
-        items.push(ListItem::new(Line::from(Span::styled(
-            line,
-            Style::default().fg(Color::Blue),
-        ))));
+        let (qos_char, qos_color) = qos_indicator(peer.stats.as_ref(), &state.qos_profile);
+        let line = Line::from(vec![
+            Span::styled(peer.display.clone(), Style::default().fg(Color::Blue)),
+            Span::raw(" "),
+            Span::styled(
+                if speaking { "●" } else { " " },
+                Style::default().fg(Color::Blue),
+            ),
+            Span::raw(" "),
+            Span::styled(qos_char.to_string(), Style::default().fg(qos_color)),
+            Span::raw(" peer"),
+        ]);
+        items.push(ListItem::new(line));
     }
     let block = Block::default().title("Peers").borders(Borders::ALL);
     let list = List::new(items).block(block);
     f.render_widget(list, area);
+}
+
+fn qos_indicator(
+    stats: Option<&rift_sdk::LinkStats>,
+    profile: &rift_sdk::RiftQosProfile,
+) -> (char, Color) {
+    let Some(stats) = stats else {
+        return ('·', Color::DarkGray);
+    };
+    if stats.loss <= profile.packet_loss_tolerance * 0.5
+        && stats.rtt_ms <= profile.target_latency_ms as f32
+    {
+        ('●', Color::Green)
+    } else if stats.loss <= profile.packet_loss_tolerance
+        && stats.rtt_ms <= profile.max_latency_ms as f32
+    {
+        ('●', Color::Yellow)
+    } else {
+        ('●', Color::Red)
+    }
 }
 
 fn draw_chat(f: &mut Frame, area: Rect, state: &UiState) {
@@ -1062,6 +1107,16 @@ fn draw_status(f: &mut Frame, area: Rect, state: &UiState) {
         Span::raw(" | "),
         Span::styled("codec: ", Style::default().fg(Color::Cyan)),
         Span::styled(state.current_codec.clone(), Style::default().fg(Color::White)),
+        Span::raw(" | "),
+        Span::styled("bitrate: ", Style::default().fg(Color::Cyan)),
+        Span::styled(
+            if state.audio_bitrate > 0 {
+                format!("{}kbps", state.audio_bitrate / 1000)
+            } else {
+                "?".to_string()
+            },
+            Style::default().fg(Color::White),
+        ),
         Span::raw(" | "),
         Span::styled("theme: ", Style::default().fg(Color::Cyan)),
         Span::styled(state.theme.clone(), Style::default().fg(Color::White)),
@@ -1193,6 +1248,7 @@ fn build_sdk_config(
         user_name: user_cfg.user.name.clone(),
         preferred_codecs: vec![CodecId::Opus, CodecId::PCM16],
         preferred_features: vec![FeatureFlag::Voice, FeatureFlag::Text, FeatureFlag::Relay],
+        qos: user_cfg.qos.to_profile(),
         dht: rift_sdk::DhtConfigSdk {
             enabled: dht || user_cfg.dht.enabled.unwrap_or(false),
             bootstrap_nodes: user_cfg.dht.bootstrap_nodes.clone().unwrap_or_default(),

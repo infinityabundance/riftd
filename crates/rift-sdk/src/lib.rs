@@ -1,5 +1,6 @@
 //! Rift SDK: high-level API for embedding Rift VoIP in other applications.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::net::SocketAddr;
 use std::sync::{
@@ -22,11 +23,12 @@ use rift_media::{
 };
 use rift_mesh::{Mesh, MeshConfig, MeshEvent, MeshHandle};
 use rift_nat::{attempt_hole_punch, NatConfig, PeerEndpoint};
-use rift_protocol::{CallState, Capabilities, SessionId};
+use rift_protocol::{CallState, Capabilities, QosProfile, SessionId};
 
 pub use rift_core::PeerId as RiftPeerId;
 pub use rift_protocol::{
-    CallState as RiftCallState, ChatMessage, CodecId, FeatureFlag, SessionId as RiftSessionId,
+    CallState as RiftCallState, ChatMessage, CodecId, FeatureFlag, QosProfile as RiftQosProfile,
+    SessionId as RiftSessionId,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,6 +39,8 @@ pub struct RiftConfig {
     pub user_name: Option<String>,
     pub preferred_codecs: Vec<CodecId>,
     pub preferred_features: Vec<FeatureFlag>,
+    #[serde(default)]
+    pub qos: QosProfile,
     pub dht: DhtConfigSdk,
     pub audio: AudioConfigSdk,
     pub network: NetworkConfigSdk,
@@ -78,6 +82,7 @@ impl Default for RiftConfig {
             user_name: None,
             preferred_codecs: vec![CodecId::Opus, CodecId::PCM16],
             preferred_features: vec![FeatureFlag::Voice, FeatureFlag::Text, FeatureFlag::Relay],
+            qos: QosProfile::default(),
             dht: DhtConfigSdk::default(),
             audio: AudioConfigSdk::default(),
             network: NetworkConfigSdk::default(),
@@ -121,6 +126,13 @@ impl Default for DhtConfigSdk {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct LinkStats {
+    pub rtt_ms: f32,
+    pub loss: f32,
+    pub jitter_ms: f32,
+}
+
 #[derive(Debug, Clone)]
 pub enum RiftEvent {
     IncomingChat(ChatMessage),
@@ -131,6 +143,8 @@ pub enum RiftEvent {
     PeerCapabilities { peer: PeerId, capabilities: Capabilities },
     AudioLevel { peer: PeerId, level: f32 },
     CodecSelected { codec: CodecId },
+    AudioBitrate { bitrate: u32 },
+    LinkStatsUpdated { peer: PeerId, stats: LinkStats },
     VoiceFrame { peer: PeerId, samples: Vec<i16> },
 }
 
@@ -156,6 +170,21 @@ struct VoiceRuntime {
     frame_samples: usize,
     emit_voice: bool,
     audio_config: AudioConfig,
+    tuning: Arc<StdMutex<AudioTuning>>,
+}
+
+#[derive(Debug, Clone)]
+struct AudioTuning {
+    bitrate: u32,
+    fec: bool,
+    loss_pct: u8,
+}
+
+struct QosState {
+    profile: QosProfile,
+    peer_stats: HashMap<PeerId, LinkStats>,
+    current: AudioTuning,
+    last_adjust: Instant,
 }
 
 struct SessionRuntime {
@@ -220,6 +249,7 @@ impl RiftHandle {
             password: password.map(|v| v.to_string()),
             listen_port: self.config.listen_port,
             relay_capable: self.config.relay,
+            qos: self.config.qos.clone(),
         };
         let mut mesh = Mesh::new(identity, config)
             .await
@@ -271,6 +301,11 @@ impl RiftHandle {
         } else {
             None
         };
+        if let Some(voice) = voice.as_ref() {
+            let _ = event_tx.send(RiftEvent::AudioBitrate {
+                bitrate: voice.audio_config.bitrate,
+            });
+        }
 
         let dht = if self.config.dht.enabled {
             let dht_config = RiftDhtConfig {
@@ -352,6 +387,17 @@ impl RiftHandle {
             frame_samples: v.frame_samples,
             emit_voice: v.emit_voice,
             audio_config: v.audio_config.clone(),
+            tuning: v.tuning.clone(),
+        });
+        let mut qos_state = voice_state.as_ref().map(|state| QosState {
+            profile: self.config.qos.clone(),
+            peer_stats: HashMap::new(),
+            current: AudioTuning {
+                bitrate: state.audio_config.bitrate,
+                fec: false,
+                loss_pct: 0,
+            },
+            last_adjust: Instant::now() - Duration::from_secs(5),
         });
 
         tokio::spawn(async move {
@@ -420,6 +466,25 @@ impl RiftHandle {
                     }
                     MeshEvent::GroupCodec(codec) => {
                         let _ = event_tx.send(RiftEvent::CodecSelected { codec });
+                    }
+                    MeshEvent::LinkStatsUpdated { peer, stats } => {
+                        let sdk_stats = LinkStats {
+                            rtt_ms: stats.rtt_ms,
+                            loss: stats.loss,
+                            jitter_ms: stats.jitter_ms,
+                        };
+                        let _ = event_tx.send(RiftEvent::LinkStatsUpdated { peer, stats: sdk_stats });
+                        if let (Some(state), Some(qos)) = (voice_state.as_ref(), qos_state.as_mut()) {
+                            qos.peer_stats.insert(peer, sdk_stats);
+                            if let Some(next) = compute_next_tuning(qos) {
+                                let mut tuning = state.tuning.lock().unwrap();
+                                let bitrate_changed = tuning.bitrate != next.bitrate;
+                                *tuning = next.clone();
+                                if bitrate_changed {
+                                    let _ = event_tx.send(RiftEvent::AudioBitrate { bitrate: next.bitrate });
+                                }
+                            }
+                        }
                     }
                     MeshEvent::PeerSessionConfig { .. }
                     | MeshEvent::RouteUpdated { .. }
@@ -524,6 +589,7 @@ struct VoiceRuntimeRef {
     frame_samples: usize,
     emit_voice: bool,
     audio_config: AudioConfig,
+    tuning: Arc<StdMutex<AudioTuning>>,
 }
 
 fn start_audio_pipeline(
@@ -533,7 +599,10 @@ fn start_audio_pipeline(
     mute_active: Arc<AtomicBool>,
 ) -> Result<VoiceRuntime, RiftError> {
     let mut audio_config = AudioConfig::default();
-    audio_config.bitrate = map_quality_to_bitrate(Some(&config.audio.quality));
+    let initial_bitrate = map_quality_to_bitrate(Some(&config.audio.quality));
+    audio_config.bitrate = initial_bitrate
+        .clamp(config.qos.min_bitrate, config.qos.max_bitrate)
+        .max(8_000);
     let (audio_in, mut audio_rx) = AudioIn::new_with_device(&audio_config, config.audio.input_device.as_deref())
         .map_err(|e| RiftError::Audio(format!("{e}")))?;
     let mut encoder = OpusEncoder::new(&audio_config).map_err(|e| RiftError::Audio(format!("{e}")))?;
@@ -546,10 +615,40 @@ fn start_audio_pipeline(
     let ptt_enabled = config.audio.ptt;
     let vad_enabled = config.audio.vad;
     let frame_duration = audio_config.frame_duration();
+    let tuning = Arc::new(StdMutex::new(AudioTuning {
+        bitrate: audio_config.bitrate,
+        fec: false,
+        loss_pct: 0,
+    }));
+    let tuning_for_task = tuning.clone();
     tokio::spawn(async move {
         let mut seq: u32 = 0;
         let mut hangover: u8 = 0;
+        let mut last_applied = AudioTuning {
+            bitrate: audio_config.bitrate,
+            fec: false,
+            loss_pct: 0,
+        };
         while let Some(frame) = audio_rx.recv().await {
+            let next_tuning = {
+                let tuning = tuning_for_task.lock().unwrap();
+                tuning.clone()
+            };
+            if next_tuning.bitrate != last_applied.bitrate
+                || next_tuning.fec != last_applied.fec
+                || next_tuning.loss_pct != last_applied.loss_pct
+            {
+                if let Err(err) = encoder.set_bitrate(next_tuning.bitrate) {
+                    tracing::debug!("opus bitrate update failed: {err}");
+                }
+                if let Err(err) = encoder.set_fec(next_tuning.fec) {
+                    tracing::debug!("opus fec update failed: {err}");
+                }
+                if let Err(err) = encoder.set_packet_loss(next_tuning.loss_pct) {
+                    tracing::debug!("opus loss update failed: {err}");
+                }
+                last_applied = next_tuning;
+            }
             if ptt_enabled && !ptt_active.load(Ordering::Relaxed) {
                 continue;
             }
@@ -629,6 +728,7 @@ fn start_audio_pipeline(
         frame_samples: audio_config.frame_samples(),
         emit_voice: config.audio.emit_voice_frames,
         audio_config,
+        tuning,
     })
 }
 
@@ -647,6 +747,54 @@ fn is_frame_active(frame: &[i16]) -> bool {
     }
     let avg = sum / frame.len().max(1) as i64;
     avg > 250
+}
+
+fn compute_next_tuning(qos: &mut QosState) -> Option<AudioTuning> {
+    if qos.peer_stats.is_empty() {
+        return None;
+    }
+    let now = Instant::now();
+    if now.duration_since(qos.last_adjust) < Duration::from_secs(2) {
+        return None;
+    }
+    let mut worst_rtt = 0.0f32;
+    let mut worst_loss = 0.0f32;
+    for stats in qos.peer_stats.values() {
+        worst_rtt = worst_rtt.max(stats.rtt_ms);
+        worst_loss = worst_loss.max(stats.loss);
+    }
+
+    let mut bitrate = qos.current.bitrate;
+    let max_latency = qos.profile.max_latency_ms as f32;
+    let target_latency = qos.profile.target_latency_ms as f32;
+    if worst_loss > qos.profile.packet_loss_tolerance || worst_rtt > max_latency {
+        bitrate = ((bitrate as f32) * 0.8) as u32;
+    } else if worst_loss < qos.profile.packet_loss_tolerance * 0.5
+        && worst_rtt < target_latency
+    {
+        bitrate = ((bitrate as f32) * 1.1) as u32;
+    }
+    bitrate = bitrate
+        .clamp(qos.profile.min_bitrate, qos.profile.max_bitrate)
+        .max(8_000);
+
+    let fec = worst_loss > qos.profile.packet_loss_tolerance * 0.5;
+    let loss_pct = (worst_loss * 100.0).round().min(100.0) as u8;
+
+    let next = AudioTuning {
+        bitrate,
+        fec,
+        loss_pct,
+    };
+    if next.bitrate != qos.current.bitrate
+        || next.fec != qos.current.fec
+        || next.loss_pct != qos.current.loss_pct
+    {
+        qos.current = next.clone();
+        qos.last_adjust = now;
+        return Some(next);
+    }
+    None
 }
 
 fn map_quality_to_bitrate(quality: Option<&str>) -> u32 {

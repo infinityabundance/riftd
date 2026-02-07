@@ -328,6 +328,23 @@ impl OpusEncoder {
         let len = self.inner.encode_float(frame, out)?;
         Ok(len)
     }
+
+    pub fn set_bitrate(&mut self, bitrate: u32) -> Result<()> {
+        self.inner
+            .set_bitrate(opus::Bitrate::Bits(bitrate as i32))?;
+        Ok(())
+    }
+
+    pub fn set_fec(&mut self, enabled: bool) -> Result<()> {
+        self.inner.set_inband_fec(enabled)?;
+        Ok(())
+    }
+
+    pub fn set_packet_loss(&mut self, loss_pct: u8) -> Result<()> {
+        let pct = loss_pct.min(100);
+        self.inner.set_packet_loss_perc(pct as i32)?;
+        Ok(())
+    }
 }
 
 pub struct OpusDecoder {

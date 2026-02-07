@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -13,8 +13,8 @@ use rift_discovery::{discover_peers, start_mdns_advertisement, DiscoveryConfig, 
 use rift_nat::{attempt_hole_punch, NatConfig, PeerEndpoint};
 use rift_protocol::{
     decode_frame, encode_frame, CallControl, CallState, Capabilities, ChatMessage, CodecId,
-    ControlMessage, FeatureFlag, PeerInfo, ProtocolVersion, RiftFrameHeader, RiftPayload,
-    SessionId, StreamKind, VoicePacket,
+    ControlMessage, FeatureFlag, PeerInfo, ProtocolVersion, QosProfile, RiftFrameHeader,
+    RiftPayload, SessionId, StreamKind, VoicePacket,
 };
 
 const MAX_PACKET: usize = 2048;
@@ -25,6 +25,7 @@ pub struct MeshConfig {
     pub password: Option<String>,
     pub listen_port: u16,
     pub relay_capable: bool,
+    pub qos: QosProfile,
 }
 
 #[derive(Debug, Clone)]
@@ -51,6 +52,7 @@ pub enum MeshEvent {
     PeerCapabilities { peer_id: PeerId, capabilities: Capabilities },
     PeerSessionConfig { peer_id: PeerId, codec: CodecId, frame_ms: u16 },
     GroupCodec(CodecId),
+    LinkStatsUpdated { peer: PeerId, stats: LinkStats },
     IncomingCall { session: SessionId, from: PeerId },
     CallAccepted { session: SessionId, from: PeerId },
     CallDeclined {
@@ -59,6 +61,13 @@ pub enum MeshEvent {
         reason: Option<String>,
     },
     CallEnded { session: SessionId },
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct LinkStats {
+    pub rtt_ms: f32,
+    pub loss: f32,
+    pub jitter_ms: f32,
 }
 
 pub struct Mesh {
@@ -84,11 +93,15 @@ struct MeshInner {
     preferred_features: Mutex<Vec<FeatureFlag>>,
     routes: Mutex<HashMap<PeerId, PeerRoute>>,
     peer_addrs: Mutex<HashMap<PeerId, SocketAddr>>,
+    relay_candidates: Mutex<HashMap<PeerId, PeerId>>,
     connections: Mutex<HashMap<SocketAddr, PeerConnection>>,
     pending: Mutex<HashMap<PendingKey, PendingHandshake>>,
     cache: Mutex<HashSet<MessageId>>,
     voice_seq: Mutex<HashMap<PeerId, u32>>,
+    control_seq: Mutex<u32>,
     nat_cfg: Mutex<Option<NatConfig>>,
+    qos: QosProfile,
+    link_stats: Mutex<HashMap<PeerId, LinkStatsState>>,
     events_tx: mpsc::Sender<MeshEvent>,
     relay_capable: bool,
     session_mgr: Mutex<SessionManager>,
@@ -129,6 +142,86 @@ struct SessionManager {
 struct SessionState {
     state: CallState,
     participants: HashSet<PeerId>,
+}
+
+#[derive(Debug)]
+struct LinkStatsState {
+    last_seq: Option<u32>,
+    window: VecDeque<bool>,
+    window_size: usize,
+    last_transit_ms: Option<f32>,
+    jitter_ms: f32,
+    rtt_ms: f32,
+    last_emit: tokio::time::Instant,
+}
+
+impl LinkStatsState {
+    fn new() -> Self {
+        Self {
+            last_seq: None,
+            window: VecDeque::with_capacity(128),
+            window_size: 100,
+            last_transit_ms: None,
+            jitter_ms: 0.0,
+            rtt_ms: 0.0,
+            last_emit: tokio::time::Instant::now() - Duration::from_secs(10),
+        }
+    }
+
+    fn update_on_receive(&mut self, seq: u32, sent_ms: u64, arrival_ms: u64) {
+        if let Some(last) = self.last_seq {
+            if seq <= last {
+                return;
+            }
+            let gap = (seq - last).saturating_sub(1);
+            let add = gap.min(self.window_size as u32) as usize;
+            for _ in 0..add {
+                self.push_window(false);
+            }
+        }
+        self.push_window(true);
+        self.last_seq = Some(seq);
+
+        let transit = arrival_ms as f32 - sent_ms as f32;
+        if let Some(prev) = self.last_transit_ms {
+            let d = (transit - prev).abs();
+            self.jitter_ms += (d - self.jitter_ms) / 16.0;
+        }
+        self.last_transit_ms = Some(transit);
+    }
+
+    fn update_rtt(&mut self, rtt_ms: f32) {
+        if self.rtt_ms == 0.0 {
+            self.rtt_ms = rtt_ms;
+        } else {
+            let alpha = 0.1;
+            self.rtt_ms = self.rtt_ms * (1.0 - alpha) + rtt_ms * alpha;
+        }
+    }
+
+    fn push_window(&mut self, received: bool) {
+        if self.window.len() >= self.window_size {
+            self.window.pop_front();
+        }
+        self.window.push_back(received);
+    }
+
+    fn loss_ratio(&self) -> f32 {
+        if self.window.is_empty() {
+            return 0.0;
+        }
+        let received = self.window.iter().filter(|v| **v).count() as f32;
+        let total = self.window.len() as f32;
+        (total - received) / total
+    }
+
+    fn snapshot(&self) -> LinkStats {
+        LinkStats {
+            rtt_ms: self.rtt_ms,
+            loss: self.loss_ratio(),
+            jitter_ms: self.jitter_ms,
+        }
+    }
 }
 
 impl SessionManager {
@@ -197,11 +290,15 @@ impl Mesh {
             routes: Mutex::new(HashMap::new()),
             group_codec: Mutex::new(CodecId::Opus),
             peer_addrs: Mutex::new(HashMap::new()),
+            relay_candidates: Mutex::new(HashMap::new()),
             connections: Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
             cache: Mutex::new(HashSet::new()),
             voice_seq: Mutex::new(HashMap::new()),
+            control_seq: Mutex::new(0),
             nat_cfg: Mutex::new(None),
+            qos: config.qos,
+            link_stats: Mutex::new(HashMap::new()),
             events_tx,
             relay_capable: config.relay_capable,
             session_mgr: Mutex::new(session_mgr),
@@ -211,6 +308,7 @@ impl Mesh {
 
         MeshInner::spawn_receiver(inner.clone(), 0, socket.clone());
         MeshInner::spawn_auto_upgrade(inner.clone());
+        MeshInner::spawn_pinger(inner.clone());
 
         let mesh = Self {
             inner,
@@ -314,6 +412,7 @@ impl Mesh {
 impl MeshInner {
     async fn broadcast_chat(&self, text: String) -> Result<()> {
         let timestamp = now_timestamp();
+        let seq = self.next_control_seq().await;
         let chat = ChatMessage::new(self.identity.peer_id, timestamp, text);
         let payload = RiftPayload::Control(ControlMessage::Chat(chat.clone()));
 
@@ -327,7 +426,7 @@ impl MeshInner {
                 continue;
             }
             if let Err(err) = self
-                .send_to_peer(peer_id, route, payload.clone(), 0, timestamp, SessionId::NONE)
+                .send_to_peer(peer_id, route, payload.clone(), seq, timestamp, SessionId::NONE)
                 .await
             {
                 tracing::debug!(peer = %peer_id, "chat send failed: {err}");
@@ -466,6 +565,33 @@ impl MeshInner {
         });
     }
 
+    fn spawn_pinger(inner: Arc<Self>) {
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(2));
+            let mut nonce: u64 = 1;
+            loop {
+                tick.tick().await;
+                let peers: Vec<PeerId> = {
+                    let routes = inner.routes.lock().await;
+                    routes.keys().copied().collect()
+                };
+                for peer_id in peers {
+                    if peer_id == inner.identity.peer_id {
+                        continue;
+                    }
+                    let ping = ControlMessage::Ping {
+                        nonce,
+                        sent_at_ms: now_timestamp(),
+                    };
+                    nonce = nonce.wrapping_add(1);
+                    let _ = inner
+                        .send_control_to_peer(peer_id, ping, SessionId::NONE)
+                        .await;
+                }
+            }
+        });
+    }
+
     async fn add_socket(self: &Arc<Self>, socket: UdpSocket) -> Result<usize> {
         let socket = Arc::new(socket);
         let mut sockets = self.sockets.lock().await;
@@ -519,6 +645,8 @@ impl MeshInner {
         };
 
         let (header, payload) = decode_frame(&plaintext)?;
+        self.update_link_stats(header.source, header.seq, header.timestamp)
+            .await;
         self.handle_frame(addr, header, payload).await?;
         Ok(())
     }
@@ -601,10 +729,11 @@ impl MeshInner {
             peer_id: self.identity.peer_id,
             display_name: None,
         };
+        let seq = self.next_control_seq().await;
         self.send_payload(
             addr,
             RiftPayload::Control(join),
-            0,
+            seq,
             now_timestamp(),
             SessionId::NONE,
         )
@@ -614,10 +743,11 @@ impl MeshInner {
             peer_id: self.identity.peer_id,
             relay_capable: self.relay_capable,
         };
+        let seq = self.next_control_seq().await;
         self.send_payload(
             addr,
             RiftPayload::Control(state),
-            0,
+            seq,
             now_timestamp(),
             SessionId::NONE,
         )
@@ -642,7 +772,8 @@ impl MeshInner {
                 .collect()
         };
         let msg = RiftPayload::Control(ControlMessage::PeerList { peers });
-        self.send_payload(addr, msg, 0, now_timestamp(), SessionId::NONE)
+        let seq = self.next_control_seq().await;
+        self.send_payload(addr, msg, seq, now_timestamp(), SessionId::NONE)
             .await
     }
 
@@ -734,7 +865,8 @@ impl MeshInner {
             peer_id: self.identity.peer_id,
             capabilities: caps,
         });
-        self.send_payload(addr, msg, 0, now_timestamp(), SessionId::NONE)
+        let seq = self.next_control_seq().await;
+        self.send_payload(addr, msg, seq, now_timestamp(), SessionId::NONE)
             .await
     }
 
@@ -774,6 +906,121 @@ impl MeshInner {
     async fn set_preferred_features(&self, features: Vec<FeatureFlag>) {
         let mut preferred = self.preferred_features.lock().await;
         *preferred = features;
+    }
+
+    async fn next_control_seq(&self) -> u32 {
+        let mut seq = self.control_seq.lock().await;
+        let current = *seq;
+        *seq = seq.wrapping_add(1);
+        current
+    }
+
+    async fn send_control_to_peer(
+        &self,
+        peer_id: PeerId,
+        msg: ControlMessage,
+        session: SessionId,
+    ) -> Result<()> {
+        let payload = RiftPayload::Control(msg);
+        let routes = self.routes_snapshot().await;
+        let Some(route) = routes.get(&peer_id).cloned() else {
+            return Err(anyhow!("missing route"));
+        };
+        let seq = self.next_control_seq().await;
+        self.send_to_peer(peer_id, route, payload, seq, now_timestamp(), session)
+            .await
+    }
+
+    async fn update_link_stats(&self, peer_id: PeerId, seq: u32, sent_ms: u64) {
+        if peer_id == self.identity.peer_id {
+            return;
+        }
+        let arrival_ms = now_timestamp();
+        let mut stats_map = self.link_stats.lock().await;
+        let state = stats_map.entry(peer_id).or_insert_with(LinkStatsState::new);
+        state.update_on_receive(seq, sent_ms, arrival_ms);
+        let should_emit = state.last_emit.elapsed() >= Duration::from_millis(500);
+        let stats = state.snapshot();
+        if should_emit {
+            state.last_emit = tokio::time::Instant::now();
+        }
+        drop(stats_map);
+        if should_emit {
+            let _ = self
+                .events_tx
+                .send(MeshEvent::LinkStatsUpdated { peer: peer_id, stats })
+                .await;
+            self.consider_route(peer_id, stats).await;
+        }
+    }
+
+    async fn update_rtt(&self, peer_id: PeerId, sent_at_ms: u64) {
+        let now_ms = now_timestamp();
+        let rtt_ms = now_ms.saturating_sub(sent_at_ms) as f32;
+        let mut stats_map = self.link_stats.lock().await;
+        let state = stats_map.entry(peer_id).or_insert_with(LinkStatsState::new);
+        state.update_rtt(rtt_ms);
+        let stats = state.snapshot();
+        drop(stats_map);
+        let _ = self
+            .events_tx
+            .send(MeshEvent::LinkStatsUpdated { peer: peer_id, stats })
+            .await;
+        self.consider_route(peer_id, stats).await;
+    }
+
+    async fn consider_route(&self, peer_id: PeerId, stats: LinkStats) {
+        let qos = &self.qos;
+        let prefer_relay =
+            stats.loss > qos.packet_loss_tolerance || stats.rtt_ms > qos.max_latency_ms as f32;
+        if prefer_relay {
+            let relay = {
+                let relays = self.relay_candidates.lock().await;
+                relays.get(&peer_id).copied()
+            };
+            if let Some(relay) = relay {
+                let relay_ok = {
+                    let peers = self.peers_by_id.lock().await;
+                    peers.contains_key(&relay)
+                };
+                if relay_ok {
+                    let mut routes = self.routes.lock().await;
+                    if !matches!(routes.get(&peer_id), Some(PeerRoute::Relayed { .. })) {
+                        routes.insert(peer_id, PeerRoute::Relayed { via: relay });
+                        drop(routes);
+                        let _ = self
+                            .events_tx
+                            .send(MeshEvent::RouteUpdated {
+                                peer_id,
+                                route: PeerRoute::Relayed { via: relay },
+                            })
+                            .await;
+                        tracing::info!(peer = %peer_id, relay = %relay, "switching to relay route");
+                    }
+                }
+            }
+            return;
+        }
+
+        let direct_addr = {
+            let peers = self.peers_by_id.lock().await;
+            peers.get(&peer_id).copied()
+        };
+        if let Some(addr) = direct_addr {
+            let mut routes = self.routes.lock().await;
+            if !matches!(routes.get(&peer_id), Some(PeerRoute::Direct { .. })) {
+                routes.insert(peer_id, PeerRoute::Direct { addr });
+                drop(routes);
+                let _ = self
+                    .events_tx
+                    .send(MeshEvent::RouteUpdated {
+                        peer_id,
+                        route: PeerRoute::Direct { addr },
+                    })
+                    .await;
+                tracing::info!(peer = %peer_id, "switching to direct route");
+            }
+        }
     }
 
     async fn send_payload(
@@ -918,6 +1165,12 @@ impl MeshInner {
                 let mut peer_addrs = self.peer_addrs.lock().await;
                 peer_addrs.remove(&peer_id);
                 drop(peer_addrs);
+                let mut relay_candidates = self.relay_candidates.lock().await;
+                relay_candidates.remove(&peer_id);
+                drop(relay_candidates);
+                let mut stats = self.link_stats.lock().await;
+                stats.remove(&peer_id);
+                drop(stats);
                 let mut sessions = self.session_mgr.lock().await;
                 sessions.remove_participant_all(peer_id);
                 drop(sessions);
@@ -935,6 +1188,15 @@ impl MeshInner {
                     .events_tx
                     .send(MeshEvent::ChatReceived(chat.clone()))
                     .await;
+            }
+            RiftPayload::Control(ControlMessage::Ping { nonce, sent_at_ms }) => {
+                let from = header.source;
+                let pong = ControlMessage::Pong { nonce, sent_at_ms };
+                let _ = self.send_control_to_peer(from, pong, SessionId::NONE).await;
+            }
+            RiftPayload::Control(ControlMessage::Pong { sent_at_ms, .. }) => {
+                let from = header.source;
+                self.update_rtt(from, sent_at_ms).await;
             }
             RiftPayload::Control(ControlMessage::PeerList { peers }) => {
                 self.handle_peer_list(addr, peers).await?;
@@ -1053,6 +1315,9 @@ impl MeshInner {
                 }
             } else if relay_capable {
                 if let Some(relay_peer_id) = relay_peer_id {
+                    let mut relay_candidates = self.relay_candidates.lock().await;
+                    relay_candidates.insert(peer.peer_id, relay_peer_id);
+                    drop(relay_candidates);
                     let mut routes = self.routes.lock().await;
                     if !matches!(routes.get(&peer.peer_id), Some(PeerRoute::Direct { .. })) {
                         routes.insert(peer.peer_id, PeerRoute::Relayed { via: relay_peer_id });
@@ -1184,7 +1449,8 @@ impl MeshInner {
         let Some(route) = routes.get(&peer_id).cloned() else {
             return Err(anyhow!("missing route"));
         };
-        self.send_to_peer(peer_id, route, payload, 0, now_timestamp(), session)
+        let seq = self.next_control_seq().await;
+        self.send_to_peer(peer_id, route, payload, seq, now_timestamp(), session)
             .await
     }
 
@@ -1438,7 +1704,7 @@ impl MeshHandle {
 fn now_timestamp() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
+        .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
 }
 
