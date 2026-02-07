@@ -20,7 +20,10 @@ use tokio::time::Instant;
 use tokio::task::LocalSet;
 
 use rift_core::{decode_invite, encode_invite, generate_invite, Identity};
-use rift_sdk::{AudioConfigSdk, NetworkConfigSdk, RiftConfig, RiftEvent, RiftHandle, RiftSessionId};
+use rift_sdk::{
+    AudioConfigSdk, NetworkConfigSdk, RiftConfig, RiftEvent, RiftHandle, RiftSessionId,
+};
+use rift_sdk::{CodecId, FeatureFlag};
 
 mod config;
 use config::UserConfig;
@@ -413,6 +416,7 @@ struct UiState {
     last_rx: Option<Instant>,
     user_name: String,
     audio_quality: String,
+    current_codec: String,
     theme: String,
     prefer_p2p: bool,
 }
@@ -459,6 +463,7 @@ impl UiState {
             last_rx: None,
             user_name,
             audio_quality,
+            current_codec: "opus".to_string(),
             theme,
             prefer_p2p,
         }
@@ -633,6 +638,13 @@ async fn run_tui_inner(
                                 }
                                 state.last_rx = Some(Instant::now());
                             }
+                            RiftEvent::CodecSelected { codec } => {
+                                state.current_codec = match codec {
+                                    CodecId::Opus => "opus".to_string(),
+                                    CodecId::PCM16 => "pcm16".to_string(),
+                                    CodecId::Experimental(id) => format!("exp-{id}"),
+                                };
+                            }
                             RiftEvent::VoiceFrame { .. } => {}
                             RiftEvent::IncomingCall { session, from } => {
                                 state.incoming_call = Some((session, from));
@@ -662,6 +674,7 @@ async fn run_tui_inner(
                                 state.last_rx = Some(Instant::now());
                             }
                             RiftEvent::CallStateChanged { .. } => {}
+                            RiftEvent::PeerCapabilities { .. } => {}
                         }
                     }
                 }
@@ -1030,6 +1043,9 @@ fn draw_status(f: &mut Frame, area: Rect, state: &UiState) {
         Span::styled("quality: ", Style::default().fg(Color::Cyan)),
         Span::styled(state.audio_quality.clone(), Style::default().fg(Color::White)),
         Span::raw(" | "),
+        Span::styled("codec: ", Style::default().fg(Color::Cyan)),
+        Span::styled(state.current_codec.clone(), Style::default().fg(Color::White)),
+        Span::raw(" | "),
         Span::styled("theme: ", Style::default().fg(Color::Cyan)),
         Span::styled(state.theme.clone(), Style::default().fg(Color::White)),
         Span::raw(" | "),
@@ -1157,6 +1173,8 @@ fn build_sdk_config(
         listen_port: port,
         relay,
         user_name: user_cfg.user.name.clone(),
+        preferred_codecs: vec![CodecId::Opus, CodecId::PCM16],
+        preferred_features: vec![FeatureFlag::Voice, FeatureFlag::Text, FeatureFlag::Relay],
         audio: AudioConfigSdk {
             enabled: voice,
             input_device: user_cfg.audio.input_device.clone(),

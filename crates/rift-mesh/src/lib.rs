@@ -12,8 +12,9 @@ use rift_core::{Identity, Invite, PeerId, MessageId};
 use rift_discovery::{discover_peers, start_mdns_advertisement, DiscoveryConfig, MdnsHandle};
 use rift_nat::{attempt_hole_punch, NatConfig, PeerEndpoint};
 use rift_protocol::{
-    decode_frame, encode_frame, CallControl, CallState, ChatMessage, ControlMessage, PeerInfo,
-    ProtocolVersion, RiftFrameHeader, RiftPayload, SessionId, StreamKind, VoicePacket,
+    decode_frame, encode_frame, CallControl, CallState, Capabilities, ChatMessage, CodecId,
+    ControlMessage, FeatureFlag, PeerInfo, ProtocolVersion, RiftFrameHeader, RiftPayload,
+    SessionId, StreamKind, VoicePacket,
 };
 
 const MAX_PACKET: usize = 2048;
@@ -42,10 +43,14 @@ pub enum MeshEvent {
         seq: u32,
         timestamp: u64,
         session: SessionId,
+        codec: CodecId,
         payload: Vec<u8>,
     },
     RouteUpdated { peer_id: PeerId, route: PeerRoute },
     RouteUpgraded(PeerId),
+    PeerCapabilities { peer_id: PeerId, capabilities: Capabilities },
+    PeerSessionConfig { peer_id: PeerId, codec: CodecId, frame_ms: u16 },
+    GroupCodec(CodecId),
     IncomingCall { session: SessionId, from: PeerId },
     CallAccepted { session: SessionId, from: PeerId },
     CallDeclined {
@@ -73,6 +78,10 @@ struct MeshInner {
     identity: Identity,
     peers_by_id: Mutex<HashMap<PeerId, SocketAddr>>,
     peer_caps: Mutex<HashMap<PeerId, bool>>,
+    peer_capabilities: Mutex<HashMap<PeerId, Capabilities>>,
+    peer_session: Mutex<HashMap<PeerId, SessionConfig>>,
+    preferred_codecs: Mutex<Vec<CodecId>>,
+    preferred_features: Mutex<Vec<FeatureFlag>>,
     routes: Mutex<HashMap<PeerId, PeerRoute>>,
     peer_addrs: Mutex<HashMap<PeerId, SocketAddr>>,
     connections: Mutex<HashMap<SocketAddr, PeerConnection>>,
@@ -85,6 +94,13 @@ struct MeshInner {
     session_mgr: Mutex<SessionManager>,
     active_session: Mutex<SessionId>,
     channel_session: SessionId,
+    group_codec: Mutex<CodecId>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionConfig {
+    pub codec: CodecId,
+    pub frame_ms: u16,
 }
 
 struct PeerConnection {
@@ -174,7 +190,12 @@ impl Mesh {
             identity,
             peers_by_id: Mutex::new(HashMap::new()),
             peer_caps: Mutex::new(HashMap::new()),
+            peer_capabilities: Mutex::new(HashMap::new()),
+            peer_session: Mutex::new(HashMap::new()),
+            preferred_codecs: Mutex::new(Vec::new()),
+            preferred_features: Mutex::new(Vec::new()),
             routes: Mutex::new(HashMap::new()),
+            group_codec: Mutex::new(CodecId::Opus),
             peer_addrs: Mutex::new(HashMap::new()),
             connections: Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
@@ -603,6 +624,7 @@ impl MeshInner {
         .await?;
 
         self.send_peer_list(addr).await?;
+        self.send_hello(addr).await?;
         Ok(())
     }
 
@@ -622,6 +644,136 @@ impl MeshInner {
         let msg = RiftPayload::Control(ControlMessage::PeerList { peers });
         self.send_payload(addr, msg, 0, now_timestamp(), SessionId::NONE)
             .await
+    }
+
+    async fn handle_capabilities(&self, peer_id: PeerId, capabilities: Capabilities) -> Result<()> {
+        {
+            let mut caps = self.peer_capabilities.lock().await;
+            caps.insert(peer_id, capabilities.clone());
+        }
+
+        let session = self.negotiate_session_config(&capabilities).await;
+        {
+            let mut sessions = self.peer_session.lock().await;
+            sessions.insert(peer_id, session.clone());
+        }
+        self.update_group_codec().await;
+
+        let _ = self
+            .events_tx
+            .send(MeshEvent::PeerCapabilities {
+                peer_id,
+                capabilities: capabilities.clone(),
+            })
+            .await;
+        let _ = self
+            .events_tx
+            .send(MeshEvent::PeerSessionConfig {
+                peer_id,
+                codec: session.codec,
+                frame_ms: session.frame_ms,
+            })
+            .await;
+        Ok(())
+    }
+
+    async fn negotiate_session_config(&self, remote: &Capabilities) -> SessionConfig {
+        let preferred = {
+            let prefs = self.preferred_codecs.lock().await;
+            if prefs.is_empty() {
+                vec![CodecId::Opus, CodecId::PCM16]
+            } else {
+                prefs.clone()
+            }
+        };
+        let codec = preferred
+            .into_iter()
+            .find(|codec| remote.audio_codecs.contains(codec))
+            .unwrap_or(CodecId::Opus);
+        let frame_ms = remote
+            .preferred_frame_duration_ms
+            .unwrap_or(20)
+            .min(20);
+        SessionConfig { codec, frame_ms }
+    }
+
+    async fn update_group_codec(&self) {
+        let caps = self.peer_capabilities.lock().await;
+        let preferred = {
+            let prefs = self.preferred_codecs.lock().await;
+            if prefs.is_empty() {
+                vec![CodecId::Opus, CodecId::PCM16]
+            } else {
+                prefs.clone()
+            }
+        };
+        let mut selected = CodecId::Opus;
+        for codec in preferred {
+            let mut all_support = true;
+            for cap in caps.values() {
+                if !cap.audio_codecs.contains(&codec) {
+                    all_support = false;
+                    break;
+                }
+            }
+            if all_support {
+                selected = codec;
+                break;
+            }
+        }
+        let mut group = self.group_codec.lock().await;
+        if *group != selected {
+            *group = selected;
+            let _ = self.events_tx.send(MeshEvent::GroupCodec(selected)).await;
+        }
+    }
+
+    async fn send_hello(&self, addr: SocketAddr) -> Result<()> {
+        let caps = self.default_capabilities().await;
+        let msg = RiftPayload::Control(ControlMessage::Hello {
+            peer_id: self.identity.peer_id,
+            capabilities: caps,
+        });
+        self.send_payload(addr, msg, 0, now_timestamp(), SessionId::NONE)
+            .await
+    }
+
+    async fn default_capabilities(&self) -> Capabilities {
+        let preferred = self.preferred_codecs().await;
+        let codecs = if preferred.is_empty() {
+            vec![CodecId::Opus, CodecId::PCM16]
+        } else {
+            preferred
+        };
+        let features = {
+            let preferred = self.preferred_features.lock().await;
+            if preferred.is_empty() {
+                vec![FeatureFlag::Voice, FeatureFlag::Text, FeatureFlag::Relay]
+            } else {
+                preferred.clone()
+            }
+        };
+        Capabilities {
+            supported_versions: vec![ProtocolVersion::V1],
+            audio_codecs: codecs,
+            features,
+            max_bitrate: Some(96_000),
+            preferred_frame_duration_ms: Some(20),
+        }
+    }
+
+    async fn preferred_codecs(&self) -> Vec<CodecId> {
+        self.preferred_codecs.lock().await.clone()
+    }
+
+    async fn set_preferred_codecs(&self, codecs: Vec<CodecId>) {
+        let mut preferred = self.preferred_codecs.lock().await;
+        *preferred = codecs;
+    }
+
+    async fn set_preferred_features(&self, features: Vec<FeatureFlag>) {
+        let mut preferred = self.preferred_features.lock().await;
+        *preferred = features;
     }
 
     async fn send_payload(
@@ -708,6 +860,11 @@ impl MeshInner {
                 sessions.add_participant(self.channel_session, peer_id);
                 drop(sessions);
 
+                let mut caps = self.peer_capabilities.lock().await;
+                caps.entry(peer_id).or_insert_with(default_peer_capabilities);
+                drop(caps);
+                self.update_group_codec().await;
+
                 let _ = self.events_tx.send(MeshEvent::PeerJoined(peer_id)).await;
                 let _ = self
                     .events_tx
@@ -730,6 +887,13 @@ impl MeshInner {
                 let mut peer_caps = self.peer_caps.lock().await;
                 peer_caps.insert(peer_id, relay_capable);
                 drop(peer_caps);
+            }
+            RiftPayload::Control(ControlMessage::Hello { peer_id, capabilities }) => {
+                self.handle_capabilities(peer_id, capabilities).await?;
+            }
+            RiftPayload::Control(ControlMessage::CapabilitiesUpdate(capabilities)) => {
+                let peer_id = header.source;
+                self.handle_capabilities(peer_id, capabilities).await?;
             }
             RiftPayload::Control(ControlMessage::Leave { peer_id }) => {
                 let mut peers = self.peers_by_id.lock().await;
@@ -778,11 +942,12 @@ impl MeshInner {
             RiftPayload::Control(ControlMessage::Call(call)) => {
                 self.handle_call(call).await?;
             }
-            RiftPayload::Voice(VoicePacket { payload, .. }) => {
+            RiftPayload::Voice(VoicePacket { codec_id, payload }) => {
                 let from = header.source;
                 let seq = header.seq;
                 let timestamp = header.timestamp;
                 let session = header.session;
+                let codec = codec_id;
                 let active_session = *self.active_session.lock().await;
                 if active_session != SessionId::NONE && session != active_session {
                     return Ok(());
@@ -803,6 +968,7 @@ impl MeshInner {
                         seq,
                         timestamp,
                         session,
+                        codec,
                         payload: payload.clone(),
                     })
                     .await;
@@ -1107,7 +1273,8 @@ impl MeshInner {
         timestamp: u64,
         payload: Vec<u8>,
     ) -> Result<()> {
-        let msg = RiftPayload::Voice(VoicePacket { codec_id: 1, payload });
+        let codec = *self.group_codec.lock().await;
+        let msg = RiftPayload::Voice(VoicePacket { codec_id: codec, payload });
         let session = *self.active_session.lock().await;
         let routes = self.routes_snapshot().await;
         for (peer_id, route) in routes {
@@ -1240,6 +1407,23 @@ impl MeshHandle {
     pub async fn end_call(&self, session: SessionId) -> Result<()> {
         self.inner.end_call(session).await
     }
+
+    pub async fn set_preferred_codecs(&self, codecs: Vec<CodecId>) {
+        self.inner.set_preferred_codecs(codecs).await;
+    }
+
+    pub async fn set_preferred_features(&self, features: Vec<FeatureFlag>) {
+        self.inner.set_preferred_features(features).await;
+    }
+
+    pub async fn peer_session_config(&self, peer_id: PeerId) -> Option<SessionConfig> {
+        let sessions = self.inner.peer_session.lock().await;
+        sessions.get(&peer_id).cloned()
+    }
+
+    pub async fn group_codec(&self) -> CodecId {
+        *self.inner.group_codec.lock().await
+    }
 }
 
 fn now_timestamp() -> u64 {
@@ -1255,5 +1439,15 @@ fn stream_for_payload(payload: &RiftPayload) -> StreamKind {
         RiftPayload::Voice(_) => StreamKind::Voice,
         RiftPayload::Text(_) => StreamKind::Text,
         RiftPayload::Relay { inner, .. } => stream_for_payload(inner),
+    }
+}
+
+fn default_peer_capabilities() -> Capabilities {
+    Capabilities {
+        supported_versions: vec![ProtocolVersion::V1],
+        audio_codecs: vec![CodecId::Opus],
+        features: vec![FeatureFlag::Voice, FeatureFlag::Text],
+        max_bitrate: Some(48_000),
+        preferred_frame_duration_ms: Some(20),
     }
 }
