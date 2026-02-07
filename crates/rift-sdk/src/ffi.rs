@@ -324,7 +324,8 @@ pub extern "C" fn rift_next_event(handle: *mut RiftHandleC, out_event: *mut Rift
         RiftEvent::CodecSelected { .. }
         | RiftEvent::PeerCapabilities { .. }
         | RiftEvent::AudioBitrate { .. }
-        | RiftEvent::LinkStatsUpdated { .. }
+        | RiftEvent::StatsUpdate { .. }
+        | RiftEvent::RouteUpdated { .. }
         | RiftEvent::VoiceFrame { .. } => {}
     }
     1

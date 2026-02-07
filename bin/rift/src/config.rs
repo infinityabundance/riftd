@@ -36,6 +36,13 @@ use serde::Deserialize;
 // min_bitrate = 16000
 // max_bitrate = 96000
 // packet_loss_tolerance = 0.08
+//
+// [logging]
+// level = "info"
+// target = "stderr" # stderr | file | file:/path/to/rift.log
+//
+// [metrics]
+// enabled = true
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct UserConfig {
@@ -49,6 +56,10 @@ pub struct UserConfig {
     pub dht: DhtSection,
     #[serde(default)]
     pub qos: QosSection,
+    #[serde(default)]
+    pub logging: LoggingSection,
+    #[serde(default)]
+    pub metrics: MetricsSection,
     #[serde(default)]
     pub ui: UiSection,
 }
@@ -112,6 +123,34 @@ pub struct QosSection {
     pub min_bitrate: Option<u32>,
     pub max_bitrate: Option<u32>,
     pub packet_loss_tolerance: Option<f32>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct LoggingSection {
+    pub level: Option<String>,
+    pub target: Option<String>,
+}
+
+impl Default for LoggingSection {
+    fn default() -> Self {
+        Self {
+            level: Some("info".to_string()),
+            target: Some("stderr".to_string()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MetricsSection {
+    pub enabled: Option<bool>,
+}
+
+impl Default for MetricsSection {
+    fn default() -> Self {
+        Self {
+            enabled: Some(true),
+        }
+    }
 }
 
 impl Default for QosSection {

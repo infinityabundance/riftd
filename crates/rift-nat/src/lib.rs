@@ -7,6 +7,8 @@ use tokio::sync::mpsc;
 use tokio::time::{interval, timeout};
 
 use rift_core::PeerId;
+use rift_metrics as metrics;
+use tracing::debug;
 
 #[derive(Debug, Clone)]
 pub struct NatConfig {
@@ -39,6 +41,7 @@ pub async fn attempt_hole_punch(
     nat_cfg: &NatConfig,
     peer: &PeerEndpoint,
 ) -> Result<(UdpSocket, SocketAddr), HolePunchError> {
+    metrics::inc_counter("rift_hole_punch_attempts", &[]);
     let ports = if nat_cfg.local_ports.is_empty() {
         vec![0]
     } else {
@@ -53,11 +56,15 @@ pub async fn attempt_hole_punch(
     }
 
     if sockets.is_empty() {
+        debug!("hole punch failed: no local ports");
+        metrics::inc_counter("rift_hole_punch_failures", &[("reason", "no_local_ports")]);
         return Err(HolePunchError::NoLocalPorts);
     }
 
     let target_addrs = build_target_addrs(peer);
     if target_addrs.is_empty() {
+        debug!("hole punch failed: no remote addrs");
+        metrics::inc_counter("rift_hole_punch_failures", &[("reason", "no_remote_addrs")]);
         return Err(HolePunchError::NoRemoteAddrs);
     }
 
@@ -110,8 +117,16 @@ pub async fn attempt_hole_punch(
 
     let result = timeout(Duration::from_secs(5), rx.recv()).await;
     match result {
-        Ok(Some((socket, addr))) => Ok((socket, addr)),
-        _ => Err(HolePunchError::Timeout),
+        Ok(Some((socket, addr))) => {
+            debug!(%addr, "hole punch success");
+            metrics::inc_counter("rift_hole_punch_success", &[]);
+            Ok((socket, addr))
+        }
+        _ => {
+            debug!("hole punch timeout");
+            metrics::inc_counter("rift_hole_punch_failures", &[("reason", "timeout")]);
+            Err(HolePunchError::Timeout)
+        }
     }
 }
 

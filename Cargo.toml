@@ -8,6 +8,7 @@ members = [
   "crates/rift-nat",
   "crates/rift-sdk",
   "crates/rift-dht",
+  "crates/rift-metrics",
   "bin/rift",
 ]
 resolver = "2"
