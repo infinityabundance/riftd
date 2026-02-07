@@ -9,12 +9,14 @@ clap = { version = "4", features = ["derive"] }
 dirs = "5"
 ratatui = "0.26"
 crossterm = "0.27"
+hex = "0.4"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 rift-core = { path = "../../crates/rift-core" }
 rift-mesh = { path = "../../crates/rift-mesh" }
 rift-media = { path = "../../crates/rift-media" }
 rift-nat = { path = "../../crates/rift-nat" }
+rift-protocol = { path = "../../crates/rift-protocol" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "io-util", "signal", "time", "sync"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt"] }

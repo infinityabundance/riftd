@@ -12,8 +12,8 @@ use rift_core::{Identity, Invite, PeerId, MessageId};
 use rift_discovery::{discover_peers, start_mdns_advertisement, DiscoveryConfig, MdnsHandle};
 use rift_nat::{attempt_hole_punch, NatConfig, PeerEndpoint};
 use rift_protocol::{
-    decode_frame, encode_frame, ChatMessage, ControlMessage, PeerInfo, ProtocolVersion, RiftFrameHeader,
-    RiftPayload, StreamKind, VoicePacket,
+    decode_frame, encode_frame, CallControl, CallState, ChatMessage, ControlMessage, PeerInfo,
+    ProtocolVersion, RiftFrameHeader, RiftPayload, SessionId, StreamKind, VoicePacket,
 };
 
 const MAX_PACKET: usize = 2048;
@@ -41,10 +41,19 @@ pub enum MeshEvent {
         from: PeerId,
         seq: u32,
         timestamp: u64,
+        session: SessionId,
         payload: Vec<u8>,
     },
     RouteUpdated { peer_id: PeerId, route: PeerRoute },
     RouteUpgraded(PeerId),
+    IncomingCall { session: SessionId, from: PeerId },
+    CallAccepted { session: SessionId, from: PeerId },
+    CallDeclined {
+        session: SessionId,
+        from: PeerId,
+        reason: Option<String>,
+    },
+    CallEnded { session: SessionId },
 }
 
 pub struct Mesh {
@@ -73,6 +82,9 @@ struct MeshInner {
     nat_cfg: Mutex<Option<NatConfig>>,
     events_tx: mpsc::Sender<MeshEvent>,
     relay_capable: bool,
+    session_mgr: Mutex<SessionManager>,
+    active_session: Mutex<SessionId>,
+    channel_session: SessionId,
 }
 
 struct PeerConnection {
@@ -92,12 +104,69 @@ enum PendingHandshake {
     ResponderAwait3(snow::HandshakeState),
 }
 
+#[derive(Debug)]
+struct SessionManager {
+    sessions: HashMap<SessionId, SessionState>,
+}
+
+#[derive(Debug, Clone)]
+struct SessionState {
+    state: CallState,
+    participants: HashSet<PeerId>,
+}
+
+impl SessionManager {
+    fn new(channel_session: SessionId) -> Self {
+        let mut sessions = HashMap::new();
+        sessions.insert(
+            channel_session,
+            SessionState {
+                state: CallState::Active,
+                participants: HashSet::new(),
+            },
+        );
+        Self { sessions }
+    }
+
+    fn ensure_session(&mut self, session: SessionId) -> &mut SessionState {
+        self.sessions.entry(session).or_insert_with(|| SessionState {
+            state: CallState::Ringing,
+            participants: HashSet::new(),
+        })
+    }
+
+    fn add_participant(&mut self, session: SessionId, peer_id: PeerId) {
+        let state = self.ensure_session(session);
+        state.participants.insert(peer_id);
+    }
+
+    fn remove_participant_all(&mut self, peer_id: PeerId) {
+        for state in self.sessions.values_mut() {
+            state.participants.remove(&peer_id);
+        }
+    }
+
+    fn set_state(&mut self, session: SessionId, state: CallState) {
+        let entry = self.ensure_session(session);
+        entry.state = state;
+    }
+
+    fn participants(&self, session: SessionId) -> Vec<PeerId> {
+        self.sessions
+            .get(&session)
+            .map(|state| state.participants.iter().copied().collect())
+            .unwrap_or_default()
+    }
+}
+
 impl Mesh {
     pub async fn new(identity: Identity, config: MeshConfig) -> Result<Self> {
         let addr = SocketAddr::from(([0, 0, 0, 0], config.listen_port));
         let socket = UdpSocket::bind(addr).await?;
         let socket = Arc::new(socket);
         let peer_id = identity.peer_id;
+        let channel_session = SessionId::from_channel(&config.channel_name, config.password.as_deref());
+        let session_mgr = SessionManager::new(channel_session);
 
         let (events_tx, events_rx) = mpsc::channel(256);
         let inner = Arc::new(MeshInner {
@@ -114,6 +183,9 @@ impl Mesh {
             nat_cfg: Mutex::new(None),
             events_tx,
             relay_capable: config.relay_capable,
+            session_mgr: Mutex::new(session_mgr),
+            active_session: Mutex::new(channel_session),
+            channel_session,
         });
 
         MeshInner::spawn_receiver(inner.clone(), 0, socket.clone());
@@ -187,6 +259,26 @@ impl Mesh {
             .await
     }
 
+    pub async fn start_call(&self, to: PeerId) -> Result<SessionId> {
+        self.inner.start_call(to).await
+    }
+
+    pub async fn accept_call(&self, session: SessionId) -> Result<()> {
+        self.inner.accept_call(session).await
+    }
+
+    pub async fn decline_call(&self, session: SessionId, reason: Option<String>) -> Result<()> {
+        self.inner.decline_call(session, reason).await
+    }
+
+    pub async fn end_call(&self, session: SessionId) -> Result<()> {
+        self.inner.end_call(session).await
+    }
+
+    pub async fn active_session(&self) -> SessionId {
+        *self.inner.active_session.lock().await
+    }
+
     pub async fn next_event(&mut self) -> Option<MeshEvent> {
         self.events_rx.recv().await
     }
@@ -214,7 +306,7 @@ impl MeshInner {
                 continue;
             }
             if let Err(err) = self
-                .send_to_peer(peer_id, route, payload.clone(), 0, timestamp)
+                .send_to_peer(peer_id, route, payload.clone(), 0, timestamp, SessionId::NONE)
                 .await
             {
                 tracing::debug!(peer = %peer_id, "chat send failed: {err}");
@@ -493,6 +585,7 @@ impl MeshInner {
             RiftPayload::Control(join),
             0,
             now_timestamp(),
+            SessionId::NONE,
         )
         .await?;
 
@@ -505,6 +598,7 @@ impl MeshInner {
             RiftPayload::Control(state),
             0,
             now_timestamp(),
+            SessionId::NONE,
         )
         .await?;
 
@@ -526,7 +620,8 @@ impl MeshInner {
                 .collect()
         };
         let msg = RiftPayload::Control(ControlMessage::PeerList { peers });
-        self.send_payload(addr, msg, 0, now_timestamp()).await
+        self.send_payload(addr, msg, 0, now_timestamp(), SessionId::NONE)
+            .await
     }
 
     async fn send_payload(
@@ -535,9 +630,17 @@ impl MeshInner {
         payload: RiftPayload,
         seq: u32,
         timestamp: u64,
+        session: SessionId,
     ) -> Result<()> {
-        self.send_payload_with_source(addr, payload, seq, timestamp, self.identity.peer_id)
-            .await
+        self.send_payload_with_source(
+            addr,
+            payload,
+            seq,
+            timestamp,
+            self.identity.peer_id,
+            session,
+        )
+        .await
     }
 
     async fn send_payload_with_source(
@@ -547,6 +650,7 @@ impl MeshInner {
         seq: u32,
         timestamp: u64,
         source: PeerId,
+        session: SessionId,
     ) -> Result<()> {
         let header = RiftFrameHeader {
             version: ProtocolVersion::V1,
@@ -555,6 +659,7 @@ impl MeshInner {
             seq,
             timestamp,
             source,
+            session,
         };
         let plaintext = encode_frame(&header, &payload);
         let (ciphertext, socket_idx) = {
@@ -598,6 +703,10 @@ impl MeshInner {
                 let upgraded = matches!(routes.get(&peer_id), Some(PeerRoute::Relayed { .. }));
                 routes.insert(peer_id, PeerRoute::Direct { addr });
                 drop(routes);
+
+                let mut sessions = self.session_mgr.lock().await;
+                sessions.add_participant(self.channel_session, peer_id);
+                drop(sessions);
 
                 let _ = self.events_tx.send(MeshEvent::PeerJoined(peer_id)).await;
                 let _ = self
@@ -645,6 +754,9 @@ impl MeshInner {
                 let mut peer_addrs = self.peer_addrs.lock().await;
                 peer_addrs.remove(&peer_id);
                 drop(peer_addrs);
+                let mut sessions = self.session_mgr.lock().await;
+                sessions.remove_participant_all(peer_id);
+                drop(sessions);
                 let _ = self.events_tx.send(MeshEvent::PeerLeft(peer_id)).await;
             }
             RiftPayload::Control(ControlMessage::Chat(chat)) => {
@@ -663,10 +775,18 @@ impl MeshInner {
             RiftPayload::Control(ControlMessage::PeerList { peers }) => {
                 self.handle_peer_list(addr, peers).await?;
             }
+            RiftPayload::Control(ControlMessage::Call(call)) => {
+                self.handle_call(call).await?;
+            }
             RiftPayload::Voice(VoicePacket { payload, .. }) => {
                 let from = header.source;
                 let seq = header.seq;
                 let timestamp = header.timestamp;
+                let session = header.session;
+                let active_session = *self.active_session.lock().await;
+                if active_session != SessionId::NONE && session != active_session {
+                    return Ok(());
+                }
                 let mut seqs = self.voice_seq.lock().await;
                 if let Some(last) = seqs.get(&from) {
                     if seq <= *last {
@@ -682,6 +802,7 @@ impl MeshInner {
                         from,
                         seq,
                         timestamp,
+                        session,
                         payload: payload.clone(),
                     })
                     .await;
@@ -790,6 +911,187 @@ impl MeshInner {
         Ok(())
     }
 
+    async fn start_call(&self, to: PeerId) -> Result<SessionId> {
+        let session = SessionId::random();
+        {
+            let mut sessions = self.session_mgr.lock().await;
+            sessions.set_state(session, CallState::Ringing);
+            sessions.add_participant(session, self.identity.peer_id);
+            sessions.add_participant(session, to);
+        }
+        let call = CallControl::Invite {
+            session,
+            from: self.identity.peer_id,
+            to,
+            display_name: None,
+        };
+        self.send_call_to_peer(to, call, session).await?;
+        Ok(session)
+    }
+
+    async fn accept_call(&self, session: SessionId) -> Result<()> {
+        {
+            let mut sessions = self.session_mgr.lock().await;
+            sessions.set_state(session, CallState::Active);
+            sessions.add_participant(session, self.identity.peer_id);
+        }
+        let participants = {
+            let sessions = self.session_mgr.lock().await;
+            sessions.participants(session)
+        };
+        for peer_id in participants {
+            if peer_id == self.identity.peer_id {
+                continue;
+            }
+            let call = CallControl::Accept {
+                session,
+                from: self.identity.peer_id,
+            };
+            let _ = self.send_call_to_peer(peer_id, call, session).await;
+        }
+        let mut active = self.active_session.lock().await;
+        *active = session;
+        Ok(())
+    }
+
+    async fn decline_call(&self, session: SessionId, reason: Option<String>) -> Result<()> {
+        {
+            let mut sessions = self.session_mgr.lock().await;
+            sessions.set_state(session, CallState::Ended);
+        }
+        let participants = {
+            let sessions = self.session_mgr.lock().await;
+            sessions.participants(session)
+        };
+        for peer_id in participants {
+            if peer_id == self.identity.peer_id {
+                continue;
+            }
+            let call = CallControl::Decline {
+                session,
+                from: self.identity.peer_id,
+                reason: reason.clone(),
+            };
+            let _ = self.send_call_to_peer(peer_id, call, session).await;
+        }
+        let mut active = self.active_session.lock().await;
+        if *active == session {
+            *active = self.channel_session;
+        }
+        Ok(())
+    }
+
+    async fn end_call(&self, session: SessionId) -> Result<()> {
+        {
+            let mut sessions = self.session_mgr.lock().await;
+            sessions.set_state(session, CallState::Ended);
+        }
+        let participants = {
+            let sessions = self.session_mgr.lock().await;
+            sessions.participants(session)
+        };
+        for peer_id in participants {
+            if peer_id == self.identity.peer_id {
+                continue;
+            }
+            let call = CallControl::Bye {
+                session,
+                from: self.identity.peer_id,
+            };
+            let _ = self.send_call_to_peer(peer_id, call, session).await;
+        }
+        let mut active = self.active_session.lock().await;
+        if *active == session {
+            *active = self.channel_session;
+        }
+        Ok(())
+    }
+
+    async fn send_call_to_peer(
+        &self,
+        peer_id: PeerId,
+        call: CallControl,
+        session: SessionId,
+    ) -> Result<()> {
+        let payload = RiftPayload::Control(ControlMessage::Call(call));
+        let routes = self.routes_snapshot().await;
+        let Some(route) = routes.get(&peer_id).cloned() else {
+            return Err(anyhow!("missing route"));
+        };
+        self.send_to_peer(peer_id, route, payload, 0, now_timestamp(), session)
+            .await
+    }
+
+    async fn handle_call(&self, call: CallControl) -> Result<()> {
+        match call {
+            CallControl::Invite { session, from, to, .. } => {
+                if to != self.identity.peer_id {
+                    return Ok(());
+                }
+                {
+                    let mut sessions = self.session_mgr.lock().await;
+                    sessions.set_state(session, CallState::Ringing);
+                    sessions.add_participant(session, from);
+                    sessions.add_participant(session, to);
+                }
+                let _ = self
+                    .events_tx
+                    .send(MeshEvent::IncomingCall { session, from })
+                    .await;
+            }
+            CallControl::Accept { session, from } => {
+                {
+                    let mut sessions = self.session_mgr.lock().await;
+                    sessions.set_state(session, CallState::Active);
+                    sessions.add_participant(session, from);
+                    sessions.add_participant(session, self.identity.peer_id);
+                }
+                let mut active = self.active_session.lock().await;
+                *active = session;
+                let _ = self
+                    .events_tx
+                    .send(MeshEvent::CallAccepted { session, from })
+                    .await;
+            }
+            CallControl::Decline { session, from, reason } => {
+                {
+                    let mut sessions = self.session_mgr.lock().await;
+                    sessions.set_state(session, CallState::Ended);
+                }
+                let mut active = self.active_session.lock().await;
+                if *active == session {
+                    *active = self.channel_session;
+                }
+                let _ = self
+                    .events_tx
+                    .send(MeshEvent::CallDeclined { session, from, reason })
+                    .await;
+            }
+            CallControl::Bye { session, .. } => {
+                {
+                    let mut sessions = self.session_mgr.lock().await;
+                    sessions.set_state(session, CallState::Ended);
+                }
+                let mut active = self.active_session.lock().await;
+                if *active == session {
+                    *active = self.channel_session;
+                }
+                let _ = self
+                    .events_tx
+                    .send(MeshEvent::CallEnded { session })
+                    .await;
+            }
+            CallControl::Mute { .. } => {}
+            CallControl::SessionInfo { session, participants } => {
+                let mut sessions = self.session_mgr.lock().await;
+                for peer in participants {
+                    sessions.add_participant(session, peer);
+                }
+            }
+        }
+        Ok(())
+    }
+
     async fn socket_by_idx(&self, socket_idx: usize) -> Result<Arc<UdpSocket>> {
         let sockets = self.sockets.lock().await;
         sockets
@@ -806,12 +1108,15 @@ impl MeshInner {
         payload: Vec<u8>,
     ) -> Result<()> {
         let msg = RiftPayload::Voice(VoicePacket { codec_id: 1, payload });
+        let session = *self.active_session.lock().await;
         let routes = self.routes_snapshot().await;
         for (peer_id, route) in routes {
             if peer_id == self.identity.peer_id {
                 continue;
             }
-            if let Err(err) = self.send_to_peer(peer_id, route, msg.clone(), seq, timestamp).await
+            if let Err(err) = self
+                .send_to_peer(peer_id, route, msg.clone(), seq, timestamp, session)
+                .await
             {
                 tracing::debug!(peer = %peer_id, "voice send failed: {err}");
             }
@@ -830,9 +1135,12 @@ impl MeshInner {
         payload: RiftPayload,
         seq: u32,
         timestamp: u64,
+        session: SessionId,
     ) -> Result<()> {
         match route {
-            PeerRoute::Direct { addr } => self.send_payload(addr, payload, seq, timestamp).await,
+            PeerRoute::Direct { addr } => self
+                .send_payload(addr, payload, seq, timestamp, session)
+                .await,
             PeerRoute::Relayed { via } => {
                 let relay_addr = {
                     let peers = self.peers_by_id.lock().await;
@@ -845,7 +1153,8 @@ impl MeshInner {
                     target: peer_id,
                     inner: Box::new(payload),
                 };
-                self.send_payload(relay_addr, envelope, seq, timestamp).await
+                self.send_payload(relay_addr, envelope, seq, timestamp, session)
+                    .await
             }
         }
     }
@@ -875,6 +1184,7 @@ impl MeshInner {
                     header.seq,
                     header.timestamp,
                     header.source,
+                    header.session,
                 )
                 .await?;
             }
@@ -894,6 +1204,7 @@ impl MeshInner {
                         header.seq,
                         header.timestamp,
                         header.source,
+                        header.session,
                     )
                     .await?;
                 }
@@ -912,6 +1223,22 @@ impl MeshHandle {
 
     pub async fn broadcast_chat(&self, text: String) -> Result<()> {
         self.inner.broadcast_chat(text).await
+    }
+
+    pub async fn start_call(&self, to: PeerId) -> Result<SessionId> {
+        self.inner.start_call(to).await
+    }
+
+    pub async fn accept_call(&self, session: SessionId) -> Result<()> {
+        self.inner.accept_call(session).await
+    }
+
+    pub async fn decline_call(&self, session: SessionId, reason: Option<String>) -> Result<()> {
+        self.inner.decline_call(session, reason).await
+    }
+
+    pub async fn end_call(&self, session: SessionId) -> Result<()> {
+        self.inner.end_call(session).await
     }
 }
 

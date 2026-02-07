@@ -16,6 +16,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub use rift_core::{ChannelId, MessageId, PeerId};
+use rand::rngs::OsRng;
+use rand::RngCore;
 
 const MAGIC: &[u8; 4] = b"RFT1";
 
@@ -46,6 +48,37 @@ pub enum StreamKind {
     Custom(u16),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SessionId(pub [u8; 32]);
+
+impl SessionId {
+    pub const NONE: SessionId = SessionId([0u8; 32]);
+
+    pub fn random() -> Self {
+        let mut bytes = [0u8; 32];
+        OsRng.fill_bytes(&mut bytes);
+        SessionId(bytes)
+    }
+
+    pub fn from_channel(name: &str, password: Option<&str>) -> Self {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"rift-channel:");
+        hasher.update(name.as_bytes());
+        if let Some(password) = password {
+            hasher.update(b":");
+            hasher.update(password.as_bytes());
+        }
+        let hash = hasher.finalize();
+        let mut bytes = [0u8; 32];
+        bytes.copy_from_slice(hash.as_bytes());
+        SessionId(bytes)
+    }
+
+    pub fn to_hex(&self) -> String {
+        hex::encode(self.0)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RiftFrameHeader {
     pub version: ProtocolVersion,
@@ -54,6 +87,7 @@ pub struct RiftFrameHeader {
     pub seq: u32,
     pub timestamp: u64,
     pub source: PeerId,
+    pub session: SessionId,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,6 +116,39 @@ pub struct Capabilities {
     pub streams: Vec<StreamKind>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CallState {
+    Ringing,
+    Active,
+    Ended,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum CallControl {
+    Invite {
+        session: SessionId,
+        from: PeerId,
+        to: PeerId,
+        display_name: Option<String>,
+    },
+    Accept { session: SessionId, from: PeerId },
+    Decline {
+        session: SessionId,
+        from: PeerId,
+        reason: Option<String>,
+    },
+    Bye { session: SessionId, from: PeerId },
+    Mute {
+        session: SessionId,
+        from: PeerId,
+        muted: bool,
+    },
+    SessionInfo {
+        session: SessionId,
+        participants: Vec<PeerId>,
+    },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ControlMessage {
     Join { peer_id: PeerId, display_name: Option<String> },
@@ -91,6 +158,7 @@ pub enum ControlMessage {
     RouteInfo { from: PeerId, to: PeerId, relayed: bool },
     Capabilities(Capabilities),
     PeerList { peers: Vec<PeerInfo> },
+    Call(CallControl),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

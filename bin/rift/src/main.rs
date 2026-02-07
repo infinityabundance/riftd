@@ -26,6 +26,7 @@ use rift_core::{decode_invite, encode_invite, generate_invite, Identity};
 use rift_media::{AudioConfig, AudioIn, AudioMixer, AudioOut, OpusDecoder, OpusEncoder};
 use rift_mesh::{Mesh, MeshConfig, MeshEvent, PeerRoute};
 use rift_nat::NatConfig;
+use rift_protocol::SessionId;
 
 mod config;
 use config::UserConfig;
@@ -53,6 +54,62 @@ enum Commands {
         internet: bool,
         #[arg(long)]
         relay: bool,
+    },
+    Call {
+        #[arg(long)]
+        peer: String,
+        #[arg(long)]
+        channel: Option<String>,
+        #[arg(long)]
+        password: Option<String>,
+        #[arg(long, default_value_t = 7777)]
+        port: u16,
+        #[arg(long)]
+        voice: bool,
+        #[arg(long)]
+        internet: bool,
+        #[arg(long)]
+        relay: bool,
+        #[arg(long)]
+        invite: Option<String>,
+    },
+    Accept {
+        #[arg(long)]
+        session: String,
+        #[arg(long)]
+        channel: Option<String>,
+        #[arg(long)]
+        password: Option<String>,
+        #[arg(long, default_value_t = 7777)]
+        port: u16,
+        #[arg(long)]
+        voice: bool,
+        #[arg(long)]
+        internet: bool,
+        #[arg(long)]
+        relay: bool,
+        #[arg(long)]
+        invite: Option<String>,
+    },
+    Decline {
+        #[arg(long)]
+        session: String,
+        #[arg(long)]
+        reason: Option<String>,
+        #[arg(long)]
+        channel: Option<String>,
+        #[arg(long)]
+        password: Option<String>,
+        #[arg(long, default_value_t = 7777)]
+        port: u16,
+        #[arg(long)]
+        voice: bool,
+        #[arg(long)]
+        internet: bool,
+        #[arg(long)]
+        relay: bool,
+        #[arg(long)]
+        invite: Option<String>,
     },
     Invite {
         #[arg(long)]
@@ -84,14 +141,71 @@ async fn main() -> Result<()> {
             voice,
             internet,
             relay,
-        } => cmd_create(channel, password, port, voice, internet, relay).await,
+        } => cmd_create(channel, password, port, voice, internet, relay, StartupAction::None).await,
+        Commands::Call {
+            peer,
+            channel,
+            password,
+            port,
+            voice,
+            internet,
+            relay,
+            invite,
+        } => {
+            let action = StartupAction::Call { peer };
+            if let Some(invite) = invite {
+                cmd_join(invite, port, voice, relay, action).await
+            } else {
+                let channel = channel.context("--channel is required without --invite")?;
+                cmd_create(channel, password, port, voice, internet, relay, action).await
+            }
+        }
+        Commands::Accept {
+            session,
+            channel,
+            password,
+            port,
+            voice,
+            internet,
+            relay,
+            invite,
+        } => {
+            let session = parse_session_id(&session)?;
+            let action = StartupAction::Accept { session };
+            if let Some(invite) = invite {
+                cmd_join(invite, port, voice, relay, action).await
+            } else {
+                let channel = channel.context("--channel is required without --invite")?;
+                cmd_create(channel, password, port, voice, internet, relay, action).await
+            }
+        }
+        Commands::Decline {
+            session,
+            reason,
+            channel,
+            password,
+            port,
+            voice,
+            internet,
+            relay,
+            invite,
+        } => {
+            let session = parse_session_id(&session)?;
+            let action = StartupAction::Decline { session, reason };
+            if let Some(invite) = invite {
+                cmd_join(invite, port, voice, relay, action).await
+            } else {
+                let channel = channel.context("--channel is required without --invite")?;
+                cmd_create(channel, password, port, voice, internet, relay, action).await
+            }
+        }
         Commands::Invite { channel } => cmd_invite(channel).await,
         Commands::Join {
             invite,
             port,
             voice,
             relay,
-        } => cmd_join(invite, port, voice, relay).await,
+        } => cmd_join(invite, port, voice, relay, StartupAction::None).await,
     }
 }
 
@@ -139,6 +253,7 @@ async fn cmd_create(
     voice: bool,
     internet: bool,
     relay: bool,
+    startup: StartupAction,
 ) -> Result<()> {
     let identity = Identity::load(None).context("identity not found, run init-identity first")?;
     let user_cfg = UserConfig::load()?;
@@ -163,7 +278,7 @@ async fn cmd_create(
         mesh.start_lan_discovery()?;
     }
 
-    run_tui(mesh, voice, user_cfg, channel).await
+    run_tui(mesh, voice, user_cfg, channel, startup).await
 }
 
 async fn cmd_invite(channel: String) -> Result<()> {
@@ -173,7 +288,13 @@ async fn cmd_invite(channel: String) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_join(invite_str: String, port: u16, voice: bool, relay: bool) -> Result<()> {
+async fn cmd_join(
+    invite_str: String,
+    port: u16,
+    voice: bool,
+    relay: bool,
+    startup: StartupAction,
+) -> Result<()> {
     let invite = decode_invite(&invite_str)?;
     let identity = Identity::load(None).context("identity not found, run init-identity first")?;
     let user_cfg = UserConfig::load()?;
@@ -191,7 +312,7 @@ async fn cmd_join(invite_str: String, port: u16, voice: bool, relay: bool) -> Re
     let nat_cfg = default_nat_config(port, user_cfg.network.local_ports.clone());
     mesh.join_invite(invite, nat_cfg).await?;
 
-    run_tui(mesh, voice, user_cfg, channel_name).await
+    run_tui(mesh, voice, user_cfg, channel_name, startup).await
 }
 
 #[derive(Debug, Clone)]
@@ -214,6 +335,24 @@ enum UiEvent {
     Tick,
     Mesh(MeshEvent),
     TxPulse,
+}
+
+#[derive(Debug)]
+enum UiAction {
+    SendChat(String),
+    StartCall(rift_core::PeerId),
+    AcceptCall(SessionId),
+    DeclineCall(SessionId, Option<String>),
+    EndCall(SessionId),
+    ToggleMute,
+}
+
+#[derive(Debug, Clone)]
+enum StartupAction {
+    None,
+    Call { peer: String },
+    Accept { session: SessionId },
+    Decline { session: SessionId, reason: Option<String> },
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -278,6 +417,12 @@ struct UiState {
     focus: Focus,
     local_peer_id: rift_core::PeerId,
     local_display: String,
+    channel_session: SessionId,
+    active_session: SessionId,
+    incoming_call: Option<(SessionId, rift_core::PeerId)>,
+    active_call_peer: Option<rift_core::PeerId>,
+    pending_call: Option<(SessionId, rift_core::PeerId)>,
+    muted: bool,
     peers: HashMap<rift_core::PeerId, PeerEntry>,
     routes: HashMap<rift_core::PeerId, PeerRoute>,
     chat: VecDeque<ChatLine>,
@@ -311,6 +456,7 @@ impl UiState {
         theme: String,
         prefer_p2p: bool,
         local_peer_id: rift_core::PeerId,
+        channel_session: SessionId,
     ) -> Self {
         Self {
             channel,
@@ -318,6 +464,12 @@ impl UiState {
             focus: Focus::Input,
             local_peer_id,
             local_display: format!("{} ({})", user_name, short_peer(&local_peer_id)),
+            channel_session,
+            active_session: channel_session,
+            incoming_call: None,
+            active_call_peer: None,
+            pending_call: None,
+            muted: false,
             peers: HashMap::new(),
             routes: HashMap::new(),
             chat: VecDeque::with_capacity(200),
@@ -366,10 +518,16 @@ impl UiState {
     }
 }
 
-async fn run_tui(mesh: Mesh, voice: bool, user_cfg: UserConfig, channel: String) -> Result<()> {
+async fn run_tui(
+    mesh: Mesh,
+    voice: bool,
+    user_cfg: UserConfig,
+    channel: String,
+    startup: StartupAction,
+) -> Result<()> {
     let local = LocalSet::new();
     local
-        .run_until(run_tui_inner(mesh, voice, user_cfg, channel))
+        .run_until(run_tui_inner(mesh, voice, user_cfg, channel, startup))
         .await
 }
 
@@ -378,6 +536,7 @@ async fn run_tui_inner(
     voice: bool,
     user_cfg: UserConfig,
     channel: String,
+    startup: StartupAction,
 ) -> Result<()> {
     let audio_quality = user_cfg.audio.quality.clone().unwrap_or_else(|| "medium".to_string());
     let ptt_enabled = user_cfg.audio.ptt.unwrap_or(false);
@@ -432,11 +591,13 @@ async fn run_tui_inner(
     };
 
     let ptt_active = Arc::new(AtomicBool::new(!ptt_enabled));
+    let mute_active = Arc::new(AtomicBool::new(false));
     if voice {
         let mesh_handle = mesh.handle();
         let mut encoder = opus_enc.take().unwrap();
         let mut audio_rx = audio_rx.take().unwrap();
         let ptt_active = ptt_active.clone();
+        let mute_active = mute_active.clone();
         let ptt_enabled = ptt_enabled;
         let ui_tx_voice = ui_tx.clone();
         let frame_duration = audio_config.frame_duration();
@@ -445,6 +606,9 @@ async fn run_tui_inner(
             let mut hangover: u8 = 0;
             while let Some(frame) = audio_rx.recv().await {
                 if ptt_enabled && !ptt_active.load(Ordering::Relaxed) {
+                    continue;
+                }
+                if mute_active.load(Ordering::Relaxed) {
                     continue;
                 }
                 if !ptt_enabled && vad_enabled {
@@ -530,7 +694,9 @@ async fn run_tui_inner(
     });
 
     let local_peer_id = mesh.local_peer_id();
+    let channel_session = mesh.active_session().await;
     let ui_tx_mesh = ui_tx.clone();
+    let chat_handle = mesh.handle();
     let mesh_handle = mesh.handle();
     tokio::spawn(async move {
         let mut mesh = mesh;
@@ -544,7 +710,7 @@ async fn run_tui_inner(
     });
     tokio::spawn(async move {
         while let Some(text) = chat_rx.recv().await {
-            if let Err(err) = mesh_handle.broadcast_chat(text).await {
+            if let Err(err) = chat_handle.broadcast_chat(text).await {
                 tracing::debug!("chat send error: {err}");
             }
         }
@@ -565,10 +731,12 @@ async fn run_tui_inner(
         theme,
         prefer_p2p,
         local_peer_id,
+        channel_session,
     );
     let mut decoder = opus_dec;
     let mixer = mixer;
     let frame_samples = audio_config.frame_samples();
+    let mut startup = startup;
 
     let mut should_quit = false;
     while !should_quit {
@@ -578,13 +746,15 @@ async fn run_tui_inner(
             Some(evt) = ui_rx.recv() => {
                 match evt {
                     UiEvent::Input(key) => {
-                        handle_key_event(
+                        if let Some(action) = handle_key_event(
                             key,
                             &mut state,
                             ptt_active.clone(),
-                            &chat_tx,
                             &mut should_quit,
-                        )?;
+                        )? {
+                            apply_action(action, &mut state, &chat_tx, &mesh_handle, &mute_active)
+                                .await;
+                        }
                     }
                     UiEvent::Tick => {
                         if state.ptt_enabled && state.mic_active {
@@ -645,6 +815,40 @@ async fn run_tui_inner(
                                     }
                                 }
                             }
+                            MeshEvent::IncomingCall { session, from } => {
+                                state.incoming_call = Some((session, from));
+                                state.last_rx = Some(Instant::now());
+                            }
+                            MeshEvent::CallAccepted { session, from } => {
+                                state.active_session = session;
+                                state.pending_call = None;
+                                state.active_call_peer = Some(from);
+                                if let Some((incoming, _)) = state.incoming_call {
+                                    if incoming == session {
+                                        state.incoming_call = None;
+                                    }
+                                }
+                                state.last_rx = Some(Instant::now());
+                            }
+                            MeshEvent::CallDeclined { session, from: _, reason: _ } => {
+                                if let Some((pending, _)) = state.pending_call {
+                                    if pending == session {
+                                        state.pending_call = None;
+                                    }
+                                }
+                                if state.active_session == session {
+                                    state.active_session = state.channel_session;
+                                    state.active_call_peer = None;
+                                }
+                                state.last_rx = Some(Instant::now());
+                            }
+                            MeshEvent::CallEnded { session } => {
+                                if state.active_session == session {
+                                    state.active_session = state.channel_session;
+                                    state.active_call_peer = None;
+                                }
+                                state.last_rx = Some(Instant::now());
+                            }
                             MeshEvent::RouteUpdated { peer_id, route } => {
                                 state.update_route(peer_id, route);
                             }
@@ -662,6 +866,10 @@ async fn run_tui_inner(
                 should_quit = true;
             }
         }
+
+        if let Some(action) = take_startup_action(&mut startup, &state) {
+            apply_action(action, &mut state, &chat_tx, &mesh_handle, &mute_active).await;
+        }
     }
 
     disable_raw_mode()?;
@@ -675,9 +883,8 @@ fn handle_key_event(
     key: KeyEvent,
     state: &mut UiState,
     ptt_active: Arc<AtomicBool>,
-    chat_tx: &mpsc::UnboundedSender<String>,
     should_quit: &mut bool,
-) -> Result<()> {
+) -> Result<Option<UiAction>> {
     if state.ptt_enabled {
         let is_ptt = match state.ptt_key {
             PttKey::F(1) => key.code == KeyCode::F(1),
@@ -716,7 +923,16 @@ fn handle_key_event(
                     state.ptt_last_signal = None;
                 }
             }
-            return Ok(());
+            return Ok(None);
+        }
+    }
+
+    if let Some((session, _from)) = state.incoming_call {
+        if key.code == KeyCode::Char('a') && key.modifiers.is_empty() {
+            return Ok(Some(UiAction::AcceptCall(session)));
+        }
+        if key.code == KeyCode::Char('d') && key.modifiers.is_empty() {
+            return Ok(Some(UiAction::DeclineCall(session, None)));
         }
     }
 
@@ -738,12 +954,29 @@ fn handle_key_event(
             let next = next_quality(&state.audio_quality);
             state.audio_quality = next.to_string();
         }
+        KeyCode::Char('m') if key.modifiers.is_empty() => {
+            return Ok(Some(UiAction::ToggleMute));
+        }
         KeyCode::Enter => {
             let text = state.input.trim().to_string();
             if !text.is_empty() {
-                state.add_chat_line(state.user_name.clone(), text.clone());
-                let _ = chat_tx.send(text);
-                state.last_tx = Some(Instant::now());
+                if let Some(rest) = text.strip_prefix("/call ") {
+                    if let Some(peer_id) = resolve_peer_input(state, rest.trim()) {
+                        state.input.clear();
+                        return Ok(Some(UiAction::StartCall(peer_id)));
+                    } else {
+                        state.add_chat_line("system".to_string(), "unknown peer".to_string());
+                    }
+                } else if text == "/hangup" || text == "/bye" {
+                    if state.active_session != state.channel_session {
+                        let session = state.active_session;
+                        state.input.clear();
+                        return Ok(Some(UiAction::EndCall(session)));
+                    }
+                } else {
+                    state.input.clear();
+                    return Ok(Some(UiAction::SendChat(text)));
+                }
             }
             state.input.clear();
         }
@@ -757,7 +990,111 @@ fn handle_key_event(
         }
         _ => {}
     }
-    Ok(())
+    Ok(None)
+}
+
+async fn apply_action(
+    action: UiAction,
+    state: &mut UiState,
+    chat_tx: &mpsc::UnboundedSender<String>,
+    mesh_handle: &rift_mesh::MeshHandle,
+    mute_active: &Arc<AtomicBool>,
+) {
+    match action {
+        UiAction::SendChat(text) => {
+            state.add_chat_line(state.user_name.clone(), text.clone());
+            let _ = chat_tx.send(text);
+            state.last_tx = Some(Instant::now());
+        }
+        UiAction::StartCall(peer_id) => {
+            if let Ok(session) = mesh_handle.start_call(peer_id).await {
+                state.active_call_peer = Some(peer_id);
+                state.incoming_call = None;
+                state.pending_call = Some((session, peer_id));
+                state.last_tx = Some(Instant::now());
+            }
+        }
+        UiAction::AcceptCall(session) => {
+            if let Err(err) = mesh_handle.accept_call(session).await {
+                tracing::debug!("accept call error: {err}");
+            } else {
+                if let Some((incoming, from)) = state.incoming_call {
+                    if incoming == session {
+                        state.active_call_peer = Some(from);
+                    }
+                }
+                state.incoming_call = None;
+                state.pending_call = None;
+                state.active_session = session;
+                state.last_tx = Some(Instant::now());
+            }
+        }
+        UiAction::DeclineCall(session, reason) => {
+            if let Err(err) = mesh_handle.decline_call(session, reason).await {
+                tracing::debug!("decline call error: {err}");
+            } else {
+                state.incoming_call = None;
+                if let Some((pending, _)) = state.pending_call {
+                    if pending == session {
+                        state.pending_call = None;
+                    }
+                }
+                if state.active_session == session {
+                    state.active_session = state.channel_session;
+                    state.active_call_peer = None;
+                }
+                state.last_tx = Some(Instant::now());
+            }
+        }
+        UiAction::EndCall(session) => {
+            if let Err(err) = mesh_handle.end_call(session).await {
+                tracing::debug!("end call error: {err}");
+            } else if state.active_session == session {
+                state.active_session = state.channel_session;
+                state.active_call_peer = None;
+                state.last_tx = Some(Instant::now());
+            }
+        }
+        UiAction::ToggleMute => {
+            state.muted = !state.muted;
+            mute_active.store(state.muted, Ordering::Relaxed);
+        }
+    }
+}
+
+fn take_startup_action(startup: &mut StartupAction, state: &UiState) -> Option<UiAction> {
+    match startup {
+        StartupAction::None => None,
+        StartupAction::Call { peer } => {
+            if let Some(peer_id) = resolve_peer_input(state, peer) {
+                *startup = StartupAction::None;
+                Some(UiAction::StartCall(peer_id))
+            } else {
+                None
+            }
+        }
+        StartupAction::Accept { session } => {
+            if let Some((incoming, _)) = state.incoming_call {
+                if incoming == *session {
+                    let session = *session;
+                    *startup = StartupAction::None;
+                    return Some(UiAction::AcceptCall(session));
+                }
+            }
+            None
+        }
+        StartupAction::Decline { session, reason } => {
+            if let Some((incoming, _)) = state.incoming_call {
+                if incoming == *session {
+                    let session = *session;
+                    let reason = reason.clone();
+                    *startup = StartupAction::None;
+                    return Some(UiAction::DeclineCall(session, reason));
+                }
+            }
+            None
+        }
+    }
 }
 
 fn draw_ui(f: &mut Frame, state: &UiState) {
@@ -850,7 +1187,21 @@ fn draw_status(f: &mut Frame, area: Rect, state: &UiState) {
     };
     let rx_on = pulse_active(state.last_rx, Duration::from_millis(300));
     let tx_on = pulse_active(state.last_tx, Duration::from_millis(300));
-    let header = Line::from(vec![
+    let call_info = if let Some((_, from)) = state.incoming_call {
+        format!("incoming {}", short_peer(&from))
+    } else if let Some((_, peer)) = state.pending_call {
+        format!("dialing {}", short_peer(&peer))
+    } else if state.active_session != state.channel_session {
+        let count = if state.active_call_peer.is_some() { 2 } else { 1 };
+        if let Some(peer) = state.active_call_peer {
+            format!("active {} [{}]", short_peer(&peer), count)
+        } else {
+            format!("active [{}]", count)
+        }
+    } else {
+        format!("channel [{}]", total)
+    };
+    let mut spans = vec![
         Span::styled("channel: ", Style::default().fg(Color::Cyan)),
         Span::styled(
             format!("{} [{}]", state.channel, total),
@@ -865,6 +1216,12 @@ fn draw_status(f: &mut Frame, area: Rect, state: &UiState) {
         Span::raw(" | "),
         Span::styled("ptt: ", Style::default().fg(Color::Cyan)),
         Span::styled(ptt_label, Style::default().fg(Color::Yellow)),
+        Span::raw(" | "),
+        Span::styled("mute: ", Style::default().fg(Color::Cyan)),
+        Span::styled(
+            if state.muted { "on" } else { "off" },
+            Style::default().fg(if state.muted { Color::Red } else { Color::Green }),
+        ),
         Span::raw(" | "),
         Span::styled("quality: ", Style::default().fg(Color::Cyan)),
         Span::styled(state.audio_quality.clone(), Style::default().fg(Color::White)),
@@ -890,11 +1247,16 @@ fn draw_status(f: &mut Frame, area: Rect, state: &UiState) {
             Style::default().fg(if tx_on { Color::Red } else { Color::DarkGray }),
         ),
         Span::raw(" | "),
+        Span::styled("call: ", Style::default().fg(Color::Cyan)),
+        Span::styled(call_info, Style::default().fg(Color::White)),
+        Span::raw(" | "),
         Span::styled("keys: ", Style::default().fg(Color::Magenta)),
         Span::styled("ctrl+q", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
         Span::raw(" quit "),
         Span::styled("ctrl+a", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
         Span::raw(" quality "),
+        Span::styled("m", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+        Span::raw(" mute "),
         Span::styled("tab", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
         Span::raw(" focus "),
         Span::styled("enter", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
@@ -904,7 +1266,21 @@ fn draw_status(f: &mut Frame, area: Rect, state: &UiState) {
             Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
         ),
         Span::raw(" talk"),
-    ]);
+    ];
+    if state.incoming_call.is_some() {
+        spans.push(Span::raw(" | "));
+        spans.push(Span::styled(
+            "a",
+            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::raw(" accept "));
+        spans.push(Span::styled(
+            "d",
+            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::raw(" decline"));
+    }
+    let header = Line::from(spans);
     let block = Block::default().borders(Borders::TOP);
     let paragraph = Paragraph::new(header).block(block);
     f.render_widget(paragraph, area);
@@ -985,6 +1361,35 @@ fn short_peer(peer: &rift_core::PeerId) -> String {
     let hex = peer.to_hex();
     let short = &hex[..8];
     short.to_string()
+}
+
+fn parse_session_id(input: &str) -> Result<SessionId> {
+    let trimmed = input.trim().trim_start_matches("0x");
+    let bytes = hex::decode(trimmed).context("invalid session hex")?;
+    if bytes.len() != 32 {
+        return Err(anyhow::anyhow!("session id must be 32 bytes"));
+    }
+    let mut raw = [0u8; 32];
+    raw.copy_from_slice(&bytes);
+    Ok(SessionId(raw))
+}
+
+fn resolve_peer_input(state: &UiState, input: &str) -> Option<rift_core::PeerId> {
+    let target = input.trim();
+    if target.is_empty() {
+        return None;
+    }
+    if target.eq_ignore_ascii_case("me") {
+        return Some(state.local_peer_id);
+    }
+    let needle = target.to_lowercase();
+    for peer_id in state.peers.keys() {
+        let short = short_peer(peer_id);
+        if short.eq_ignore_ascii_case(&needle) {
+            return Some(*peer_id);
+        }
+    }
+    None
 }
 
 fn is_frame_active(frame: &[i16]) -> bool {
