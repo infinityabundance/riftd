@@ -13,6 +13,7 @@ rift-discovery = { path = "../rift-discovery" }
 rift-nat = { path = "../rift-nat" }
 rift-mesh = { path = "../rift-mesh" }
 rift-media = { path = "../rift-media" }
+rift-dht = { path = "../rift-dht" }
 serde = { version = "1", features = ["derive"] }
 hex = "0.4"
 thiserror = "1"

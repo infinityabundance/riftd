@@ -7,6 +7,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::Stream;
 
 use rift_core::{ChannelId, PeerId};
+use rift_dht::{DhtConfig, DhtHandle, PeerEndpointInfo};
 
 const SERVICE_TYPE: &str = "_rift._udp.local.";
 
@@ -38,6 +39,41 @@ pub enum DiscoveryError {
     MissingPeerInfo,
     #[error("invalid peer id")]
     InvalidPeerId,
+    #[error("dht error: {0}")]
+    Dht(String),
+}
+
+#[derive(Debug, Clone)]
+pub enum DiscoveryMode {
+    Lan,
+    Dht(DhtConfig),
+}
+
+pub async fn start_dht(config: DhtConfig) -> Result<DhtHandle, DiscoveryError> {
+    DhtHandle::new(config)
+        .await
+        .map_err(|e| DiscoveryError::Dht(e.to_string()))
+}
+
+pub async fn dht_announce(
+    handle: &DhtHandle,
+    channel_id: ChannelId,
+    info: PeerEndpointInfo,
+) -> Result<(), DiscoveryError> {
+    handle
+        .announce(channel_id, info)
+        .await
+        .map_err(|e| DiscoveryError::Dht(e.to_string()))
+}
+
+pub async fn dht_lookup(
+    handle: &DhtHandle,
+    channel_id: ChannelId,
+) -> Result<Vec<PeerEndpointInfo>, DiscoveryError> {
+    handle
+        .lookup(channel_id)
+        .await
+        .map_err(|e| DiscoveryError::Dht(e.to_string()))
 }
 
 pub struct MdnsHandle {
@@ -147,7 +183,7 @@ impl Stream for MdnsStream {
     }
 }
 
-fn local_ipv4_addrs() -> Result<Vec<IpAddr>, DiscoveryError> {
+pub fn local_ipv4_addrs() -> Result<Vec<IpAddr>, DiscoveryError> {
     let mut addrs = Vec::new();
     let interfaces = if_addrs::get_if_addrs()
         .map_err(|e| DiscoveryError::Mdns(mdns_sd::Error::Msg(e.to_string())))?;

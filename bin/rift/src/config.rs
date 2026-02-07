@@ -25,6 +25,10 @@ use serde::Deserialize;
 //
 // [ui]
 // theme = "dark"
+//
+// [dht]
+// enabled = false
+// bootstrap_nodes = ["1.2.3.4:4001"]
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct UserConfig {
@@ -34,6 +38,8 @@ pub struct UserConfig {
     pub audio: AudioSection,
     #[serde(default)]
     pub network: NetworkSection,
+    #[serde(default)]
+    pub dht: DhtSection,
     #[serde(default)]
     pub ui: UiSection,
 }
@@ -88,6 +94,21 @@ impl Default for NetworkSection {
 #[derive(Debug, Clone, Deserialize)]
 pub struct UiSection {
     pub theme: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DhtSection {
+    pub enabled: Option<bool>,
+    pub bootstrap_nodes: Option<Vec<String>>,
+}
+
+impl Default for DhtSection {
+    fn default() -> Self {
+        Self {
+            enabled: Some(false),
+            bootstrap_nodes: None,
+        }
+    }
 }
 
 impl Default for UiSection {
