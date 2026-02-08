@@ -2,43 +2,49 @@ package com.example.riftmobile
 
 import android.Manifest
 import android.os.Bundle
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
+import androidx.compose.material3.Divider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.runtime.*
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.riftmobile.sdk.RiftClient
+import com.example.riftmobile.sdk.RiftEvent
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import android.util.Log
-import androidx.compose.ui.platform.LocalSoftwareKeyboardController
-import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.ui.text.input.KeyboardType
 
 class MainActivity : ComponentActivity() {
     private val viewModel: MainViewModel by viewModels()
@@ -55,9 +61,9 @@ class MainActivity : ComponentActivity() {
         setContent {
             MaterialTheme {
                 Surface {
-                    RiftApp(viewModel, onRequestMic = {
+                    RiftApp(viewModel) {
                         requestMicPermission.launch(Manifest.permission.RECORD_AUDIO)
-                    })
+                    }
                 }
             }
         }
@@ -70,31 +76,102 @@ data class ChatItem(
     val text: String,
 )
 
+data class PeerItem(
+    val id: String,
+)
+
+enum class Screen {
+    Home,
+    Call,
+    Settings
+}
+
 class MainViewModel : ViewModel() {
-    var handle by mutableStateOf(0L)
+    private val timeFormat = SimpleDateFormat("HH:mm:ss", Locale.US)
+
+    var screen by mutableStateOf(Screen.Home)
         private set
+    var client: RiftClient? = null
+        private set
+
     var channelName by mutableStateOf("gaming")
     var password by mutableStateOf("")
+    var inviteInput by mutableStateOf("")
+    var generatedInvite by mutableStateOf("")
+    var knownPeers by mutableStateOf("")
     var bootstrapNodes by mutableStateOf("")
     var dhtEnabled by mutableStateOf(false)
+    var internetEnabled by mutableStateOf(true)
     var connected by mutableStateOf(false)
     var statusText by mutableStateOf("disconnected")
     var peerCount by mutableStateOf(0)
+    var peers by mutableStateOf(listOf<PeerItem>())
     var messages by mutableStateOf(listOf<ChatItem>())
     var inputText by mutableStateOf("")
     var pttPressed by mutableStateOf(false)
     var micPermission by mutableStateOf(false)
-    private var pollJob: Job? = null
-    private val timeFormat = SimpleDateFormat("HH:mm:ss", Locale.US)
     var debugText by mutableStateOf("")
 
+    var audioQuality by mutableStateOf("medium")
+    var turnServers by mutableStateOf("")
+
     fun initHandle(context: android.content.Context, basePath: String) {
-        if (handle != 0L) return
-        handle = RiftNative.init(context, basePath)
-        Log.d("RiftMobile", "initHandle handle=$handle")
-        if (handle == 0L) {
+        if (client != null) return
+        val newClient = RiftClient(context, basePath)
+        val ok = newClient.init()
+        client = newClient
+        Log.d("RiftMobile", "initHandle ok=$ok")
+        if (!ok) {
             statusText = "init failed"
-            debugText = RiftNative.lastError() ?: "init failed"
+            debugText = newClient.lastError() ?: "init failed"
+            return
+        }
+        startEventCollector(newClient)
+    }
+
+    private fun startEventCollector(newClient: RiftClient) {
+        viewModelScope.launch(Dispatchers.IO) {
+            newClient.events.collect { event ->
+                withContext(Dispatchers.Main) {
+                    when (event) {
+                        is RiftEvent.Chat -> {
+                            messages = messages + ChatItem(
+                                time = event.timestamp,
+                                from = event.from,
+                                text = event.text
+                            )
+                        }
+                        is RiftEvent.PeerJoined -> {
+                            peers = (peers + PeerItem(event.peerId)).distinctBy { it.id }
+                            peerCount = peers.size
+                        }
+                        is RiftEvent.PeerLeft -> {
+                            peers = peers.filterNot { it.id == event.peerId }
+                            peerCount = peers.size
+                        }
+                        is RiftEvent.Stats -> {
+                            peerCount = event.peers
+                        }
+                        is RiftEvent.Security -> {
+                            messages = messages + ChatItem(
+                                time = timeFormat.format(Date()),
+                                from = "security",
+                                text = event.message
+                            )
+                        }
+                        is RiftEvent.Fingerprint -> {
+                            messages = messages + ChatItem(
+                                time = timeFormat.format(Date()),
+                                from = "fingerprint",
+                                text = "${event.peerId} ${event.fingerprint}"
+                            )
+                        }
+                        is RiftEvent.Status -> {
+                            statusText = event.text
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -102,152 +179,231 @@ class MainViewModel : ViewModel() {
         micPermission = granted
     }
 
+    fun setScreen(next: Screen) {
+        screen = next
+    }
+
     fun connect() {
         val name = channelName.trim()
-        if (handle == 0L || name.isEmpty()) {
-            statusText = if (handle == 0L) "init failed" else "enter channel"
-            debugText = "connect blocked handle=$handle name='$name'"
+        val client = client ?: return
+        if (name.isEmpty()) {
+            statusText = "enter channel"
             return
         }
         val passwordValue = password.ifEmpty { null }
         statusText = "connecting"
         debugText = "connecting..."
-        Log.d("RiftMobile", "connect start name=$name")
-        RiftNative.setDhtEnabled(handle, dhtEnabled)
-        RiftNative.setBootstrapNodes(handle, bootstrapNodes)
+        client.setDhtEnabled(dhtEnabled)
+        client.setBootstrapNodes(bootstrapNodes)
+        client.setTurnServers(turnServers)
+        client.setAudioQuality(audioQuality)
         viewModelScope.launch(Dispatchers.IO) {
-            val result = RiftNative.joinChannel(handle, name, passwordValue, true, dhtEnabled)
+            val ok = client.joinChannel(name, passwordValue, internetEnabled, dhtEnabled)
             withContext(Dispatchers.Main) {
-                if (result == 0) {
+                if (ok) {
                     connected = true
                     statusText = "connected"
-                    debugText = "connected"
-                    startPolling()
+                    screen = Screen.Call
                 } else {
                     connected = false
                     statusText = "connect failed"
-                    debugText = "connect failed code=$result"
+                    debugText = "connect failed"
                 }
             }
         }
     }
 
+    fun connectWithInvite() {
+        val invite = inviteInput.trim()
+        val name = channelName.trim()
+        val client = client ?: return
+        if (invite.isEmpty() || name.isEmpty()) {
+            statusText = "enter invite + channel"
+            return
+        }
+        client.setInvite(invite)
+        connect()
+    }
+
     fun disconnect() {
-        if (handle == 0L) return
+        val client = client ?: return
         val name = channelName.trim()
         viewModelScope.launch(Dispatchers.IO) {
             if (name.isNotEmpty()) {
-                RiftNative.leaveChannel(handle, name)
+                client.leaveChannel(name)
             }
             withContext(Dispatchers.Main) {
                 connected = false
                 statusText = "disconnected"
-                debugText = "disconnected"
                 pttPressed = false
-                pollJob?.cancel()
-                pollJob = null
+                peers = emptyList()
+                peerCount = 0
+                screen = Screen.Home
             }
         }
     }
 
     fun sendChat() {
         val text = inputText.trim()
+        val client = client ?: return
         if (text.isEmpty()) return
-        if (handle == 0L) {
-            statusText = "init failed"
-            debugText = "send blocked handle=0"
-            return
-        }
         if (!connected) {
             statusText = "not connected"
-            debugText = "send blocked not connected"
             return
         }
         val time = timeFormat.format(Date())
         messages = messages + ChatItem(time = time, from = "me", text = text)
         inputText = ""
         viewModelScope.launch(Dispatchers.IO) {
-            val result = RiftNative.sendChat(handle, text)
-            if (result != 0) {
+            val ok = client.sendChat(text)
+            if (!ok) {
                 withContext(Dispatchers.Main) {
                     statusText = "send failed"
-                    debugText = "send failed code=$result"
                 }
             }
         }
     }
 
     fun startPtt() {
-        if (!micPermission || handle == 0L || !connected) return
-        viewModelScope.launch(Dispatchers.IO) {
-            RiftNative.startPtt(handle)
-        }
+        val client = client ?: return
+        if (!micPermission || !connected) return
+        client.startPtt()
         pttPressed = true
-        debugText = "ptt start"
     }
 
     fun stopPtt() {
-        if (handle == 0L) return
-        viewModelScope.launch(Dispatchers.IO) {
-            RiftNative.stopPtt(handle)
-        }
+        val client = client ?: return
+        client.stopPtt()
         pttPressed = false
-        debugText = "ptt stop"
     }
 
-    private fun startPolling() {
-        if (pollJob != null) return
-        pollJob = viewModelScope.launch(Dispatchers.IO) {
-            while (connected) {
-                val event = RiftNative.pollEvent(handle)
-                if (event != null) {
-                    withContext(Dispatchers.Main) {
-                        when (event.type) {
-                            "chat" -> {
-                                val item = ChatItem(
-                                    time = event.status ?: "",
-                                    from = event.from ?: "peer",
-                                    text = event.text ?: ""
-                                )
-                                messages = messages + item
-                            }
-                            "stats" -> {
-                                if (event.peers != null) {
-                                    peerCount = event.peers
-                                }
-                            }
-                            "peer_joined" -> {
-                                peerCount = (event.peers ?: peerCount)
-                            }
-                            "peer_left" -> {
-                                peerCount = (event.peers ?: peerCount)
-                            }
-                            "status" -> {
-                                statusText = event.status ?: statusText
-                            }
-                        }
-                    }
-                }
-                delay(50)
-            }
-        }
+    fun generateInvite() {
+        val client = client ?: return
+        val channel = channelName.trim()
+        if (channel.isEmpty()) return
+        generatedInvite = client.generateInvite(channel, password.ifEmpty { null }, knownPeers) ?: ""
     }
 }
 
 @Composable
 fun RiftApp(viewModel: MainViewModel, onRequestMic: () -> Unit) {
+    when (viewModel.screen) {
+        Screen.Home -> HomeScreen(viewModel, onRequestMic)
+        Screen.Call -> CallScreen(viewModel)
+        Screen.Settings -> SettingsScreen(viewModel)
+    }
+}
+
+@Composable
+fun HomeScreen(viewModel: MainViewModel, onRequestMic: () -> Unit) {
+    Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+        Text(
+            text = "Status: ${viewModel.statusText} | Peers: ${viewModel.peerCount}",
+            fontWeight = FontWeight.Bold
+        )
+        if (viewModel.debugText.isNotEmpty()) {
+            Text(text = "Debug: ${viewModel.debugText}", style = MaterialTheme.typography.bodySmall)
+        }
+        Spacer(modifier = Modifier.height(8.dp))
+        OutlinedTextField(
+            value = viewModel.channelName,
+            onValueChange = { viewModel.channelName = it },
+            label = { Text("Channel") },
+            modifier = Modifier.fillMaxWidth()
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        OutlinedTextField(
+            value = viewModel.password,
+            onValueChange = { viewModel.password = it },
+            label = { Text("Password") },
+            modifier = Modifier.fillMaxWidth()
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        OutlinedTextField(
+            value = viewModel.inviteInput,
+            onValueChange = { viewModel.inviteInput = it },
+            label = { Text("Invite Link") },
+            modifier = Modifier.fillMaxWidth()
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        OutlinedTextField(
+            value = viewModel.knownPeers,
+            onValueChange = { viewModel.knownPeers = it },
+            label = { Text("Known Peers (ip:port, comma)") },
+            modifier = Modifier.fillMaxWidth()
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        OutlinedTextField(
+            value = viewModel.bootstrapNodes,
+            onValueChange = { viewModel.bootstrapNodes = it },
+            label = { Text("DHT Bootstrap (ip:port, comma)") },
+            modifier = Modifier.fillMaxWidth()
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Internet")
+            Spacer(modifier = Modifier.width(8.dp))
+            Switch(checked = viewModel.internetEnabled, onCheckedChange = { viewModel.internetEnabled = it })
+            Spacer(modifier = Modifier.width(16.dp))
+            Text("DHT")
+            Spacer(modifier = Modifier.width(8.dp))
+            Switch(checked = viewModel.dhtEnabled, onCheckedChange = { viewModel.dhtEnabled = it })
+        }
+        Spacer(modifier = Modifier.height(12.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = {
+                if (!viewModel.micPermission) {
+                    onRequestMic()
+                }
+                viewModel.connect()
+            }) { Text("Join Channel") }
+            OutlinedButton(onClick = { viewModel.connectWithInvite() }) { Text("Join Invite") }
+        }
+        Spacer(modifier = Modifier.height(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = { viewModel.generateInvite() }) { Text("Generate Invite") }
+            OutlinedButton(onClick = { viewModel.setScreen(Screen.Settings) }) { Text("Settings") }
+        }
+        if (viewModel.generatedInvite.isNotEmpty()) {
+            Spacer(modifier = Modifier.height(8.dp))
+            Text("Invite:")
+            Text(viewModel.generatedInvite, style = MaterialTheme.typography.bodySmall)
+        }
+    }
+}
+
+@Composable
+fun CallScreen(viewModel: MainViewModel) {
     val listState = rememberLazyListState()
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-        ConnectionPanel(viewModel, onRequestMic)
-        Spacer(modifier = Modifier.height(12.dp))
-        ChatList(viewModel.messages, listState, modifier = Modifier.weight(1f))
-        Spacer(modifier = Modifier.height(12.dp))
-        ChatInput(
-            value = viewModel.inputText,
-            onValueChange = { viewModel.inputText = it },
-            onSend = { viewModel.sendChat() },
-            enabled = viewModel.connected
-        )
+        Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
+            Text("Channel: ${viewModel.channelName}", fontWeight = FontWeight.Bold)
+            Text("Peers: ${viewModel.peerCount}")
+        }
+        Spacer(modifier = Modifier.height(8.dp))
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Column(modifier = Modifier.weight(0.35f)) {
+                Text("Peers", fontWeight = FontWeight.Bold)
+                LazyColumn(
+                    modifier = Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant)
+                ) {
+                    items(viewModel.peers) { peer ->
+                        Text(peer.id, modifier = Modifier.padding(6.dp))
+                    }
+                }
+            }
+            Column(modifier = Modifier.weight(0.65f)) {
+                Text("Chat", fontWeight = FontWeight.Bold)
+                ChatList(viewModel.messages, listState, modifier = Modifier.weight(1f))
+                Spacer(modifier = Modifier.height(8.dp))
+                ChatInput(
+                    value = viewModel.inputText,
+                    onValueChange = { viewModel.inputText = it },
+                    onSend = { viewModel.sendChat() },
+                    enabled = viewModel.connected
+                )
+            }
+        }
         Spacer(modifier = Modifier.height(12.dp))
         PttButton(
             pressed = viewModel.pttPressed,
@@ -255,6 +411,13 @@ fun RiftApp(viewModel: MainViewModel, onRequestMic: () -> Unit) {
             onUp = { viewModel.stopPtt() },
             enabled = viewModel.connected
         )
+        Spacer(modifier = Modifier.height(12.dp))
+        Divider()
+        Spacer(modifier = Modifier.height(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = { viewModel.setScreen(Screen.Settings) }) { Text("Settings") }
+            OutlinedButton(onClick = { viewModel.disconnect() }) { Text("Leave") }
+        }
     }
 
     LaunchedEffect(viewModel.messages.size) {
@@ -265,60 +428,27 @@ fun RiftApp(viewModel: MainViewModel, onRequestMic: () -> Unit) {
 }
 
 @Composable
-fun ConnectionPanel(viewModel: MainViewModel, onRequestMic: () -> Unit) {
-    Column {
-        Text(
-            text = "Status: ${viewModel.statusText} | Peers: ${viewModel.peerCount}",
-            fontWeight = FontWeight.Bold
-        )
-        if (viewModel.debugText.isNotEmpty()) {
-            Text(
-                text = "Debug: ${viewModel.debugText}",
-                style = MaterialTheme.typography.bodySmall
-            )
-        }
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedTextField(
-                value = viewModel.channelName,
-                onValueChange = { viewModel.channelName = it },
-                label = { Text("Channel") },
-                modifier = Modifier.weight(1f)
-            )
-            OutlinedTextField(
-                value = viewModel.password,
-                onValueChange = { viewModel.password = it },
-                label = { Text("Password") },
-                modifier = Modifier.weight(1f)
-            )
-        }
+fun SettingsScreen(viewModel: MainViewModel) {
+    Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+        Text("Settings", fontWeight = FontWeight.Bold)
+        Spacer(modifier = Modifier.height(8.dp))
         OutlinedTextField(
-            value = viewModel.bootstrapNodes,
-            onValueChange = { viewModel.bootstrapNodes = it },
-            label = { Text("DHT Bootstrap (ip:port, comma)") },
+            value = viewModel.audioQuality,
+            onValueChange = { viewModel.audioQuality = it },
+            label = { Text("Audio quality (low|medium|high)") },
             modifier = Modifier.fillMaxWidth()
         )
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            Text("Use DHT")
-            Switch(
-                checked = viewModel.dhtEnabled,
-                onCheckedChange = { viewModel.dhtEnabled = it }
-            )
-        }
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = {
-                if (!viewModel.micPermission) {
-                    onRequestMic()
-                }
-                viewModel.connect()
-            }, enabled = !viewModel.connected) {
-                Text("Connect")
-            }
-            Button(onClick = { viewModel.disconnect() }, enabled = viewModel.connected) {
-                Text("Disconnect")
-            }
+        Spacer(modifier = Modifier.height(8.dp))
+        OutlinedTextField(
+            value = viewModel.turnServers,
+            onValueChange = { viewModel.turnServers = it },
+            label = { Text("TURN servers (turn:host:port?username=...)") },
+            modifier = Modifier.fillMaxWidth()
+        )
+        Spacer(modifier = Modifier.height(12.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = { viewModel.setScreen(Screen.Home) }) { Text("Back") }
+            OutlinedButton(onClick = { viewModel.setScreen(Screen.Call) }) { Text("Call") }
         }
     }
 }
@@ -367,7 +497,7 @@ fun PttButton(pressed: Boolean, onDown: () -> Unit, onUp: () -> Unit, enabled: B
             .background(color)
             .pointerInput(Unit) {
                 if (enabled) {
-                    detectTapGestures(
+                    androidx.compose.foundation.gestures.detectTapGestures(
                         onPress = {
                             onDown()
                             tryAwaitRelease()
@@ -376,7 +506,7 @@ fun PttButton(pressed: Boolean, onDown: () -> Unit, onUp: () -> Unit, enabled: B
                     )
                 }
             },
-        contentAlignment = androidx.compose.ui.Alignment.Center
+        contentAlignment = Alignment.Center
     ) {
         Text(
             text = if (!enabled) "Connect to Talk" else if (pressed) "Talking..." else "Hold to Talk",

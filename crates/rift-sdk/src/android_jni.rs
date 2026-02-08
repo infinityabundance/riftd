@@ -50,7 +50,7 @@ fn with_handle<'a>(handle: jlong) -> &'a mut JniHandle {
 }
 
 #[no_mangle]
-pub extern "system" fn Java_com_example_riftmobile_RiftNative_init(
+pub extern "system" fn Java_com_example_riftmobile_sdk_RiftNative_init(
     mut env: JNIEnv,
     _class: JClass,
     context: JObject,
@@ -142,7 +142,7 @@ pub extern "system" fn Java_com_example_riftmobile_RiftNative_init(
 }
 
 #[no_mangle]
-pub extern "system" fn Java_com_example_riftmobile_RiftNative_joinChannel(
+pub extern "system" fn Java_com_example_riftmobile_sdk_RiftNative_joinChannel(
     mut env: JNIEnv,
     _class: JClass,
     handle: jlong,
@@ -180,7 +180,7 @@ pub extern "system" fn Java_com_example_riftmobile_RiftNative_joinChannel(
 }
 
 #[no_mangle]
-pub extern "system" fn Java_com_example_riftmobile_RiftNative_setBootstrapNodes(
+pub extern "system" fn Java_com_example_riftmobile_sdk_RiftNative_setBootstrapNodes(
     mut env: JNIEnv,
     _class: JClass,
     handle: jlong,
@@ -204,7 +204,7 @@ pub extern "system" fn Java_com_example_riftmobile_RiftNative_setBootstrapNodes(
 }
 
 #[no_mangle]
-pub extern "system" fn Java_com_example_riftmobile_RiftNative_setDhtEnabled(
+pub extern "system" fn Java_com_example_riftmobile_sdk_RiftNative_setDhtEnabled(
     _env: JNIEnv,
     _class: JClass,
     handle: jlong,
@@ -220,7 +220,111 @@ pub extern "system" fn Java_com_example_riftmobile_RiftNative_setDhtEnabled(
 }
 
 #[no_mangle]
-pub extern "system" fn Java_com_example_riftmobile_RiftNative_leaveChannel(
+pub extern "system" fn Java_com_example_riftmobile_sdk_RiftNative_setInvite(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    invite: JString,
+) {
+    if handle == 0 {
+        return;
+    }
+    let invite = if invite.is_null() {
+        None
+    } else {
+        env.get_string(&invite)
+            .ok()
+            .map(|s| s.to_string_lossy().to_string())
+    };
+    let handle = with_handle(handle);
+    let _ = handle.rt.block_on(handle.handle.set_invite(invite));
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_example_riftmobile_sdk_RiftNative_setTurnServers(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    servers: JString,
+) {
+    if handle == 0 {
+        return;
+    }
+    let servers = env
+        .get_string(&servers)
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let list = servers
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect::<Vec<_>>();
+    let handle = with_handle(handle);
+    let _ = handle.rt.block_on(handle.handle.set_turn_servers(list));
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_example_riftmobile_sdk_RiftNative_setAudioQuality(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    quality: JString,
+) {
+    if handle == 0 {
+        return;
+    }
+    let quality = if quality.is_null() {
+        None
+    } else {
+        env.get_string(&quality)
+            .ok()
+            .map(|s| s.to_string_lossy().to_string())
+    };
+    let handle = with_handle(handle);
+    let _ = handle.rt.block_on(handle.handle.set_audio_quality(quality));
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_example_riftmobile_sdk_RiftNative_generateInvite(
+    mut env: JNIEnv,
+    _class: JClass,
+    channel: JString,
+    password: JString,
+    known_peers: JString,
+) -> jobject {
+    let channel = env
+        .get_string(&channel)
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    if channel.is_empty() {
+        return std::ptr::null_mut();
+    }
+    let password = if password.is_null() {
+        None
+    } else {
+        env.get_string(&password).ok().map(|s| s.to_string_lossy().to_string())
+    };
+    let peers = env
+        .get_string(&known_peers)
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let known_peers = peers
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| s.parse().ok())
+        .collect::<Vec<_>>();
+    let invite = rift_core::generate_invite(&channel, password.as_deref(), known_peers, Vec::new());
+    let encoded = rift_core::encode_invite(&invite);
+    let Ok(jstr) = env.new_string(encoded) else {
+        return std::ptr::null_mut();
+    };
+    JObject::from(jstr).into_raw()
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_example_riftmobile_sdk_RiftNative_leaveChannel(
     mut env: JNIEnv,
     _class: JClass,
     handle: jlong,
@@ -236,7 +340,7 @@ pub extern "system" fn Java_com_example_riftmobile_RiftNative_leaveChannel(
 }
 
 #[no_mangle]
-pub extern "system" fn Java_com_example_riftmobile_RiftNative_sendChat(
+pub extern "system" fn Java_com_example_riftmobile_sdk_RiftNative_sendChat(
     mut env: JNIEnv,
     _class: JClass,
     handle: jlong,
@@ -252,7 +356,7 @@ pub extern "system" fn Java_com_example_riftmobile_RiftNative_sendChat(
 }
 
 #[no_mangle]
-pub extern "system" fn Java_com_example_riftmobile_RiftNative_startPtt(
+pub extern "system" fn Java_com_example_riftmobile_sdk_RiftNative_startPtt(
     _env: JNIEnv,
     _class: JClass,
     handle: jlong,
@@ -266,7 +370,7 @@ pub extern "system" fn Java_com_example_riftmobile_RiftNative_startPtt(
 }
 
 #[no_mangle]
-pub extern "system" fn Java_com_example_riftmobile_RiftNative_stopPtt(
+pub extern "system" fn Java_com_example_riftmobile_sdk_RiftNative_stopPtt(
     _env: JNIEnv,
     _class: JClass,
     handle: jlong,
@@ -280,7 +384,7 @@ pub extern "system" fn Java_com_example_riftmobile_RiftNative_stopPtt(
 }
 
 #[no_mangle]
-pub extern "system" fn Java_com_example_riftmobile_RiftNative_pollEvent(
+pub extern "system" fn Java_com_example_riftmobile_sdk_RiftNative_pollEvent(
     mut env: JNIEnv,
     _class: JClass,
     handle: jlong,
@@ -292,7 +396,7 @@ pub extern "system" fn Java_com_example_riftmobile_RiftNative_pollEvent(
     let event = handle.handle.try_next_event();
     let Some(event) = event else { return std::ptr::null_mut(); };
 
-    let class = env.find_class("com/example/riftmobile/RiftEventDto").ok();
+    let class = env.find_class("com/example/riftmobile/sdk/RiftEventDto").ok();
     let Some(class) = class else { return std::ptr::null_mut(); };
 
     let (type_str, from, text, peers, status) = match event {
@@ -365,7 +469,7 @@ pub extern "system" fn Java_com_example_riftmobile_RiftNative_pollEvent(
 }
 
 #[no_mangle]
-pub extern "system" fn Java_com_example_riftmobile_RiftNative_lastError(
+pub extern "system" fn Java_com_example_riftmobile_sdk_RiftNative_lastError(
     env: JNIEnv,
     _class: JClass,
 ) -> jobject {

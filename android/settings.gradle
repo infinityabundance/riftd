@@ -16,3 +16,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "riftmobile"
 include(":app")
+include(":rift-sdk-android")

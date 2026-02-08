@@ -1,6 +1,8 @@
 # Rift Mobile (Android)
 
 This is a minimal developer Android client for Rift (text + voice PTT).
+The Kotlin wrapper lives in `android/rift-sdk-android` and provides a small
+API on top of the JNI bindings.
 
 ## Build Steps
 

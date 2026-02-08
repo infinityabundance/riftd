@@ -308,6 +308,8 @@ struct RiftConfigOverrides {
     dht_enabled: Option<bool>,
     bootstrap_nodes: Option<Vec<String>>,
     invite: Option<String>,
+    turn_servers: Option<Vec<String>>,
+    audio_quality: Option<String>,
 }
 
 impl RiftHandle {
@@ -354,6 +356,16 @@ impl RiftHandle {
         overrides.invite = invite;
     }
 
+    pub async fn set_turn_servers(&self, servers: Vec<String>) {
+        let mut overrides = self.overrides.lock().await;
+        overrides.turn_servers = Some(servers);
+    }
+
+    pub async fn set_audio_quality(&self, quality: Option<String>) {
+        let mut overrides = self.overrides.lock().await;
+        overrides.audio_quality = quality;
+    }
+
     pub async fn join_channel(
         &self,
         name: &str,
@@ -371,6 +383,13 @@ impl RiftHandle {
             }
             if let Some(invite) = overrides.invite.clone() {
                 cfg.network.invite = Some(invite);
+            }
+            if let Some(turn_servers) = overrides.turn_servers.clone() {
+                cfg.network.turn_servers = turn_servers;
+                cfg.network.enable_turn = !cfg.network.turn_servers.is_empty();
+            }
+            if let Some(quality) = overrides.audio_quality.clone() {
+                cfg.audio.quality = quality;
             }
         }
         let mut runtime_guard = self.runtime.lock().await;
