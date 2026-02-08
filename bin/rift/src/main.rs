@@ -1595,6 +1595,7 @@ fn build_sdk_config(
                 .audit_log_path
                 .as_ref()
                 .map(|p| PathBuf::from(p)),
+            rekey_interval_secs: user_cfg.security.rekey_interval_secs,
         },
         dht: rift_sdk::DhtConfigSdk {
             enabled: dht || user_cfg.dht.enabled.unwrap_or(false),

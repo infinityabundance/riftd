@@ -117,6 +117,7 @@ pub struct SecurityConfig {
     pub reject_on_mismatch: bool,
     pub channel_shared_secret: Option<String>,
     pub audit_log_path: Option<PathBuf>,
+    pub rekey_interval_secs: Option<u64>,
 }
 
 impl Default for SecurityConfig {
@@ -127,6 +128,7 @@ impl Default for SecurityConfig {
             reject_on_mismatch: false,
             channel_shared_secret: None,
             audit_log_path: None,
+            rekey_interval_secs: Some(600),
         }
     }
 }
@@ -407,6 +409,7 @@ impl RiftHandle {
             auth_token,
             require_auth: cfg.security.channel_shared_secret.is_some(),
             e2ee_key,
+            rekey_interval_secs: cfg.security.rekey_interval_secs,
         };
         let mut mesh = Mesh::new(identity, config)
             .await
