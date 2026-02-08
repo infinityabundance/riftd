@@ -2,7 +2,7 @@
 
 <p align="center">
   <a href="https://github.com/infinityabundance/riftd">
-    <img src="riftd-logo.svg" alt="riftd logo" width="120">
+    <img src="assets/riftd.svg" alt="[riftd](https://github.com/infinityabundance/riftd)" width="120">
   </a>
 </p>
 
