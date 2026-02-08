@@ -24,6 +24,8 @@ use serde::Deserialize;
 // local_ports = [7777, 7778, 7779]
 // stun_servers = ["stun.l.google.com:19302", "stun1.l.google.com:19302"]
 // stun_timeout_ms = 800
+// punch_interval_ms = 200
+// punch_timeout_ms = 5000
 //
 // [ui]
 // theme = "dark"
@@ -112,6 +114,8 @@ pub struct NetworkSection {
     pub local_ports: Option<Vec<u16>>,
     pub stun_servers: Option<Vec<String>>,
     pub stun_timeout_ms: Option<u64>,
+    pub punch_interval_ms: Option<u64>,
+    pub punch_timeout_ms: Option<u64>,
 }
 
 impl Default for NetworkSection {
@@ -122,6 +126,8 @@ impl Default for NetworkSection {
             local_ports: None,
             stun_servers: None,
             stun_timeout_ms: Some(800),
+            punch_interval_ms: Some(200),
+            punch_timeout_ms: Some(5000),
         }
     }
 }

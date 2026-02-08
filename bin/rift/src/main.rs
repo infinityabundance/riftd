@@ -1619,6 +1619,8 @@ fn build_sdk_config(
             invite,
             stun_servers: user_cfg.network.stun_servers.clone().unwrap_or_default(),
             stun_timeout_ms: user_cfg.network.stun_timeout_ms,
+            punch_interval_ms: user_cfg.network.punch_interval_ms,
+            punch_timeout_ms: user_cfg.network.punch_timeout_ms,
         },
     }
 }

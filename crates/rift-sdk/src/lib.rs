@@ -77,6 +77,10 @@ pub struct NetworkConfigSdk {
     pub stun_servers: Vec<String>,
     #[serde(default)]
     pub stun_timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub punch_interval_ms: Option<u64>,
+    #[serde(default)]
+    pub punch_timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -155,6 +159,8 @@ impl Default for NetworkConfigSdk {
                 "stun1.l.google.com:19302".to_string(),
             ],
             stun_timeout_ms: Some(800),
+            punch_interval_ms: Some(200),
+            punch_timeout_ms: Some(5000),
         }
     }
 }
@@ -385,6 +391,8 @@ impl RiftHandle {
                 cfg.network.local_ports.clone(),
                 cfg.network.stun_servers.clone(),
                 cfg.network.stun_timeout_ms,
+                cfg.network.punch_interval_ms,
+                cfg.network.punch_timeout_ms,
             );
             mesh.enable_nat(nat_cfg.clone()).await;
             let mut known_peers = cfg.network.known_peers.clone();
@@ -468,6 +476,8 @@ impl RiftHandle {
                 cfg.network.local_ports.clone(),
                 cfg.network.stun_servers.clone(),
                 cfg.network.stun_timeout_ms,
+                cfg.network.punch_interval_ms,
+                cfg.network.punch_timeout_ms,
             );
             let addrs = match gather_public_addrs(&nat_cfg).await {
                 Ok(public_addrs) if !public_addrs.is_empty() => public_addrs,
@@ -502,6 +512,8 @@ impl RiftHandle {
                 self.config.network.local_ports.clone(),
                 self.config.network.stun_servers.clone(),
                 self.config.network.stun_timeout_ms,
+                self.config.network.punch_interval_ms,
+                self.config.network.punch_timeout_ms,
             );
             tokio::spawn(async move {
                 let mut tick = tokio::time::interval(Duration::from_secs(12));
@@ -1018,6 +1030,8 @@ fn default_nat_config(
     ports: Option<Vec<u16>>,
     stun_servers: Vec<String>,
     stun_timeout_ms: Option<u64>,
+    punch_interval_ms: Option<u64>,
+    punch_timeout_ms: Option<u64>,
 ) -> NatConfig {
     let mut local_ports = ports.unwrap_or_default();
     if local_ports.is_empty() {
@@ -1029,6 +1043,8 @@ fn default_nat_config(
         local_ports,
         stun_servers: parse_socket_addrs(&stun_servers),
         stun_timeout_ms: stun_timeout_ms.unwrap_or(800),
+        punch_interval_ms: punch_interval_ms.unwrap_or(200),
+        punch_timeout_ms: punch_timeout_ms.unwrap_or(5000),
     }
 }
 
