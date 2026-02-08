@@ -43,7 +43,7 @@ cargo run -p rift -- init-identity
 cargo run -p rift -- create --channel gaming --voice --port 7777
 
 # Terminal B
-cargo run -p rift -- create --channel gaming --voice --port 7778
+XDG_CONFIG_HOME=/tmp/rift2 cargo run -p rift -- create --channel gaming --voice --port 7778
 ```
 
 4. Internet (invite mode):
