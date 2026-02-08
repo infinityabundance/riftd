@@ -64,6 +64,7 @@ pub struct AudioConfigSdk {
     pub vad: bool,
     pub mute_output: bool,
     pub emit_voice_frames: bool,
+    pub allow_fail: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,6 +134,7 @@ impl Default for AudioConfigSdk {
             vad: true,
             mute_output: false,
             emit_voice_frames: false,
+            allow_fail: false,
         }
     }
 }
@@ -248,11 +250,19 @@ pub struct RiftHandle {
     identity: Mutex<Option<Identity>>,
     local_peer_id: PeerId,
     config: RiftConfig,
+    overrides: Mutex<RiftConfigOverrides>,
     runtime: Mutex<Option<SessionRuntime>>,
     event_rx: Mutex<mpsc::UnboundedReceiver<RiftEvent>>,
     event_tx: mpsc::UnboundedSender<RiftEvent>,
     ptt_active: Arc<AtomicBool>,
     mute_active: Arc<AtomicBool>,
+}
+
+#[derive(Debug, Default, Clone)]
+struct RiftConfigOverrides {
+    dht_enabled: Option<bool>,
+    bootstrap_nodes: Option<Vec<String>>,
+    invite: Option<String>,
 }
 
 impl RiftHandle {
@@ -276,11 +286,27 @@ impl RiftHandle {
             identity: Mutex::new(Some(identity)),
             local_peer_id,
             config,
+            overrides: Mutex::new(RiftConfigOverrides::default()),
             runtime: Mutex::new(None),
             event_rx: Mutex::new(event_rx),
             event_tx,
             mute_active: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    pub async fn set_dht_enabled(&self, enabled: bool) {
+        let mut overrides = self.overrides.lock().await;
+        overrides.dht_enabled = Some(enabled);
+    }
+
+    pub async fn set_bootstrap_nodes(&self, nodes: Vec<String>) {
+        let mut overrides = self.overrides.lock().await;
+        overrides.bootstrap_nodes = Some(nodes);
+    }
+
+    pub async fn set_invite(&self, invite: Option<String>) {
+        let mut overrides = self.overrides.lock().await;
+        overrides.invite = invite;
     }
 
     pub async fn join_channel(
@@ -289,6 +315,19 @@ impl RiftHandle {
         password: Option<&str>,
         internet: bool,
     ) -> Result<(), RiftError> {
+        let mut cfg = self.config.clone();
+        {
+            let overrides = self.overrides.lock().await;
+            if let Some(enabled) = overrides.dht_enabled {
+                cfg.dht.enabled = enabled;
+            }
+            if let Some(nodes) = overrides.bootstrap_nodes.clone() {
+                cfg.dht.bootstrap_nodes = nodes;
+            }
+            if let Some(invite) = overrides.invite.clone() {
+                cfg.network.invite = Some(invite);
+            }
+        }
         let mut runtime_guard = self.runtime.lock().await;
         if runtime_guard.is_some() {
             return Err(RiftError::AlreadyJoined);
@@ -297,7 +336,7 @@ impl RiftHandle {
             let mut identity_guard = self.identity.lock().await;
             match identity_guard.take() {
                 Some(identity) => identity,
-                None => Identity::load(self.config.identity_path.as_deref())
+                None => Identity::load(cfg.identity_path.as_deref())
                     .context("identity not found")
                     .map_err(|e| RiftError::Other(format!("{e}")))?,
             }
@@ -312,11 +351,11 @@ impl RiftHandle {
         let config = MeshConfig {
             channel_name: name.to_string(),
             password: password.map(|v| v.to_string()),
-            listen_port: self.config.listen_port,
-            relay_capable: self.config.relay,
-            qos: self.config.qos.clone(),
+            listen_port: cfg.listen_port,
+            relay_capable: cfg.relay,
+            qos: cfg.qos.clone(),
             auth_token,
-            require_auth: self.config.security.channel_shared_secret.is_some(),
+            require_auth: cfg.security.channel_shared_secret.is_some(),
         };
         let mut mesh = Mesh::new(identity, config)
             .await
@@ -332,12 +371,12 @@ impl RiftHandle {
         let security_handle = handle.clone();
 
         if internet {
-            let nat_cfg = default_nat_config(self.config.listen_port, self.config.network.local_ports.clone());
+            let nat_cfg = default_nat_config(cfg.listen_port, cfg.network.local_ports.clone());
             mesh.enable_nat(nat_cfg.clone()).await;
-            let invite = if let Some(invite_str) = &self.config.network.invite {
+            let invite = if let Some(invite_str) = &cfg.network.invite {
                 decode_invite(invite_str).map_err(|e| RiftError::Other(format!("{e}")))?
-            } else if !self.config.network.known_peers.is_empty() {
-                generate_invite(name, password, self.config.network.known_peers.clone())
+            } else if !cfg.network.known_peers.is_empty() {
+                generate_invite(name, password, cfg.network.known_peers.clone())
             } else {
                 Invite {
                     channel_name: name.to_string(),
@@ -359,13 +398,23 @@ impl RiftHandle {
         let event_tx = self.event_tx.clone();
         let channel = name.to_string();
         let channel_for_task = channel.clone();
-        let voice = if self.config.audio.enabled {
-            Some(start_audio_pipeline(
-                self.config.clone(),
+        let voice = if cfg.audio.enabled {
+            match start_audio_pipeline(
+                cfg.clone(),
                 handle.clone(),
                 self.ptt_active.clone(),
                 self.mute_active.clone(),
-            )?)
+            ) {
+                Ok(voice) => Some(voice),
+                Err(err) => {
+                    if cfg.audio.allow_fail {
+                        tracing::warn!("audio pipeline failed: {err}");
+                        None
+                    } else {
+                        return Err(err);
+                    }
+                }
+            }
         } else {
             None
         };
@@ -375,17 +424,16 @@ impl RiftHandle {
             });
         }
 
-        let dht = if self.config.dht.enabled {
+        let dht = if cfg.dht.enabled {
             let dht_config = RiftDhtConfig {
-                bootstrap_nodes: parse_socket_addrs(&self.config.dht.bootstrap_nodes),
-                listen_addr: self
-                    .config
+                bootstrap_nodes: parse_socket_addrs(&cfg.dht.bootstrap_nodes),
+                listen_addr: cfg
                     .dht
                     .listen_addr
                     .as_deref()
                     .and_then(parse_socket_addr)
                     .unwrap_or_else(|| {
-                        SocketAddr::from(([0, 0, 0, 0], self.config.listen_port.saturating_add(100)))
+                        SocketAddr::from(([0, 0, 0, 0], cfg.listen_port.saturating_add(100)))
                     }),
             };
             let handle_dht = DhtHandle::new(dht_config)
@@ -396,7 +444,7 @@ impl RiftHandle {
             let addrs = local_ipv4_addrs()
                 .map_err(|e| RiftError::Other(format!("{e}")))?
                 .into_iter()
-                .map(|ip| SocketAddr::new(ip, self.config.listen_port))
+                .map(|ip| SocketAddr::new(ip, cfg.listen_port))
                 .collect::<Vec<_>>();
             let info = PeerEndpointInfo {
                 peer_id: self.local_peer_id,

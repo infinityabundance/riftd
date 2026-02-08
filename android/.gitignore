@@ -1,0 +1,10 @@
+# Gradle
+.gradle/
+build/
+**/build/
+
+# Local SDK config
+local.properties
+
+# Generated JNI libs
+app/src/main/jniLibs/

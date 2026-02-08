@@ -15,6 +15,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
@@ -25,7 +26,13 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import android.util.Log
 
 class MainActivity : ComponentActivity() {
     private val viewModel: MainViewModel by viewModels()
@@ -38,7 +45,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        viewModel.initHandle()
+        viewModel.initHandle(this, filesDir.absolutePath)
         setContent {
             MaterialTheme {
                 Surface {
@@ -60,8 +67,10 @@ data class ChatItem(
 class MainViewModel : ViewModel() {
     var handle by mutableStateOf(0L)
         private set
-    var channelName by mutableStateOf("")
+    var channelName by mutableStateOf("gaming")
     var password by mutableStateOf("")
+    var bootstrapNodes by mutableStateOf("")
+    var dhtEnabled by mutableStateOf(true)
     var connected by mutableStateOf(false)
     var statusText by mutableStateOf("disconnected")
     var peerCount by mutableStateOf(0)
@@ -69,10 +78,18 @@ class MainViewModel : ViewModel() {
     var inputText by mutableStateOf("")
     var pttPressed by mutableStateOf(false)
     var micPermission by mutableStateOf(false)
+    private var pollJob: Job? = null
+    private val timeFormat = SimpleDateFormat("HH:mm:ss", Locale.US)
+    var debugText by mutableStateOf("")
 
-    fun initHandle() {
+    fun initHandle(context: android.content.Context, basePath: String) {
         if (handle != 0L) return
-        handle = RiftNative.init(null)
+        handle = RiftNative.init(context, basePath)
+        Log.d("RiftMobile", "initHandle handle=$handle")
+        if (handle == 0L) {
+            statusText = "init failed"
+            debugText = RiftNative.lastError() ?: "init failed"
+        }
     }
 
     fun onMicPermission(granted: Boolean) {
@@ -80,68 +97,127 @@ class MainViewModel : ViewModel() {
     }
 
     fun connect() {
-        if (handle == 0L) return
-        statusText = "connecting"
+        val name = channelName.trim()
+        if (handle == 0L || name.isEmpty()) {
+            statusText = if (handle == 0L) "init failed" else "enter channel"
+            debugText = "connect blocked handle=$handle name='$name'"
+            return
+        }
+        if (dhtEnabled && bootstrapNodes.trim().isEmpty()) {
+            statusText = "bootstrap required"
+            debugText = "dht enabled but no bootstrap"
+            return
+        }
         val passwordValue = password.ifEmpty { null }
-        RiftNative.joinChannel(handle, channelName, passwordValue, true, true)
-        connected = true
-        statusText = "connected"
-        startPolling()
+        statusText = "connecting"
+        debugText = "connecting..."
+        Log.d("RiftMobile", "connect start name=$name")
+        RiftNative.setDhtEnabled(handle, dhtEnabled)
+        RiftNative.setBootstrapNodes(handle, bootstrapNodes)
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = RiftNative.joinChannel(handle, name, passwordValue, true, true)
+            withContext(Dispatchers.Main) {
+                if (result == 0) {
+                    connected = true
+                    statusText = "connected"
+                    debugText = "connected"
+                    startPolling()
+                } else {
+                    connected = false
+                    statusText = "connect failed"
+                    debugText = "connect failed code=$result"
+                }
+            }
+        }
     }
 
     fun disconnect() {
         if (handle == 0L) return
-        RiftNative.leaveChannel(handle, channelName)
-        connected = false
-        statusText = "disconnected"
+        val name = channelName.trim()
+        viewModelScope.launch(Dispatchers.IO) {
+            if (name.isNotEmpty()) {
+                RiftNative.leaveChannel(handle, name)
+            }
+            withContext(Dispatchers.Main) {
+                connected = false
+                statusText = "disconnected"
+                debugText = "disconnected"
+                pollJob?.cancel()
+                pollJob = null
+            }
+        }
     }
 
     fun sendChat() {
         val text = inputText.trim()
-        if (text.isEmpty() || handle == 0L) return
-        RiftNative.sendChat(handle, text)
+        if (text.isEmpty()) return
+        if (handle == 0L) {
+            statusText = "init failed"
+            debugText = "send blocked handle=0"
+            return
+        }
+        val time = timeFormat.format(Date())
+        messages = messages + ChatItem(time = time, from = "me", text = text)
         inputText = ""
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = RiftNative.sendChat(handle, text)
+            if (result != 0) {
+                withContext(Dispatchers.Main) {
+                    statusText = "send failed"
+                    debugText = "send failed code=$result"
+                }
+            }
+        }
     }
 
     fun startPtt() {
         if (!micPermission || handle == 0L) return
-        RiftNative.startPtt(handle)
+        viewModelScope.launch(Dispatchers.IO) {
+            RiftNative.startPtt(handle)
+        }
         pttPressed = true
+        debugText = "ptt start"
     }
 
     fun stopPtt() {
         if (handle == 0L) return
-        RiftNative.stopPtt(handle)
+        viewModelScope.launch(Dispatchers.IO) {
+            RiftNative.stopPtt(handle)
+        }
         pttPressed = false
+        debugText = "ptt stop"
     }
 
     private fun startPolling() {
-        viewModelScope.launch(Dispatchers.IO) {
+        if (pollJob != null) return
+        pollJob = viewModelScope.launch(Dispatchers.IO) {
             while (connected) {
                 val event = RiftNative.pollEvent(handle)
                 if (event != null) {
-                    when (event.type) {
-                        "chat" -> {
-                            val item = ChatItem(
-                                time = event.status ?: "",
-                                from = event.from ?: "peer",
-                                text = event.text ?: ""
-                            )
-                            messages = messages + item
-                        }
-                        "stats" -> {
-                            if (event.peers != null) {
-                                peerCount = event.peers
+                    withContext(Dispatchers.Main) {
+                        when (event.type) {
+                            "chat" -> {
+                                val item = ChatItem(
+                                    time = event.status ?: "",
+                                    from = event.from ?: "peer",
+                                    text = event.text ?: ""
+                                )
+                                messages = messages + item
                             }
-                        }
-                        "peer_joined" -> {
-                            peerCount = (event.peers ?: peerCount)
-                        }
-                        "peer_left" -> {
-                            peerCount = (event.peers ?: peerCount)
-                        }
-                        "status" -> {
-                            statusText = event.status ?: statusText
+                            "stats" -> {
+                                if (event.peers != null) {
+                                    peerCount = event.peers
+                                }
+                            }
+                            "peer_joined" -> {
+                                peerCount = (event.peers ?: peerCount)
+                            }
+                            "peer_left" -> {
+                                peerCount = (event.peers ?: peerCount)
+                            }
+                            "status" -> {
+                                statusText = event.status ?: statusText
+                            }
                         }
                     }
                 }
@@ -179,6 +255,12 @@ fun ConnectionPanel(viewModel: MainViewModel, onRequestMic: () -> Unit) {
             text = "Status: ${viewModel.statusText} | Peers: ${viewModel.peerCount}",
             fontWeight = FontWeight.Bold
         )
+        if (viewModel.debugText.isNotEmpty()) {
+            Text(
+                text = "Debug: ${viewModel.debugText}",
+                style = MaterialTheme.typography.bodySmall
+            )
+        }
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedTextField(
                 value = viewModel.channelName,
@@ -191,6 +273,22 @@ fun ConnectionPanel(viewModel: MainViewModel, onRequestMic: () -> Unit) {
                 onValueChange = { viewModel.password = it },
                 label = { Text("Password") },
                 modifier = Modifier.weight(1f)
+            )
+        }
+        OutlinedTextField(
+            value = viewModel.bootstrapNodes,
+            onValueChange = { viewModel.bootstrapNodes = it },
+            label = { Text("DHT Bootstrap (ip:port, comma)") },
+            modifier = Modifier.fillMaxWidth()
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text("Use DHT")
+            Switch(
+                checked = viewModel.dhtEnabled,
+                onCheckedChange = { viewModel.dhtEnabled = it }
             )
         }
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
