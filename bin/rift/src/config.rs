@@ -26,6 +26,7 @@ use serde::Deserialize;
 // stun_timeout_ms = 800
 // punch_interval_ms = 200
 // punch_timeout_ms = 5000
+// max_direct_peers = 8
 //
 // [ui]
 // theme = "dark"
@@ -117,6 +118,7 @@ pub struct NetworkSection {
     pub stun_timeout_ms: Option<u64>,
     pub punch_interval_ms: Option<u64>,
     pub punch_timeout_ms: Option<u64>,
+    pub max_direct_peers: Option<usize>,
 }
 
 impl Default for NetworkSection {
@@ -129,6 +131,7 @@ impl Default for NetworkSection {
             stun_timeout_ms: Some(800),
             punch_interval_ms: Some(200),
             punch_timeout_ms: Some(5000),
+            max_direct_peers: None,
         }
     }
 }

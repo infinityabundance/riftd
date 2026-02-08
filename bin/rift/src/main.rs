@@ -1622,6 +1622,7 @@ fn build_sdk_config(
             stun_timeout_ms: user_cfg.network.stun_timeout_ms,
             punch_interval_ms: user_cfg.network.punch_interval_ms,
             punch_timeout_ms: user_cfg.network.punch_timeout_ms,
+            max_direct_peers: user_cfg.network.max_direct_peers,
         },
     }
 }
