@@ -1116,3 +1116,5 @@ fn parse_socket_addrs(inputs: &[String]) -> Vec<SocketAddr> {
 
 #[cfg(feature = "ffi")]
 pub mod ffi;
+#[cfg(target_os = "android")]
+pub mod android_jni;
