@@ -6,6 +6,7 @@ members = [
   "crates/rift-media",
   "crates/rift-protocol",
   "crates/rift-nat",
+  "crates/rift-pr",
   "crates/rift-sdk",
   "crates/rift-dht",
   "crates/rift-metrics",
