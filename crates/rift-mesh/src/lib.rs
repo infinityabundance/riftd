@@ -129,6 +129,7 @@ struct MeshInner {
     active_session: Mutex<SessionId>,
     channel_session: SessionId,
     group_codec: Mutex<CodecId>,
+    candidate_attempts: Mutex<HashMap<PeerId, tokio::time::Instant>>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -341,10 +342,12 @@ impl Mesh {
             session_mgr: Mutex::new(session_mgr),
             active_session: Mutex::new(channel_session),
             channel_session,
+            candidate_attempts: Mutex::new(HashMap::new()),
         });
 
         MeshInner::spawn_receiver(inner.clone(), 0, socket.clone());
         MeshInner::spawn_auto_upgrade(inner.clone());
+        MeshInner::spawn_candidate_checks(inner.clone());
         MeshInner::spawn_pinger(inner.clone());
 
         let mesh = Self {
@@ -608,6 +611,66 @@ impl MeshInner {
                                 tracing::debug!(
                                     peer = %peer_id,
                                     "auto-upgrade handshake failed: {err}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    fn spawn_candidate_checks(inner: Arc<Self>) {
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(15));
+            loop {
+                tick.tick().await;
+                let nat_cfg = { inner.nat_cfg.lock().await.clone() };
+                let Some(nat_cfg) = nat_cfg else {
+                    continue;
+                };
+                let candidates_map = { inner.peer_candidates.lock().await.clone() };
+                let routes = { inner.routes.lock().await.clone() };
+                let addrs = { inner.peer_addrs.lock().await.clone() };
+                let now = tokio::time::Instant::now();
+
+                let mut targets: Vec<(PeerId, Vec<SocketAddr>)> = Vec::new();
+                for (peer_id, route) in routes.iter() {
+                    if matches!(route, PeerRoute::Direct { .. }) {
+                        continue;
+                    }
+                    let candidates = candidates_map
+                        .get(peer_id)
+                        .cloned()
+                        .or_else(|| addrs.get(peer_id).copied().map(|addr| vec![addr]))
+                        .unwrap_or_default();
+                    if candidates.is_empty() {
+                        continue;
+                    }
+                    targets.push((*peer_id, candidates));
+                }
+
+                for (peer_id, candidates) in targets {
+                    let mut attempts = inner.candidate_attempts.lock().await;
+                    if let Some(last) = attempts.get(&peer_id) {
+                        if now.duration_since(*last) < Duration::from_secs(20) {
+                            continue;
+                        }
+                    }
+                    attempts.insert(peer_id, now);
+                    drop(attempts);
+
+                    let endpoint = PeerEndpoint {
+                        peer_id,
+                        external_addrs: candidates.clone(),
+                        punch_ports: candidates.iter().map(|addr| addr.port()).collect(),
+                    };
+                    if let Ok((socket, remote)) = attempt_hole_punch(&nat_cfg, &endpoint).await {
+                        if let Ok(socket_idx) = inner.add_socket(socket).await {
+                            if let Err(err) = inner.initiate_handshake(remote, socket_idx).await {
+                                tracing::debug!(
+                                    peer = %peer_id,
+                                    "candidate check handshake failed: {err}"
                                 );
                             }
                         }
