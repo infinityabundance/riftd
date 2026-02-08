@@ -20,6 +20,7 @@ use rand::rngs::OsRng;
 use rand::RngCore;
 
 const MAGIC: &[u8; 4] = b"RFT1";
+const MAX_FRAME_LEN: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[repr(u8)]
@@ -353,6 +354,18 @@ mod tests {
             other => panic!("unexpected: {other:?}"),
         }
     }
+
+    #[test]
+    fn decode_rejects_oversize_frames() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(MAGIC);
+        bytes.push(ProtocolVersion::V1.as_u8());
+        let len = (MAX_FRAME_LEN + 1) as u32;
+        bytes.extend_from_slice(&len.to_le_bytes());
+        bytes.resize(10, 0);
+        let res = decode_frame(&bytes);
+        assert!(matches!(res, Err(FrameError::FrameTooLarge)));
+    }
 }
 
 #[derive(Debug, Error)]
@@ -363,6 +376,8 @@ pub enum FrameError {
     UnsupportedVersion(u8),
     #[error("frame length mismatch")]
     LengthMismatch,
+    #[error("frame too large")]
+    FrameTooLarge,
     #[error("decode error: {0}")]
     Decode(#[from] bincode::Error),
 }
@@ -400,6 +415,9 @@ pub fn decode_frame(bytes: &[u8]) -> Result<(RiftFrameHeader, RiftPayload), Fram
     }
     let version = ProtocolVersion::from_u8(bytes[4]).ok_or(FrameError::UnsupportedVersion(bytes[4]))?;
     let len = u32::from_le_bytes([bytes[5], bytes[6], bytes[7], bytes[8]]) as usize;
+    if len > MAX_FRAME_LEN {
+        return Err(FrameError::FrameTooLarge);
+    }
     if bytes.len() < 9 + len {
         return Err(FrameError::LengthMismatch);
     }

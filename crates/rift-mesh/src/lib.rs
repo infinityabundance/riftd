@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH, Instant};
 
 use anyhow::{anyhow, Result};
 use tokio::net::UdpSocket;
@@ -31,6 +31,8 @@ use rand::RngCore;
 use rand::rngs::OsRng;
 
 const MAX_PACKET: usize = 2048;
+const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(1);
+const RATE_LIMIT_PKTS_PER_SEC: u32 = 1200;
 const GROUP_MESH_MAX: usize = 5;
 
 #[derive(Debug, Clone)]
@@ -147,6 +149,7 @@ struct MeshInner {
     link_stats: Mutex<HashMap<PeerId, LinkStatsState>>,
     peer_traffic: Mutex<HashMap<PeerId, TrafficStats>>,
     global_traffic: Mutex<TrafficStats>,
+    rate_limits: Mutex<HashMap<SocketAddr, RateLimitState>>,
     auth_required: bool,
     auth_token: Option<Vec<u8>>,
     events_tx: mpsc::Sender<MeshEvent>,
@@ -170,6 +173,35 @@ struct TrafficStats {
     packets_received: u64,
     bytes_sent: u64,
     bytes_received: u64,
+}
+
+#[derive(Debug, Clone)]
+struct RateLimitState {
+    window_start: Instant,
+    count: u32,
+    last_drop: Instant,
+}
+
+impl RateLimitState {
+    fn new(now: Instant) -> Self {
+        Self {
+            window_start: now,
+            count: 0,
+            last_drop: now,
+        }
+    }
+
+    fn allow(&mut self, now: Instant) -> bool {
+        if now.duration_since(self.window_start) >= RATE_LIMIT_WINDOW {
+            self.window_start = now;
+            self.count = 0;
+        }
+        if self.count >= RATE_LIMIT_PKTS_PER_SEC {
+            return false;
+        }
+        self.count = self.count.saturating_add(1);
+        true
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -382,6 +414,7 @@ impl Mesh {
             link_stats: Mutex::new(HashMap::new()),
             peer_traffic: Mutex::new(HashMap::new()),
             global_traffic: Mutex::new(TrafficStats::default()),
+            rate_limits: Mutex::new(HashMap::new()),
             auth_required: config.require_auth,
             auth_token: config.auth_token,
             events_tx,
@@ -1231,6 +1264,9 @@ impl MeshInner {
     }
 
     async fn handle_packet(self: Arc<Self>, socket_idx: usize, addr: SocketAddr, data: &[u8]) -> Result<()> {
+        if !self.allow_packet(addr).await {
+            return Ok(());
+        }
         if self.try_handle_pending(socket_idx, addr, data).await? {
             return Ok(());
         }
@@ -2080,6 +2116,21 @@ impl MeshInner {
             stats.rtt_ms as f64,
         );
         self.consider_route(peer_id, stats).await;
+    }
+
+    async fn allow_packet(&self, addr: SocketAddr) -> bool {
+        let now = Instant::now();
+        let mut limits = self.rate_limits.lock().await;
+        let entry = limits.entry(addr).or_insert_with(|| RateLimitState::new(now));
+        let allowed = entry.allow(now);
+        if !allowed {
+            if now.duration_since(entry.last_drop) >= RATE_LIMIT_WINDOW {
+                entry.last_drop = now;
+                tracing::warn!(target = "security", %addr, "rate limit exceeded");
+            }
+            metrics::inc_counter("rift_packets_dropped", &[("reason", "rate_limit")]);
+        }
+        allowed
     }
 
     async fn record_send(&self, addr: SocketAddr, bytes: usize) {

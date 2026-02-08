@@ -32,6 +32,17 @@ It is intended to guide audits and prevent regressions as the protocol evolves.
 - Formal verification of the protocol.
 - Dedicated TURN infrastructure run by Rift.
 
+## Threat Model (STRIDE Summary)
+
+| Category | Example Threat | Current Mitigation |
+| --- | --- | --- |
+| **Spoofing** | Peer impersonation by forging `PeerId` | TOFU + known_hosts, Ed25519 identity checks |
+| **Tampering** | Packet modification in transit | Noise transport AEAD + E2EE payload AEAD |
+| **Repudiation** | Sender denies having sent a message | Limited: no non-repudiation; logs are local |
+| **Information Disclosure** | Relay or on-path observer reads chat/voice | E2EE (AES-GCM) for chat/voice; relays see only metadata |
+| **Denial of Service** | Flooding packets or handshake storms | Input validation, per-addr rate limiting, early drops |
+| **Elevation of Privilege** | Unauthorized channel access | Optional channel shared secret (`Auth` token) |
+
 ## Security Checklist
 
 ### Identity / Key Management
@@ -73,7 +84,26 @@ It is intended to guide audits and prevent regressions as the protocol evolves.
 
 ### DoS / Abuse
 - [ ] Rate-limit repeated handshake attempts per peer.
-- [ ] Drop malformed packets early to avoid CPU exhaustion.
+- [ ] Drop malformed or oversized frames early to avoid CPU exhaustion.
+- [ ] Per-addr packet rate limiting is enabled with audit logging.
+
+### Fuzzing / Parser Safety
+- [ ] Protocol decoding is fuzzed (cargo-fuzz or AFL) against malformed frames.
+- [ ] Decoder rejects oversized frames and invalid lengths deterministically.
+
+## Phase 43 Hardening Notes
+- Added max frame length enforcement in `rift-protocol` to reject oversized frames.
+- Added per-address packet rate limiting in `rift-mesh` with security logging.
+- Ensured secure randomness usage via `OsRng` across identity/ephemeral keys.
+
+## Responsible Disclosure
+
+If you discover a security issue, please report it privately:
+
+- Email: `security@rift.dev` (replace with a real address before release)
+- Include: version/commit, reproduction steps, and impact assessment.
+
+We will acknowledge reports within 72 hours and coordinate a fix timeline.
 
 ## Suggested Tests
 
