@@ -1,10 +1,12 @@
 //! Predictive Rendezvous (PR) core types.
 
 pub mod identity;
+pub mod schedule;
 pub mod strategy;
 pub mod time;
 
 pub use identity::IdentityConstraints;
+pub use schedule::{compute_slot_params, Role, SlotParams};
 pub use strategy::{EscalationPolicy, SearchStrategy};
 pub use time::TimeModel;
 
