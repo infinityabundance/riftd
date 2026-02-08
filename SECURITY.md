@@ -57,6 +57,7 @@ It is intended to guide audits and prevent regressions as the protocol evolves.
 - [ ] Relayed payloads keep destination metadata in clear.
 - [ ] Inner payloads remain encrypted end-to-end.
 - [ ] Relay selection does not expose session keys.
+- [ ] TURN relays only see encrypted payloads but can observe metadata; prefer self-hosted TURN when possible.
 
 ### Auth / Access Control
 - [ ] Optional channel shared secret enforced by `Auth` control message.

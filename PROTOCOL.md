@@ -159,6 +159,10 @@ Peers exchange candidate sets using `IceCandidates`. Connectivity checks use
 
 These messages are optional and ignored by older peers.
 
+Relay candidates (`CandidateType::Relay`) represent TURN-allocated addresses.
+Invites may include `relay_candidates` to bootstrap restrictive NATs before
+ICE-lite checks complete.
+
 ## Versioning
 Supported protocol versions are listed in `supported_versions()`.
 V1:

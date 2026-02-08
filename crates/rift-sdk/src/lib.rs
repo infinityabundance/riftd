@@ -25,7 +25,8 @@ use rift_media::{
 };
 use rift_mesh::{Mesh, MeshConfig, MeshEvent, MeshHandle};
 use rift_nat::{
-    attempt_hole_punch, gather_local_candidates, gather_public_addrs, NatConfig, PeerEndpoint,
+    attempt_hole_punch, gather_local_candidates, gather_public_addrs, parse_turn_server, NatConfig,
+    PeerEndpoint,
 };
 use rift_protocol::{CallState, Capabilities, QosProfile, SessionId};
 use hkdf::Hkdf;
@@ -82,6 +83,14 @@ pub struct NetworkConfigSdk {
     pub stun_servers: Vec<String>,
     #[serde(default)]
     pub stun_timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub enable_turn: bool,
+    #[serde(default)]
+    pub turn_servers: Vec<String>,
+    #[serde(default)]
+    pub turn_timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub turn_keepalive_ms: Option<u64>,
     #[serde(default)]
     pub punch_interval_ms: Option<u64>,
     #[serde(default)]
@@ -173,6 +182,10 @@ impl Default for NetworkConfigSdk {
                 "stun1.l.google.com:19302".to_string(),
             ],
             stun_timeout_ms: Some(800),
+            enable_turn: false,
+            turn_servers: Vec::new(),
+            turn_timeout_ms: Some(1200),
+            turn_keepalive_ms: Some(12000),
             punch_interval_ms: Some(200),
             punch_timeout_ms: Some(5000),
             max_direct_peers: None,
@@ -387,6 +400,10 @@ impl RiftHandle {
                 cfg.network.stun_timeout_ms,
                 cfg.network.punch_interval_ms,
                 cfg.network.punch_timeout_ms,
+                cfg.network.enable_turn,
+                cfg.network.turn_servers.clone(),
+                cfg.network.turn_timeout_ms,
+                cfg.network.turn_keepalive_ms,
             ))
         } else {
             None
@@ -528,6 +545,10 @@ impl RiftHandle {
                 cfg.network.stun_timeout_ms,
                 cfg.network.punch_interval_ms,
                 cfg.network.punch_timeout_ms,
+                cfg.network.enable_turn,
+                cfg.network.turn_servers.clone(),
+                cfg.network.turn_timeout_ms,
+                cfg.network.turn_keepalive_ms,
             ));
             let addrs = match gather_public_addrs(&nat_cfg).await {
                 Ok(public_addrs) if !public_addrs.is_empty() => public_addrs,
@@ -564,6 +585,10 @@ impl RiftHandle {
                 self.config.network.stun_timeout_ms,
                 self.config.network.punch_interval_ms,
                 self.config.network.punch_timeout_ms,
+                self.config.network.enable_turn,
+                self.config.network.turn_servers.clone(),
+                self.config.network.turn_timeout_ms,
+                self.config.network.turn_keepalive_ms,
             );
             tokio::spawn(async move {
                 let mut tick = tokio::time::interval(Duration::from_secs(12));
@@ -1082,6 +1107,10 @@ fn default_nat_config(
     stun_timeout_ms: Option<u64>,
     punch_interval_ms: Option<u64>,
     punch_timeout_ms: Option<u64>,
+    enable_turn: bool,
+    turn_servers: Vec<String>,
+    turn_timeout_ms: Option<u64>,
+    turn_keepalive_ms: Option<u64>,
 ) -> NatConfig {
     let mut local_ports = ports.unwrap_or_default();
     if local_ports.is_empty() {
@@ -1095,6 +1124,16 @@ fn default_nat_config(
         stun_timeout_ms: stun_timeout_ms.unwrap_or(800),
         punch_interval_ms: punch_interval_ms.unwrap_or(200),
         punch_timeout_ms: punch_timeout_ms.unwrap_or(5000),
+        turn_servers: if enable_turn {
+            turn_servers
+                .into_iter()
+                .filter_map(|s| parse_turn_server(&s).ok())
+                .collect()
+        } else {
+            Vec::new()
+        },
+        turn_timeout_ms: turn_timeout_ms.unwrap_or(1200),
+        turn_keepalive_ms: turn_keepalive_ms.unwrap_or(12000),
     }
 }
 

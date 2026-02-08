@@ -14,7 +14,10 @@ use rift_core::e2ee::{
     public_key_from_bytes, sign_e2ee_public, verify_e2ee_public,
 };
 use rift_discovery::{discover_peers, start_mdns_advertisement, DiscoveryConfig, MdnsHandle};
-use rift_nat::{attempt_hole_punch, gather_public_addrs, NatConfig, PeerEndpoint};
+use rift_nat::{
+    attempt_hole_punch, gather_public_addrs, gather_turn_candidates, NatConfig, PeerEndpoint,
+    TurnRelay,
+};
 use rift_protocol::{
     decode_frame, encode_frame, CallControl, CallState, Capabilities, ChatMessage, CodecId,
     ControlMessage, EncryptedPayload, FeatureFlag, IceCandidate, CandidateType, PeerInfo,
@@ -46,6 +49,12 @@ pub struct MeshConfig {
 pub enum PeerRoute {
     Direct { addr: SocketAddr },
     Relayed { via: PeerId },
+}
+
+#[derive(Clone)]
+enum MeshSocket {
+    Udp(Arc<UdpSocket>),
+    Turn(Arc<TurnRelay>),
 }
 
 #[derive(Debug, Clone)]
@@ -108,7 +117,8 @@ pub struct MeshHandle {
 }
 
 struct MeshInner {
-    sockets: Mutex<Vec<Arc<UdpSocket>>>,
+    sockets: Mutex<Vec<MeshSocket>>,
+    turn_relays: Mutex<HashMap<SocketAddr, usize>>,
     identity: Identity,
     peers_by_id: Mutex<HashMap<PeerId, SocketAddr>>,
     peer_caps: Mutex<HashMap<PeerId, bool>>,
@@ -340,7 +350,8 @@ impl Mesh {
 
         let (events_tx, events_rx) = mpsc::channel(256);
         let inner = Arc::new(MeshInner {
-            sockets: Mutex::new(vec![socket.clone()]),
+            sockets: Mutex::new(vec![MeshSocket::Udp(socket.clone())]),
+            turn_relays: Mutex::new(HashMap::new()),
             identity,
             peers_by_id: Mutex::new(HashMap::new()),
             peer_caps: Mutex::new(HashMap::new()),
@@ -382,7 +393,7 @@ impl Mesh {
             max_direct_peers: config.max_direct_peers,
         });
 
-        MeshInner::spawn_receiver(inner.clone(), 0, socket.clone());
+        MeshInner::spawn_receiver(inner.clone(), 0, MeshSocket::Udp(socket.clone()));
         MeshInner::spawn_auto_upgrade(inner.clone());
         MeshInner::spawn_candidate_checks(inner.clone());
         MeshInner::spawn_rekey(inner.clone());
@@ -410,7 +421,11 @@ impl Mesh {
 
     pub fn local_addr(&self) -> Result<SocketAddr> {
         let sockets = self.inner.sockets.blocking_lock();
-        Ok(sockets[0].local_addr()?)
+        match sockets.first() {
+            Some(MeshSocket::Udp(sock)) => Ok(sock.local_addr()?),
+            Some(MeshSocket::Turn(relay)) => Ok(relay.relay_addr()),
+            None => Err(anyhow!("missing socket")),
+        }
     }
 
     pub fn start_lan_discovery(&mut self) -> Result<()> {
@@ -428,14 +443,39 @@ impl Mesh {
         if let Some(nat_cfg) = nat_cfg {
             let local_addr = {
                 let sockets = self.inner.sockets.lock().await;
-                sockets.first().and_then(|sock| sock.local_addr().ok())
+                sockets.first().and_then(|sock| match sock {
+                    MeshSocket::Udp(udp) => udp.local_addr().ok(),
+                    MeshSocket::Turn(relay) => Some(relay.relay_addr()),
+                })
             };
+            let mut relay_addrs = Vec::new();
+            if !nat_cfg.turn_servers.is_empty() {
+                if let Ok(relays) = gather_turn_candidates(&nat_cfg).await {
+                    for relay in relays {
+                        let relay_addr = relay.relay_addr;
+                        let relay_handle = relay.relay.clone();
+                        if let Ok(socket_idx) = self.inner.add_turn_relay(relay_handle).await {
+                            let mut turn_relays = self.inner.turn_relays.lock().await;
+                            turn_relays.insert(relay_addr, socket_idx);
+                            relay_addrs.push(relay_addr);
+                            let _ = rift_nat::spawn_turn_keepalive(
+                                relay.relay.clone(),
+                                nat_cfg.turn_keepalive_ms,
+                            );
+                        }
+                    }
+                }
+            }
             if let Ok(addrs) = gather_public_addrs(&nat_cfg).await {
                 let local_addr = {
                     let sockets = self.inner.sockets.lock().await;
-                    sockets.first().and_then(|sock| sock.local_addr().ok())
+                    sockets.first().and_then(|sock| match sock {
+                        MeshSocket::Udp(udp) => udp.local_addr().ok(),
+                        MeshSocket::Turn(relay) => Some(relay.relay_addr()),
+                    })
                 };
                 let mut combined = addrs.clone();
+                combined.extend(relay_addrs.clone());
                 if let Some(local) = local_addr {
                     combined.push(local);
                 }
@@ -444,14 +484,18 @@ impl Mesh {
                 let mut self_candidates = self.inner.self_candidates.lock().await;
                 *self_candidates = combined;
                 drop(self_candidates);
-                let ice_candidates = MeshInner::build_ice_candidates(local_addr, &addrs);
+                let ice_candidates = MeshInner::build_ice_candidates(local_addr, &addrs, &relay_addrs);
                 let mut self_ice = self.inner.self_ice_candidates.lock().await;
                 *self_ice = ice_candidates;
             } else if let Some(local) = local_addr {
                 let mut self_candidates = self.inner.self_candidates.lock().await;
-                *self_candidates = vec![local];
+                let mut combined = vec![local];
+                combined.extend(relay_addrs.clone());
+                combined.sort();
+                combined.dedup();
+                *self_candidates = combined;
                 drop(self_candidates);
-                let ice_candidates = MeshInner::build_ice_candidates(Some(local), &[]);
+                let ice_candidates = MeshInner::build_ice_candidates(Some(local), &[], &relay_addrs);
                 let mut self_ice = self.inner.self_ice_candidates.lock().await;
                 *self_ice = ice_candidates;
             }
@@ -469,16 +513,49 @@ impl Mesh {
         targets.sort();
         targets.dedup();
 
-        for addr in targets {
-            let endpoint = PeerEndpoint {
-                peer_id: PeerId([0u8; 32]),
-                external_addrs: vec![addr],
-                punch_ports: vec![addr.port()],
-            };
-            if let Ok((socket, remote)) = attempt_hole_punch(&nat_cfg, &endpoint).await {
-                let socket_idx = self.inner.add_socket(socket).await?;
-                if let Err(err) = self.inner.initiate_handshake(remote, socket_idx).await {
-                    tracing::warn!("handshake to {} failed: {err}", remote);
+        let mut candidates: Vec<IceCandidate> = targets
+            .into_iter()
+            .map(|addr| IceCandidate {
+                addr,
+                cand_type: CandidateType::Srflx,
+                priority: 50,
+                foundation: MeshInner::candidate_foundation(addr, CandidateType::Srflx),
+            })
+            .collect();
+        for relay_addr in invite.relay_candidates {
+            candidates.push(IceCandidate {
+                addr: relay_addr,
+                cand_type: CandidateType::Relay,
+                priority: 70,
+                foundation: MeshInner::candidate_foundation(relay_addr, CandidateType::Relay),
+            });
+        }
+
+        for candidate in candidates {
+            match candidate.cand_type {
+                CandidateType::Relay => {
+                    let socket_idx = {
+                        let map = self.inner.turn_relays.lock().await;
+                        map.get(&candidate.addr).copied()
+                    };
+                    if let Some(socket_idx) = socket_idx {
+                        if let Err(err) = self.inner.initiate_handshake(candidate.addr, socket_idx).await {
+                            tracing::warn!("handshake to {} failed: {err}", candidate.addr);
+                        }
+                    }
+                }
+                _ => {
+                    let endpoint = PeerEndpoint {
+                        peer_id: PeerId([0u8; 32]),
+                        external_addrs: vec![candidate.addr],
+                        punch_ports: vec![candidate.addr.port()],
+                    };
+                    if let Ok((socket, remote)) = attempt_hole_punch(&nat_cfg, &endpoint).await {
+                        let socket_idx = self.inner.add_socket(socket).await?;
+                        if let Err(err) = self.inner.initiate_handshake(remote, socket_idx).await {
+                            tracing::warn!("handshake to {} failed: {err}", remote);
+                        }
+                    }
                 }
             }
         }
@@ -530,6 +607,7 @@ impl MeshInner {
     fn build_ice_candidates(
         local_addr: Option<SocketAddr>,
         public_addrs: &[SocketAddr],
+        relay_addrs: &[SocketAddr],
     ) -> Vec<IceCandidate> {
         let mut out = Vec::new();
         if let Some(addr) = local_addr {
@@ -546,6 +624,14 @@ impl MeshInner {
                 cand_type: CandidateType::Srflx,
                 priority: 90,
                 foundation: Self::candidate_foundation(*addr, CandidateType::Srflx),
+            });
+        }
+        for addr in relay_addrs {
+            out.push(IceCandidate {
+                addr: *addr,
+                cand_type: CandidateType::Relay,
+                priority: 70,
+                foundation: Self::candidate_foundation(*addr, CandidateType::Relay),
             });
         }
         out.sort_by(|a, b| b.priority.cmp(&a.priority));
@@ -585,21 +671,37 @@ impl MeshInner {
 
         Ok(())
     }
-    fn spawn_receiver(inner: Arc<Self>, socket_idx: usize, socket: Arc<UdpSocket>) {
+    fn spawn_receiver(inner: Arc<Self>, socket_idx: usize, socket: MeshSocket) {
         tokio::spawn(async move {
             let mut buf = [0u8; MAX_PACKET];
-            loop {
-                let (len, addr) = match socket.recv_from(&mut buf).await {
-                    Ok(res) => res,
-                    Err(_) => continue,
-                };
-                if let Err(err) = inner
-                    .clone()
-                    .handle_packet(socket_idx, addr, &buf[..len])
-                    .await
-                {
-                    tracing::warn!("mesh recv error: {err}");
-                }
+            match socket {
+                MeshSocket::Udp(socket) => loop {
+                    let (len, addr) = match socket.recv_from(&mut buf).await {
+                        Ok(res) => res,
+                        Err(_) => continue,
+                    };
+                    if let Err(err) = inner
+                        .clone()
+                        .handle_packet(socket_idx, addr, &buf[..len])
+                        .await
+                    {
+                        tracing::warn!("mesh recv error: {err}");
+                    }
+                },
+                MeshSocket::Turn(relay) => loop {
+                    let res = relay.recv_from(&mut buf).await;
+                    let Ok((len, addr)) = res else {
+                        tracing::warn!("turn recv error");
+                        continue;
+                    };
+                    if let Err(err) = inner
+                        .clone()
+                        .handle_packet(socket_idx, addr, &buf[..len])
+                        .await
+                    {
+                        tracing::warn!("mesh recv error: {err}");
+                    }
+                },
             }
         });
     }
@@ -737,7 +839,7 @@ impl MeshInner {
                 let addrs = { inner.peer_addrs.lock().await.clone() };
                 let now = tokio::time::Instant::now();
 
-                let mut targets: Vec<(PeerId, Vec<SocketAddr>)> = Vec::new();
+                let mut targets: Vec<(PeerId, Vec<IceCandidate>)> = Vec::new();
                 for (peer_id, route) in routes.iter() {
                     if matches!(route, PeerRoute::Direct { .. }) {
                         continue;
@@ -745,13 +847,21 @@ impl MeshInner {
                     let candidates = if let Some(ice) = ice_map.get(peer_id) {
                         let mut sorted = ice.clone();
                         sorted.sort_by(|a, b| b.priority.cmp(&a.priority));
-                        sorted.into_iter().map(|cand| cand.addr).collect()
+                        sorted
                     } else {
                         candidates_map
                             .get(peer_id)
                             .cloned()
                             .or_else(|| addrs.get(peer_id).copied().map(|addr| vec![addr]))
                             .unwrap_or_default()
+                            .into_iter()
+                            .map(|addr| IceCandidate {
+                                addr,
+                                cand_type: CandidateType::Srflx,
+                                priority: 50,
+                                foundation: MeshInner::candidate_foundation(addr, CandidateType::Srflx),
+                            })
+                            .collect()
                     };
                     if candidates.is_empty() {
                         continue;
@@ -769,29 +879,54 @@ impl MeshInner {
                     attempts.insert(peer_id, now);
                     drop(attempts);
 
-                    let endpoint = PeerEndpoint {
-                        peer_id,
-                        external_addrs: candidates.clone(),
-                        punch_ports: candidates.iter().map(|addr| addr.port()).collect(),
-                    };
-                    if let Ok((socket, remote)) = attempt_hole_punch(&nat_cfg, &endpoint).await {
-                        if let Ok(socket_idx) = inner.add_socket(socket).await {
-                            if let Err(err) = inner.initiate_handshake(remote, socket_idx).await {
-                                tracing::debug!(
-                                    peer = %peer_id,
-                                    "candidate check handshake failed: {err}"
-                                );
-                            } else {
-                                if let Some(ice) = ice_map.get(&peer_id) {
-                                    if let Some(candidate) = ice.iter().find(|cand| cand.addr == remote) {
-                                        let msg = ControlMessage::IceCheck {
-                                            session: SessionId::NONE,
-                                            tie_breaker: rand::random::<u64>(),
-                                            candidate: candidate.clone(),
-                                        };
-                                        let _ = inner.send_control_to_peer(peer_id, msg, SessionId::NONE).await;
+                    for candidate in candidates {
+                        let mut connected = None;
+                        match candidate.cand_type {
+                            CandidateType::Relay => {
+                                let socket_idx = {
+                                    let map = inner.turn_relays.lock().await;
+                                    map.get(&candidate.addr).copied()
+                                };
+                                if let Some(socket_idx) = socket_idx {
+                                    if let Err(err) = inner.initiate_handshake(candidate.addr, socket_idx).await {
+                                        tracing::debug!(
+                                            peer = %peer_id,
+                                            "turn candidate handshake failed: {err}"
+                                        );
+                                    } else {
+                                        connected = Some(candidate.addr);
                                     }
                                 }
+                            }
+                            _ => {
+                                let endpoint = PeerEndpoint {
+                                    peer_id,
+                                    external_addrs: vec![candidate.addr],
+                                    punch_ports: vec![candidate.addr.port()],
+                                };
+                                if let Ok((socket, remote)) = attempt_hole_punch(&nat_cfg, &endpoint).await {
+                                    if let Ok(socket_idx) = inner.add_socket(socket).await {
+                                        if let Err(err) = inner.initiate_handshake(remote, socket_idx).await {
+                                            tracing::debug!(
+                                                peer = %peer_id,
+                                                "candidate check handshake failed: {err}"
+                                            );
+                                        } else {
+                                            connected = Some(remote);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if let Some(remote) = connected {
+                            let msg = ControlMessage::IceCheck {
+                                session: SessionId::NONE,
+                                tie_breaker: rand::random::<u64>(),
+                                candidate: candidate.clone(),
+                            };
+                            let _ = inner.send_control_to_peer(peer_id, msg, SessionId::NONE).await;
+                            if remote == candidate.addr {
+                                break;
                             }
                         }
                     }
@@ -937,10 +1072,19 @@ impl MeshInner {
     async fn add_socket(self: &Arc<Self>, socket: UdpSocket) -> Result<usize> {
         let socket = Arc::new(socket);
         let mut sockets = self.sockets.lock().await;
-        sockets.push(socket.clone());
+        sockets.push(MeshSocket::Udp(socket.clone()));
         let idx = sockets.len() - 1;
         drop(sockets);
-        Self::spawn_receiver(self.clone(), idx, socket);
+        Self::spawn_receiver(self.clone(), idx, MeshSocket::Udp(socket));
+        Ok(idx)
+    }
+
+    async fn add_turn_relay(self: &Arc<Self>, relay: Arc<TurnRelay>) -> Result<usize> {
+        let mut sockets = self.sockets.lock().await;
+        sockets.push(MeshSocket::Turn(relay.clone()));
+        let idx = sockets.len() - 1;
+        drop(sockets);
+        Self::spawn_receiver(self.clone(), idx, MeshSocket::Turn(relay));
         Ok(idx)
     }
 
@@ -953,8 +1097,7 @@ impl MeshInner {
 
         let mut buf = [0u8; MAX_PACKET];
         let len = hs.write_message(&[], &mut buf)?;
-        let socket = self.socket_by_idx(socket_idx).await?;
-        socket.send_to(&buf[..len], addr).await?;
+        self.send_raw(socket_idx, addr, &buf[..len]).await?;
 
         let mut pending = self.pending.lock().await;
         pending.insert(
@@ -1011,8 +1154,7 @@ impl MeshInner {
                 let mut out = [0u8; MAX_PACKET];
                 hs.read_message(data, &mut out)?;
                 let len = hs.write_message(&[], &mut out)?;
-                let socket = self.socket_by_idx(socket_idx).await?;
-                socket.send_to(&out[..len], addr).await?;
+                self.send_raw(socket_idx, addr, &out[..len]).await?;
         let transport = hs.into_transport_mode()?;
         self.install_connection(addr, transport, socket_idx).await?;
     }
@@ -1042,8 +1184,7 @@ impl MeshInner {
         let mut out = [0u8; MAX_PACKET];
         hs.read_message(first_msg, &mut out)?;
         let len = hs.write_message(&[], &mut out)?;
-        let socket = self.socket_by_idx(socket_idx).await?;
-        socket.send_to(&out[..len], addr).await?;
+        self.send_raw(socket_idx, addr, &out[..len]).await?;
 
         let mut pending = self.pending.lock().await;
         pending.insert(
@@ -1985,8 +2126,7 @@ impl MeshInner {
             out.truncate(len);
             (out, conn.socket_idx)
         };
-        let socket = self.socket_by_idx(socket_idx).await?;
-        socket.send_to(&ciphertext, addr).await?;
+        self.send_raw(socket_idx, addr, &ciphertext).await?;
         self.record_send(addr, ciphertext.len()).await;
         Ok(())
     }
@@ -2663,12 +2803,26 @@ impl MeshInner {
         let _ = self.events_tx.send(MeshEvent::PeerLeft(peer_id)).await;
     }
 
-    async fn socket_by_idx(&self, socket_idx: usize) -> Result<Arc<UdpSocket>> {
+    async fn socket_by_idx(&self, socket_idx: usize) -> Result<MeshSocket> {
         let sockets = self.sockets.lock().await;
         sockets
             .get(socket_idx)
             .cloned()
             .ok_or_else(|| anyhow!("missing socket"))
+    }
+
+    async fn send_raw(&self, socket_idx: usize, addr: SocketAddr, data: &[u8]) -> Result<()> {
+        let socket = self.socket_by_idx(socket_idx).await?;
+        match socket {
+            MeshSocket::Udp(socket) => {
+                socket.send_to(data, addr).await?;
+                Ok(())
+            }
+            MeshSocket::Turn(relay) => {
+                relay.send_to(addr, data).await?;
+                Ok(())
+            }
+        }
     }
 
     async fn broadcast_voice(

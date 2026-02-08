@@ -12,6 +12,12 @@ use rift_metrics as metrics;
 use tracing::debug;
 use rand::RngCore;
 
+mod turn;
+pub use turn::{
+    TurnCandidate, TurnError, TurnRelay, TurnServerConfig, allocate_turn_relay,
+    parse_turn_server, spawn_turn_keepalive,
+};
+
 #[derive(Debug, Clone)]
 pub struct NatConfig {
     pub local_ports: Vec<u16>,
@@ -19,6 +25,9 @@ pub struct NatConfig {
     pub stun_timeout_ms: u64,
     pub punch_interval_ms: u64,
     pub punch_timeout_ms: u64,
+    pub turn_servers: Vec<TurnServerConfig>,
+    pub turn_timeout_ms: u64,
+    pub turn_keepalive_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,6 +76,27 @@ const STUN_BINDING_RESPONSE: u16 = 0x0101;
 const STUN_ATTR_MAPPED_ADDRESS: u16 = 0x0001;
 const STUN_ATTR_XOR_MAPPED_ADDRESS: u16 = 0x0020;
 const KEEPALIVE_BYTES: &[u8] = b"RIFT_KEEPALIVE";
+
+pub async fn gather_turn_candidates(nat_cfg: &NatConfig) -> Result<Vec<TurnCandidate>, TurnError> {
+    if nat_cfg.turn_servers.is_empty() {
+        return Err(TurnError::NoServers);
+    }
+    let mut out = Vec::new();
+    for server in nat_cfg.turn_servers.clone() {
+        match allocate_turn_relay(server, nat_cfg.turn_timeout_ms).await {
+            Ok(candidate) => out.push(candidate),
+            Err(err) => {
+                metrics::inc_counter("rift_turn_failures", &[("reason", "allocate")]);
+                debug!("turn allocate failed: {err}");
+            }
+        }
+    }
+    if out.is_empty() {
+        Err(TurnError::AllocationFailed)
+    } else {
+        Ok(out)
+    }
+}
 
 pub async fn attempt_hole_punch(
     nat_cfg: &NatConfig,

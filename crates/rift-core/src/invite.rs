@@ -18,6 +18,8 @@ pub struct Invite {
     pub known_peers: Vec<SocketAddr>,
     #[serde(default)]
     pub candidates: Vec<SocketAddr>,
+    #[serde(default)]
+    pub relay_candidates: Vec<SocketAddr>,
     pub version: u8,
     pub created_at: u64,
 }
@@ -36,6 +38,7 @@ pub fn generate_invite(
         channel_key,
         known_peers,
         candidates,
+        relay_candidates: Vec::new(),
         version: 2,
         created_at: now_timestamp(),
     }

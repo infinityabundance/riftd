@@ -12,6 +12,7 @@ the direction of the project.
    - STUN-based public address discovery.
    - ICE-lite candidate exchange + connectivity checks.
    - Keep-alives and retry logic for NAT reliability.
+   - Optional TURN relay fallback (self-hosted or public).
 
 3. **Call UX**
    - Group call management in the TUI.
