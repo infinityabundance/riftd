@@ -1578,7 +1578,12 @@ fn build_sdk_config(
         relay,
         user_name: user_cfg.user.name.clone(),
         preferred_codecs: vec![CodecId::Opus, CodecId::PCM16],
-        preferred_features: vec![FeatureFlag::Voice, FeatureFlag::Text, FeatureFlag::Relay],
+        preferred_features: vec![
+            FeatureFlag::Voice,
+            FeatureFlag::Text,
+            FeatureFlag::Relay,
+            FeatureFlag::E2EE,
+        ],
         qos: user_cfg.qos.to_profile(),
         metrics_enabled: user_cfg.metrics.enabled.unwrap_or(true),
         security: rift_sdk::SecurityConfig {

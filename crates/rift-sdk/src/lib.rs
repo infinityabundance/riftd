@@ -103,7 +103,12 @@ impl Default for RiftConfig {
             relay: false,
             user_name: None,
             preferred_codecs: vec![CodecId::Opus, CodecId::PCM16],
-            preferred_features: vec![FeatureFlag::Voice, FeatureFlag::Text, FeatureFlag::Relay],
+            preferred_features: vec![
+                FeatureFlag::Voice,
+                FeatureFlag::Text,
+                FeatureFlag::Relay,
+                FeatureFlag::E2EE,
+            ],
             qos: QosProfile::default(),
             metrics_enabled: true,
             security: SecurityConfig::default(),
