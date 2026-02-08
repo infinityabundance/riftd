@@ -1,8 +1,9 @@
 use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::io::{self, Write};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -21,6 +22,79 @@ use tokio::io::AsyncWriteExt;
 use tokio::time::Instant;
 use tokio::task::LocalSet;
 use tracing_subscriber::{fmt::writer::BoxMakeWriter, EnvFilter};
+
+static LOG_BUFFER: OnceLock<Mutex<VecDeque<String>>> = OnceLock::new();
+
+fn log_buffer() -> &'static Mutex<VecDeque<String>> {
+    LOG_BUFFER.get_or_init(|| Mutex::new(VecDeque::with_capacity(200)))
+}
+
+struct LogLineWriter {
+    buf: String,
+    file: Option<Arc<Mutex<std::fs::File>>>,
+}
+
+impl LogLineWriter {
+    fn new(file: Option<Arc<Mutex<std::fs::File>>>) -> Self {
+        Self {
+            buf: String::new(),
+            file,
+        }
+    }
+
+    fn push_line(&mut self, line: &str) {
+        if let Some(file) = &self.file {
+            if let Ok(mut f) = file.lock() {
+                let _ = writeln!(f, "{line}");
+            }
+        }
+        if let Ok(mut buf) = log_buffer().lock() {
+            if buf.len() >= 200 {
+                buf.pop_front();
+            }
+            buf.push_back(line.to_string());
+        }
+    }
+}
+
+impl Write for LogLineWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let text = String::from_utf8_lossy(bytes);
+        self.buf.push_str(&text);
+        while let Some(pos) = self.buf.find('\n') {
+            let line = self.buf[..pos].to_string();
+            self.buf.drain(..=pos);
+            let line = line.trim_end_matches('\r');
+            if !line.is_empty() {
+                self.push_line(line);
+            }
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if !self.buf.is_empty() {
+            let line = self.buf.trim_end_matches('\r').to_string();
+            if !line.is_empty() {
+                self.push_line(&line);
+            }
+            self.buf.clear();
+        }
+        Ok(())
+    }
+}
+
+struct LogMakeWriter {
+    file: Option<Arc<Mutex<std::fs::File>>>,
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogMakeWriter {
+    type Writer = LogLineWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        LogLineWriter::new(self.file.clone())
+    }
+}
 
 use rift_core::{decode_invite, encode_invite, generate_invite, Identity};
 use rift_sdk::{
@@ -254,7 +328,7 @@ fn init_logging() {
         .unwrap_or_else(|| "stderr".to_string());
     let filter = EnvFilter::try_new(level).unwrap_or_else(|_| EnvFilter::new("info"));
 
-    let writer = if target == "stderr" {
+    let file_writer = if target == "stderr" {
         None
     } else {
         let path = if let Some(path) = target.strip_prefix("file:") {
@@ -274,17 +348,15 @@ fn init_logging() {
             .append(true)
             .open(&path)
             .ok()
+            .map(|f| Arc::new(Mutex::new(f)))
     };
 
-    if let Some(file) = writer {
-        let writer = BoxMakeWriter::new(file);
-        tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .with_writer(writer)
-            .init();
-    } else {
-        tracing_subscriber::fmt().with_env_filter(filter).init();
-    }
+    let writer = BoxMakeWriter::new(LogMakeWriter { file: file_writer });
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(writer)
+        .with_ansi(false)
+        .init();
 }
 
 async fn cmd_stats() -> Result<()> {
@@ -536,6 +608,7 @@ struct UiState {
     qos_profile: rift_sdk::RiftQosProfile,
     global_stats: Option<rift_sdk::GlobalStats>,
     chat: VecDeque<ChatLine>,
+    logs: VecDeque<String>,
     mic_active: bool,
     ptt_enabled: bool,
     ptt_key: PttKey,
@@ -588,6 +661,7 @@ impl UiState {
             qos_profile,
             global_stats: None,
             chat: VecDeque::with_capacity(200),
+            logs: VecDeque::with_capacity(200),
             mic_active: false,
             ptt_enabled,
             ptt_key,
@@ -627,6 +701,17 @@ impl UiState {
                 route: None,
             });
         entry.last_voice = Some(Instant::now());
+    }
+}
+
+fn drain_log_buffer(state: &mut UiState) {
+    if let Ok(mut buf) = log_buffer().lock() {
+        while let Some(line) = buf.pop_front() {
+            if state.logs.len() >= 200 {
+                state.logs.pop_front();
+            }
+            state.logs.push_back(line);
+        }
     }
 }
 
@@ -740,6 +825,7 @@ async fn run_tui_inner(
                         }
                     }
                     UiEvent::Tick => {
+                        drain_log_buffer(&mut state);
                         if state.ptt_enabled && state.mic_active {
                             if let Some(last) = state.ptt_last_signal {
                                 if last.elapsed() > Duration::from_millis(400) {
@@ -1103,7 +1189,12 @@ fn draw_ui(f: &mut Frame, state: &UiState) {
     let size = f.size();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(2), Constraint::Length(3)])
+        .constraints([
+            Constraint::Min(1),
+            Constraint::Length(2),
+            Constraint::Length(3),
+            Constraint::Length(5),
+        ])
         .split(size);
 
     let body = Layout::default()
@@ -1124,6 +1215,7 @@ fn draw_ui(f: &mut Frame, state: &UiState) {
     }
     draw_status(f, chunks[1], state);
     draw_input(f, chunks[2], state);
+    draw_log(f, chunks[3], state);
     if state.focus == Focus::Input {
         set_input_cursor(f, chunks[2], state);
     }
@@ -1415,6 +1507,22 @@ fn draw_input(f: &mut Frame, area: Rect, state: &UiState) {
     f.render_widget(paragraph, area);
 }
 
+fn draw_log(f: &mut Frame, area: Rect, state: &UiState) {
+    let block = Block::default().title("Log").borders(Borders::ALL);
+    let height = area.height.saturating_sub(2) as usize;
+    let mut lines = Vec::new();
+    if height > 0 {
+        let start = state.logs.len().saturating_sub(height);
+        for line in state.logs.iter().skip(start) {
+            lines.push(Line::from(line.clone()));
+        }
+    }
+    let paragraph = Paragraph::new(lines)
+        .block(block)
+        .wrap(Wrap { trim: true });
+    f.render_widget(paragraph, area);
+}
+
 fn set_input_cursor(f: &mut Frame, area: Rect, state: &UiState) {
     let inner = area.inner(&ratatui::layout::Margin {
         vertical: 1,
@@ -1502,6 +1610,7 @@ fn build_sdk_config(
             vad: user_cfg.audio.vad.unwrap_or(true),
             mute_output: user_cfg.audio.mute_output.unwrap_or(false),
             emit_voice_frames: false,
+            allow_fail: false,
         },
         network: NetworkConfigSdk {
             prefer_p2p: user_cfg.network.prefer_p2p.unwrap_or(true),

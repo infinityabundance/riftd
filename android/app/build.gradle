@@ -14,12 +14,17 @@ android {
         versionCode 1
         versionName "0.1.0"
         ndk {
-            abiFilters "arm64-v8a"
+            abiFilters "arm64-v8a", "x86_64"
         }
     }
 
     buildFeatures {
         compose true
+    }
+    ndkVersion "26.1.10909125"
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
     }
     composeOptions {
         kotlinCompilerExtensionVersion "1.5.8"
@@ -33,6 +38,34 @@ android {
         jvmTarget = "17"
     }
 }
+
+def jniLibDir = file("src/main/jniLibs/arm64-v8a")
+def riftSo = file("${jniLibDir}/librift_sdk.so")
+def appJniLibsDir = file("src/main/jniLibs")
+def ndkLibDir = file("${android.ndkDirectory}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib")
+def stlLibDir = file("${ndkLibDir}/x86_64-linux-android")
+def stlLibDirArm64 = file("${ndkLibDir}/aarch64-linux-android")
+def stlTargetDir = file("${appJniLibsDir}/x86_64")
+def stlTargetDirArm64 = file("${appJniLibsDir}/arm64-v8a")
+
+tasks.register("buildRust", Exec) {
+    workingDir rootProject.rootDir
+    commandLine "/bin/sh", "${rootProject.rootDir}/build-rust-android.sh"
+}
+
+tasks.register("copyCxxSharedLibX86_64", Copy) {
+    from fileTree(stlLibDir) { include "libc++_shared.so" }
+    into stlTargetDir
+}
+
+tasks.register("copyCxxSharedLibArm64", Copy) {
+    from fileTree(stlLibDirArm64) { include "libc++_shared.so" }
+    into stlTargetDirArm64
+}
+
+preBuild.dependsOn(tasks.named("copyCxxSharedLibX86_64"))
+preBuild.dependsOn(tasks.named("copyCxxSharedLibArm64"))
+preBuild.dependsOn(tasks.named("buildRust"))
 
 dependencies {
     implementation platform("androidx.compose:compose-bom:2024.04.01")

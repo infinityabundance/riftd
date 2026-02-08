@@ -4,26 +4,21 @@ This is a minimal developer Android client for Rift (text + voice PTT).
 
 ## Build Steps
 
-1. Build the Rust shared library for Android:
+1. Install Rust Android target and cargo-ndk:
 
 ```bash
 rustup target add aarch64-linux-android
+cargo install cargo-ndk
 ```
 
-2. Build `librift_sdk.so` (requires Android NDK toolchain in your PATH):
+2. Build `librift_sdk.so` into `jniLibs` (arm64 + x86_64 for emulator):
 
 ```bash
-cargo build -p rift-sdk --release --target aarch64-linux-android
+cd android
+./build-rust-android.sh
 ```
 
-3. Copy the shared library into the app:
-
-```bash
-mkdir -p android/app/src/main/jniLibs/arm64-v8a
-cp target/aarch64-linux-android/release/librift_sdk.so android/app/src/main/jniLibs/arm64-v8a/
-```
-
-4. Build the APK from Android Studio or CLI:
+3. Build the APK from Android Studio or CLI (NDK 26.1 recommended):
 
 ```bash
 cd android

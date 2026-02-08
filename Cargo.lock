@@ -3159,6 +3159,7 @@ dependencies = [
  "hex",
  "hkdf",
  "jni",
+ "ndk-context",
  "rift-core",
  "rift-dht",
  "rift-discovery",
