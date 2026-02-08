@@ -1,7 +1,8 @@
 //! Rift SDK: high-level API for embedding Rift VoIP in other applications.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::net::SocketAddr;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -11,10 +12,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::Instant;
 
-use rift_core::{decode_invite, generate_invite, Identity, Invite, PeerId};
+use rift_core::{decode_invite, generate_invite, Identity, Invite, PeerId, KeyStore};
 use rift_dht::{DhtConfig as RiftDhtConfig, DhtHandle, PeerEndpointInfo};
 use rift_discovery::local_ipv4_addrs;
 use rift_media::{
@@ -24,6 +26,8 @@ use rift_media::{
 use rift_mesh::{Mesh, MeshConfig, MeshEvent, MeshHandle};
 use rift_nat::{attempt_hole_punch, NatConfig, PeerEndpoint};
 use rift_protocol::{CallState, Capabilities, QosProfile, SessionId};
+use hkdf::Hkdf;
+use sha2::Sha256;
 
 pub use rift_core::PeerId as RiftPeerId;
 pub use rift_protocol::{
@@ -43,6 +47,8 @@ pub struct RiftConfig {
     pub qos: QosProfile,
     #[serde(default)]
     pub metrics_enabled: bool,
+    #[serde(default)]
+    pub security: SecurityConfig,
     pub dht: DhtConfigSdk,
     pub audio: AudioConfigSdk,
     pub network: NetworkConfigSdk,
@@ -86,9 +92,32 @@ impl Default for RiftConfig {
             preferred_features: vec![FeatureFlag::Voice, FeatureFlag::Text, FeatureFlag::Relay],
             qos: QosProfile::default(),
             metrics_enabled: true,
+            security: SecurityConfig::default(),
             dht: DhtConfigSdk::default(),
             audio: AudioConfigSdk::default(),
             network: NetworkConfigSdk::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SecurityConfig {
+    pub trust_on_first_use: bool,
+    pub known_hosts_path: Option<PathBuf>,
+    pub reject_on_mismatch: bool,
+    pub channel_shared_secret: Option<String>,
+    pub audit_log_path: Option<PathBuf>,
+}
+
+impl Default for SecurityConfig {
+    fn default() -> Self {
+        Self {
+            trust_on_first_use: true,
+            known_hosts_path: None,
+            reject_on_mismatch: false,
+            channel_shared_secret: None,
+            audit_log_path: None,
         }
     }
 }
@@ -165,6 +194,7 @@ pub enum RiftEvent {
     AudioBitrate { bitrate: u32 },
     StatsUpdate { peer: PeerId, stats: LinkStats, global: GlobalStats },
     RouteUpdated { peer: PeerId, route: RouteKind },
+    SecurityNotice { message: String },
     VoiceFrame { peer: PeerId, samples: Vec<i16> },
 }
 
@@ -229,9 +259,17 @@ impl RiftHandle {
     pub async fn new(config: RiftConfig) -> Result<Self, RiftError> {
         rift_metrics::set_enabled(config.metrics_enabled);
         let (event_tx, event_rx) = mpsc::unbounded_channel();
-        let identity = Identity::load(config.identity_path.as_deref())
-            .context("identity not found")
+        let identity_path = config
+            .identity_path
+            .clone()
+            .unwrap_or_else(|| Identity::default_path().unwrap_or_else(|_| PathBuf::from("identity.key")));
+        let existed = identity_path.exists();
+        let identity = KeyStore::load_or_generate(&identity_path)
+            .context("identity load failed")
             .map_err(|e| RiftError::Other(format!("{e}")))?;
+        if !existed {
+            tracing::info!(path = %identity_path.display(), "new identity generated");
+        }
         let local_peer_id = identity.peer_id;
         Ok(Self {
             ptt_active: Arc::new(AtomicBool::new(!config.audio.ptt)),
@@ -265,12 +303,20 @@ impl RiftHandle {
             }
         };
 
+        let auth_token = self
+            .config
+            .security
+            .channel_shared_secret
+            .as_deref()
+            .map(|secret| derive_auth_token(secret, name));
         let config = MeshConfig {
             channel_name: name.to_string(),
             password: password.map(|v| v.to_string()),
             listen_port: self.config.listen_port,
             relay_capable: self.config.relay,
             qos: self.config.qos.clone(),
+            auth_token,
+            require_auth: self.config.security.channel_shared_secret.is_some(),
         };
         let mut mesh = Mesh::new(identity, config)
             .await
@@ -283,6 +329,7 @@ impl RiftHandle {
         handle
             .set_preferred_features(self.config.preferred_features.clone())
             .await;
+        let security_handle = handle.clone();
 
         if internet {
             let nat_cfg = default_nat_config(self.config.listen_port, self.config.network.local_ports.clone());
@@ -410,8 +457,10 @@ impl RiftHandle {
             audio_config: v.audio_config.clone(),
             tuning: v.tuning.clone(),
         });
+        let security_cfg = self.config.security.clone();
+        let qos_profile = self.config.qos.clone();
         let mut qos_state = voice_state.as_ref().map(|state| QosState {
-            profile: self.config.qos.clone(),
+            profile: qos_profile,
             peer_stats: HashMap::new(),
             current: AudioTuning {
                 bitrate: state.audio_config.bitrate,
@@ -528,6 +577,19 @@ impl RiftHandle {
                             peer: peer_id,
                             route,
                         });
+                    }
+                    MeshEvent::PeerIdentity { peer_id, public_key } => {
+                        if let Err(err) = handle_peer_identity(
+                            &event_tx,
+                            &security_handle,
+                            &security_cfg,
+                            peer_id,
+                            &public_key,
+                        )
+                        .await
+                        {
+                            tracing::warn!("security check failed: {err}");
+                        }
                     }
                     MeshEvent::PeerSessionConfig { .. } | MeshEvent::RouteUpgraded(_) => {}
                 }
@@ -875,6 +937,173 @@ fn default_nat_config(port: u16, ports: Option<Vec<u16>>) -> NatConfig {
         local_ports.push(port.saturating_add(2));
     }
     NatConfig { local_ports }
+}
+
+fn derive_auth_token(secret: &str, channel: &str) -> Vec<u8> {
+    let hk = Hkdf::<Sha256>::new(Some(channel.as_bytes()), secret.as_bytes());
+    let mut out = [0u8; 32];
+    hk.expand(b"rift-auth", &mut out)
+        .expect("hkdf expand");
+    out.to_vec()
+}
+
+fn short_peer(peer_id: &PeerId) -> String {
+    let hex = peer_id.to_hex();
+    hex.chars().take(8).collect()
+}
+
+fn resolve_known_hosts_path(cfg: &SecurityConfig) -> Result<PathBuf, RiftError> {
+    if let Some(path) = &cfg.known_hosts_path {
+        return Ok(expand_tilde(path));
+    }
+    let base = dirs::config_dir().ok_or_else(|| RiftError::Other("config dir missing".to_string()))?;
+    Ok(base.join("rift").join("known_hosts"))
+}
+
+fn expand_tilde(path: &Path) -> PathBuf {
+    let path_str = path.to_string_lossy();
+    if let Some(rest) = path_str.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(rest);
+        }
+    }
+    path.to_path_buf()
+}
+
+fn load_known_hosts(path: &Path) -> HashMap<PeerId, Vec<u8>> {
+    let mut map = HashMap::new();
+    let Ok(content) = fs::read_to_string(path) else {
+        return map;
+    };
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let Some(peer_hex) = parts.next() else { continue; };
+        let Some(key_hex) = parts.next() else { continue; };
+        let Ok(peer_bytes) = hex::decode(peer_hex) else { continue; };
+        let Ok(key_bytes) = hex::decode(key_hex) else { continue; };
+        if peer_bytes.len() != 32 {
+            continue;
+        }
+        let mut peer = [0u8; 32];
+        peer.copy_from_slice(&peer_bytes);
+        map.insert(PeerId(peer), key_bytes);
+    }
+    map
+}
+
+fn append_known_host(path: &Path, peer_id: PeerId, public_key: &[u8]) -> Result<(), RiftError> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| RiftError::Other(format!("{e}")))?;
+    }
+    let line = format!("{} {}\n", peer_id.to_hex(), hex::encode(public_key));
+    fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut file| std::io::Write::write_all(&mut file, line.as_bytes()))
+        .map_err(|e| RiftError::Other(format!("{e}")))?;
+    Ok(())
+}
+
+fn fingerprint_key(public_key: &[u8]) -> String {
+    let hash = blake3::hash(public_key);
+    let hex = hash.to_hex().to_string();
+    hex.chars().take(16).collect()
+}
+
+async fn handle_peer_identity(
+    event_tx: &mpsc::UnboundedSender<RiftEvent>,
+    handle: &MeshHandle,
+    cfg: &SecurityConfig,
+    peer_id: PeerId,
+    public_key: &[u8],
+) -> Result<(), RiftError> {
+    let computed = rift_core::peer_id_from_public_key_bytes(public_key)
+        .map_err(|e| RiftError::Other(format!("{e}")))?;
+    let fingerprint = fingerprint_key(public_key);
+    let known_hosts = resolve_known_hosts_path(cfg)?;
+    let mut known = load_known_hosts(&known_hosts);
+
+    if computed != peer_id {
+        let msg = format!(
+            "peer id mismatch for {} (fingerprint {})",
+            short_peer(&peer_id),
+            fingerprint
+        );
+        tracing::warn!(peer = %peer_id, "peer id mismatch");
+        let _ = event_tx.send(RiftEvent::SecurityNotice { message: msg.clone() });
+        audit_log(cfg, "peer_id_mismatch", &peer_id, Some(&fingerprint), &msg);
+        if cfg.reject_on_mismatch {
+            handle.disconnect_peer(peer_id).await;
+        }
+        return Ok(());
+    }
+
+    if let Some(existing) = known.get(&peer_id) {
+        if existing != public_key {
+            let msg = format!(
+                "peer key mismatch for {} (fingerprint {})",
+                short_peer(&peer_id),
+                fingerprint
+            );
+            tracing::warn!(peer = %peer_id, "peer key mismatch");
+            let _ = event_tx.send(RiftEvent::SecurityNotice { message: msg.clone() });
+            audit_log(cfg, "peer_key_mismatch", &peer_id, Some(&fingerprint), &msg);
+            if cfg.reject_on_mismatch {
+                handle.disconnect_peer(peer_id).await;
+            }
+        }
+        return Ok(());
+    }
+
+    if cfg.trust_on_first_use {
+        append_known_host(&known_hosts, peer_id, public_key)?;
+        known.insert(peer_id, public_key.to_vec());
+        let msg = format!(
+            "new peer: {} fingerprint {} (saved to known_hosts)",
+            short_peer(&peer_id),
+            fingerprint
+        );
+        tracing::info!(peer = %peer_id, "new peer key stored");
+        let _ = event_tx.send(RiftEvent::SecurityNotice { message: msg.clone() });
+        audit_log(cfg, "peer_first_seen", &peer_id, Some(&fingerprint), &msg);
+    } else {
+        let msg = format!(
+            "untrusted peer {} fingerprint {} (TOFU disabled)",
+            short_peer(&peer_id),
+            fingerprint
+        );
+        tracing::warn!(peer = %peer_id, "untrusted peer (TOFU disabled)");
+        let _ = event_tx.send(RiftEvent::SecurityNotice { message: msg.clone() });
+        audit_log(cfg, "peer_untrusted", &peer_id, Some(&fingerprint), &msg);
+        handle.disconnect_peer(peer_id).await;
+    }
+    Ok(())
+}
+
+fn audit_log(cfg: &SecurityConfig, event: &str, peer_id: &PeerId, fingerprint: Option<&str>, message: &str) {
+    let Some(path) = cfg.audit_log_path.as_ref() else { return; };
+    let path = expand_tilde(path);
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let entry = json!({
+        "ts": now_timestamp(),
+        "event": event,
+        "peer_id": peer_id.to_hex(),
+        "fingerprint": fingerprint.unwrap_or(""),
+        "message": message,
+    });
+    if let Ok(line) = serde_json::to_string(&entry) {
+        if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(&path) {
+            let _ = std::io::Write::write_all(&mut file, line.as_bytes());
+            let _ = std::io::Write::write_all(&mut file, b"\n");
+        }
+    }
 }
 
 fn parse_socket_addr(input: &str) -> Option<SocketAddr> {

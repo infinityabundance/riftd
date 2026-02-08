@@ -326,6 +326,7 @@ pub extern "C" fn rift_next_event(handle: *mut RiftHandleC, out_event: *mut Rift
         | RiftEvent::AudioBitrate { .. }
         | RiftEvent::StatsUpdate { .. }
         | RiftEvent::RouteUpdated { .. }
+        | RiftEvent::SecurityNotice { .. }
         | RiftEvent::VoiceFrame { .. } => {}
     }
     1

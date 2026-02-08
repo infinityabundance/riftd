@@ -171,12 +171,13 @@ pub enum CallControl {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ControlMessage {
     Join { peer_id: PeerId, display_name: Option<String> },
-    Hello { peer_id: PeerId, capabilities: Capabilities },
+    Hello { peer_id: PeerId, public_key: Vec<u8>, capabilities: Capabilities },
     Leave { peer_id: PeerId },
     PeerState { peer_id: PeerId, relay_capable: bool },
     Chat(ChatMessage),
     Ping { nonce: u64, sent_at_ms: u64 },
     Pong { nonce: u64, sent_at_ms: u64 },
+    Auth { token: Vec<u8> },
     RouteInfo { from: PeerId, to: PeerId, relayed: bool },
     Capabilities(Capabilities),
     CapabilitiesUpdate(Capabilities),

@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -15,6 +15,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
+use serde_json;
 use tokio::sync::mpsc;
 use tokio::io::AsyncWriteExt;
 use tokio::time::Instant;
@@ -41,6 +42,10 @@ struct Cli {
 enum Commands {
     InitIdentity,
     Stats,
+    Security {
+        #[command(subcommand)]
+        action: SecurityCommand,
+    },
     Create {
         #[arg(long)]
         channel: String,
@@ -137,6 +142,12 @@ enum Commands {
     },
 }
 
+#[derive(Subcommand, Debug)]
+enum SecurityCommand {
+    RotateKey,
+    ShowKnownHosts,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     init_logging();
@@ -145,6 +156,10 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::InitIdentity => cmd_init_identity().await,
         Commands::Stats => cmd_stats().await,
+        Commands::Security { action } => match action {
+            SecurityCommand::RotateKey => cmd_rotate_key().await,
+            SecurityCommand::ShowKnownHosts => cmd_show_known_hosts().await,
+        },
         Commands::Create {
             channel,
             password,
@@ -281,6 +296,49 @@ async fn cmd_stats() -> Result<()> {
     tokio::io::AsyncReadExt::read_to_end(&mut stream, &mut buf).await?;
     let text = String::from_utf8_lossy(&buf);
     println!("{text}");
+    Ok(())
+}
+
+async fn cmd_rotate_key() -> Result<()> {
+    let path = Identity::default_path()?;
+    let mut store = rift_core::KeyStore::open(&path)?;
+    store.rotate()?;
+    let cfg = UserConfig::load().unwrap_or_default();
+    write_audit_log(
+        cfg.security.audit_log_path.as_deref(),
+        "key_rotation",
+        &format!("rotated identity at {}", path.display()),
+    );
+    println!("Rotated identity key. New peer id: {}", store.identity().peer_id);
+    Ok(())
+}
+
+async fn cmd_show_known_hosts() -> Result<()> {
+    let cfg = UserConfig::load().unwrap_or_default();
+    let path = cfg
+        .security
+        .known_hosts_path
+        .as_ref()
+        .map(|p| PathBuf::from(p))
+        .unwrap_or_else(|| {
+            dirs::config_dir()
+                .map(|base| base.join("rift").join("known_hosts"))
+                .unwrap_or_else(|| PathBuf::from("known_hosts"))
+        });
+    let content = fs::read_to_string(&path).unwrap_or_default();
+    println!("Known hosts ({})", path.display());
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let Some(peer_hex) = parts.next() else { continue; };
+        let Some(key_hex) = parts.next() else { continue; };
+        let Ok(key_bytes) = hex::decode(key_hex) else { continue; };
+        let fingerprint = fingerprint_key(&key_bytes);
+        println!("{peer_hex} {fingerprint}");
+    }
     Ok(())
 }
 
@@ -765,6 +823,9 @@ async fn run_tui_inner(
                                         via: Some(via),
                                     },
                                 });
+                            }
+                            RiftEvent::SecurityNotice { message } => {
+                                state.add_chat_line("security".to_string(), message);
                             }
                             RiftEvent::VoiceFrame { .. } => {}
                             RiftEvent::IncomingCall { session, from } => {
@@ -1412,6 +1473,21 @@ fn build_sdk_config(
         preferred_features: vec![FeatureFlag::Voice, FeatureFlag::Text, FeatureFlag::Relay],
         qos: user_cfg.qos.to_profile(),
         metrics_enabled: user_cfg.metrics.enabled.unwrap_or(true),
+        security: rift_sdk::SecurityConfig {
+            trust_on_first_use: user_cfg.security.trust_on_first_use.unwrap_or(true),
+            known_hosts_path: user_cfg
+                .security
+                .known_hosts_path
+                .as_ref()
+                .map(|p| PathBuf::from(p)),
+            reject_on_mismatch: user_cfg.security.reject_on_mismatch.unwrap_or(false),
+            channel_shared_secret: user_cfg.security.channel_shared_secret.clone(),
+            audit_log_path: user_cfg
+                .security
+                .audit_log_path
+                .as_ref()
+                .map(|p| PathBuf::from(p)),
+        },
         dht: rift_sdk::DhtConfigSdk {
             enabled: dht || user_cfg.dht.enabled.unwrap_or(false),
             bootstrap_nodes: user_cfg.dht.bootstrap_nodes.clone().unwrap_or_default(),
@@ -1440,6 +1516,41 @@ fn short_peer(peer: &rift_core::PeerId) -> String {
     let hex = peer.to_hex();
     let short = &hex[..8];
     short.to_string()
+}
+
+fn fingerprint_key(public_key: &[u8]) -> String {
+    let hash = blake3::hash(public_key);
+    let hex = hash.to_hex().to_string();
+    hex.chars().take(16).collect()
+}
+
+fn write_audit_log(path: Option<&str>, event: &str, message: &str) {
+    let Some(path) = path else { return; };
+    let path = expand_tilde_path(Path::new(path));
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let entry = serde_json::json!({
+        "ts": now_timestamp(),
+        "event": event,
+        "message": message,
+    });
+    if let Ok(line) = serde_json::to_string(&entry) {
+        if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(&path) {
+            let _ = std::io::Write::write_all(&mut file, line.as_bytes());
+            let _ = std::io::Write::write_all(&mut file, b"\n");
+        }
+    }
+}
+
+fn expand_tilde_path(path: &Path) -> PathBuf {
+    let path_str = path.to_string_lossy();
+    if let Some(rest) = path_str.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(rest);
+        }
+    }
+    path.to_path_buf()
 }
 
 fn parse_session_id(input: &str) -> Result<RiftSessionId> {
