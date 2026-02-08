@@ -1,11 +1,13 @@
-package com.example.riftmobile
+package com.example.riftmobile.sdk
+
+import android.content.Context
 
 object RiftNative {
     init {
         System.loadLibrary("rift_sdk")
     }
 
-    external fun init(context: android.content.Context, configPath: String?): Long
+    external fun init(context: Context, configPath: String?): Long
     external fun joinChannel(handle: Long, name: String, password: String?, internet: Boolean, dht: Boolean): Int
     external fun leaveChannel(handle: Long, name: String): Int
     external fun sendChat(handle: Long, text: String): Int
@@ -15,9 +17,13 @@ object RiftNative {
     external fun lastError(): String?
     external fun setBootstrapNodes(handle: Long, nodes: String)
     external fun setDhtEnabled(handle: Long, enabled: Boolean)
+    external fun setInvite(handle: Long, invite: String?)
+    external fun setTurnServers(handle: Long, servers: String)
+    external fun setAudioQuality(handle: Long, quality: String?)
+    external fun generateInvite(channel: String, password: String?, knownPeers: String): String?
 }
 
-data class RiftEventDto(
+internal data class RiftEventDto(
     val type: String,
     val from: String?,
     val text: String?,
