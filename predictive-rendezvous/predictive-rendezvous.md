@@ -177,6 +177,8 @@ The formal architectural description and prior-art framing are captured in the p
 
 > **Predictive Rendezvous: Time–Intent–Deterministic Peer Coordination Without Infrastructure**  
 > Riaan de Beer, 2026
+> See the prior art paper: **[https://doi.org/10.5281/zenodo.18528430(https://doi.org/10.5281/zenodo.18528430)]**
+
 
 The paper establishes terminology, scope, and generality.  
 This README contextualizes those ideas within riftd.
