@@ -1119,18 +1119,26 @@ impl MeshInner {
         let Some(key) = self.e2ee_key else {
             return Ok(payload);
         };
-        if !should_encrypt(&payload) {
-            return Ok(payload);
+        match payload {
+            RiftPayload::Relay { target, inner } => {
+                if should_encrypt(&inner) {
+                    let encrypted = self.encrypt_inner(*inner, header, &key)?;
+                    Ok(RiftPayload::Relay {
+                        target,
+                        inner: Box::new(encrypted),
+                    })
+                } else {
+                    Ok(RiftPayload::Relay { target, inner })
+                }
+            }
+            other => {
+                if !should_encrypt(&other) {
+                    return Ok(other);
+                }
+                let encrypted = self.encrypt_inner(other, header, &key)?;
+                Ok(encrypted)
+            }
         }
-        let plaintext = bincode::serialize(&payload)?;
-        let mut nonce = [0u8; 12];
-        rand::rngs::OsRng.fill_bytes(&mut nonce);
-        let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
-        let aad = bincode::serialize(header)?;
-        let ciphertext = cipher
-            .encrypt(Nonce::from_slice(&nonce), Payload { msg: &plaintext, aad: &aad })
-            .map_err(|_| anyhow!("e2ee encrypt failed"))?;
-        Ok(RiftPayload::Encrypted(EncryptedPayload { nonce, ciphertext }))
     }
 
     fn decrypt_payload(
@@ -1148,6 +1156,23 @@ impl MeshInner {
             .map_err(|_| anyhow!("e2ee decrypt failed"))?;
         let payload: RiftPayload = bincode::deserialize(&plaintext)?;
         Ok(payload)
+    }
+
+    fn encrypt_inner(
+        &self,
+        payload: RiftPayload,
+        header: &RiftFrameHeader,
+        key: &[u8; 32],
+    ) -> Result<RiftPayload> {
+        let plaintext = bincode::serialize(&payload)?;
+        let mut nonce = [0u8; 12];
+        rand::rngs::OsRng.fill_bytes(&mut nonce);
+        let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
+        let aad = bincode::serialize(header)?;
+        let ciphertext = cipher
+            .encrypt(Nonce::from_slice(&nonce), Payload { msg: &plaintext, aad: &aad })
+            .map_err(|_| anyhow!("e2ee encrypt failed"))?;
+        Ok(RiftPayload::Encrypted(EncryptedPayload { nonce, ciphertext }))
     }
 
     async fn update_link_stats(&self, peer_id: PeerId, seq: u32, sent_ms: u64) {
