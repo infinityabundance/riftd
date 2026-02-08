@@ -62,6 +62,7 @@ pub enum FeatureFlag {
     Voice,
     Text,
     Relay,
+    E2EE,
     ScreenShare,
     DataChannel,
 }
@@ -208,6 +209,20 @@ pub enum ControlMessage {
     IceCheckAck {
         session: SessionId,
         candidate: IceCandidate,
+    },
+    KeyInit {
+        session: SessionId,
+        eph_pub_x25519: [u8; 32],
+        sig_ed25519: Vec<u8>,
+    },
+    KeyResp {
+        session: SessionId,
+        eph_pub_x25519: [u8; 32],
+        sig_ed25519: Vec<u8>,
+    },
+    EncryptedReady {
+        session: SessionId,
+        alg: u8,
     },
     Leave { peer_id: PeerId },
     PeerState { peer_id: PeerId, relay_capable: bool },
