@@ -1226,7 +1226,15 @@ impl MeshInner {
         header: RiftFrameHeader,
         payload: RiftPayload,
     ) -> Result<()> {
-        if self.auth_required && !matches!(payload, RiftPayload::Control(ControlMessage::Auth { .. })) {
+        if self.auth_required
+            && !matches!(
+                payload,
+                RiftPayload::Control(ControlMessage::Auth { .. })
+                    | RiftPayload::Control(ControlMessage::Join { .. })
+                    | RiftPayload::Control(ControlMessage::Hello { .. })
+                    | RiftPayload::Control(ControlMessage::PeerState { .. })
+            )
+        {
             let authenticated = {
                 let connections = self.connections.lock().await;
                 connections
