@@ -615,6 +615,7 @@ struct PeerEntry {
     last_voice: Option<Instant>,
     stats: Option<rift_sdk::LinkStats>,
     route: Option<RouteInfo>,
+    fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -710,6 +711,7 @@ struct UiState {
     focus: Focus,
     local_peer_id: rift_core::PeerId,
     local_display: String,
+    local_fingerprint: Option<String>,
     channel_session: RiftSessionId,
     active_session: RiftSessionId,
     incoming_call: Option<(RiftSessionId, rift_core::PeerId)>,
@@ -763,6 +765,7 @@ impl UiState {
             focus: Focus::Input,
             local_peer_id,
             local_display: format!("{} ({})", user_name, short_peer(&local_peer_id)),
+            local_fingerprint: None,
             channel_session,
             active_session: channel_session,
             incoming_call: None,
@@ -811,6 +814,7 @@ impl UiState {
                 last_voice: None,
                 stats: None,
                 route: None,
+                fingerprint: None,
             });
         entry.last_voice = Some(Instant::now());
     }
@@ -966,6 +970,7 @@ async fn run_tui_inner(
                                     last_voice: None,
                                     stats: None,
                                     route: None,
+                                    fingerprint: None,
                                 });
                                 state.last_rx = Some(Instant::now());
                             }
@@ -1000,6 +1005,7 @@ async fn run_tui_inner(
                                     last_voice: None,
                                     stats: None,
                                     route: None,
+                                    fingerprint: None,
                                 });
                                 entry.stats = Some(stats);
                                 state.global_stats = Some(global);
@@ -1010,6 +1016,7 @@ async fn run_tui_inner(
                                     last_voice: None,
                                     stats: None,
                                     route: None,
+                                    fingerprint: None,
                                 });
                                 entry.route = Some(match route {
                                     rift_sdk::RouteKind::Direct => RouteInfo {
@@ -1021,6 +1028,16 @@ async fn run_tui_inner(
                                         via: Some(via),
                                     },
                                 });
+                            }
+                            RiftEvent::PeerFingerprint { peer, fingerprint } => {
+                                let entry = state.peers.entry(peer).or_insert(PeerEntry {
+                                    display: short_peer(&peer),
+                                    last_voice: None,
+                                    stats: None,
+                                    route: None,
+                                    fingerprint: None,
+                                });
+                                entry.fingerprint = Some(fingerprint);
                             }
                             RiftEvent::SecurityNotice { message } => {
                                 state.add_chat_line("security".to_string(), message);
@@ -1349,6 +1366,11 @@ fn draw_peers(f: &mut Frame, area: Rect, state: &UiState) {
             .map(|t| t.elapsed() < Duration::from_millis(600))
             .unwrap_or(false);
         let (qos_char, qos_color) = qos_indicator(peer.stats.as_ref(), &state.qos_profile);
+        let fp = peer
+            .fingerprint
+            .as_deref()
+            .map(|f| format!(" fp:{f}"))
+            .unwrap_or_default();
         let line = Line::from(vec![
             Span::styled(peer.display.clone(), Style::default().fg(Color::Blue)),
             Span::raw(" "),
@@ -1358,7 +1380,7 @@ fn draw_peers(f: &mut Frame, area: Rect, state: &UiState) {
             ),
             Span::raw(" "),
             Span::styled(qos_char.to_string(), Style::default().fg(qos_color)),
-            Span::raw(" peer"),
+            Span::raw(format!(" peer{fp}")),
         ]);
         items.push(ListItem::new(line));
     }

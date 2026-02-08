@@ -331,6 +331,13 @@ pub extern "system" fn Java_com_example_riftmobile_RiftNative_pollEvent(
             None,
             None,
         ),
+        RiftEvent::PeerFingerprint { peer, fingerprint } => (
+            "fingerprint".to_string(),
+            Some(peer.to_hex()),
+            Some(fingerprint),
+            None,
+            None,
+        ),
         _ => ("other".to_string(), None, None, None, None),
     };
 

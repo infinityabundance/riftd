@@ -4,6 +4,7 @@ pub mod keystore;
 pub mod invite;
 pub mod message;
 pub mod noise;
+pub mod e2ee;
 
 pub use error::CoreError;
 pub use identity::Identity;

@@ -2080,7 +2080,7 @@ dependencies = [
  "static_assertions",
  "thiserror 1.0.69",
  "tracing",
- "x25519-dalek",
+ "x25519-dalek 2.0.1",
  "zeroize",
 ]
 
@@ -3264,10 +3264,14 @@ dependencies = [
  "dirs",
  "ed25519-dalek 1.0.1",
  "hex",
+ "hkdf",
  "rand 0.7.3",
+ "rand_core 0.6.4",
  "serde",
+ "sha2 0.10.9",
  "snow",
  "thiserror 1.0.69",
+ "x25519-dalek 1.1.1",
 ]
 
 [[package]]
@@ -3317,9 +3321,9 @@ dependencies = [
 name = "rift-mesh"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
  "anyhow",
  "bincode",
- "chacha20poly1305",
  "criterion",
  "ed25519-dalek 1.0.1",
  "hkdf",
@@ -4862,6 +4866,17 @@ name = "writeable"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9edde0db4769d2dc68579893f2306b26c6ecfbe0ef499b013d731b7b9247e0b9"
+
+[[package]]
+name = "x25519-dalek"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a0c105152107e3b96f6a00a65e86ce82d9b125230e1c4302940eca58ff71f4f"
+dependencies = [
+ "curve25519-dalek 3.2.0",
+ "rand_core 0.5.1",
+ "zeroize",
+]
 
 [[package]]
 name = "x25519-dalek"
