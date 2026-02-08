@@ -1,3 +1,10 @@
+//! WebAssembly bindings for the Rift protocol.
+//!
+//! This module exposes a minimal API for:
+//! - invite creation/inspection
+//! - session bootstrap
+//! - encrypted text encode/decode using protocol framing
+
 use aes_gcm::{Aead, Aes256Gcm, KeyInit, Nonce};
 use js_sys::{Date, Uint8Array};
 use rift_core::{
@@ -33,17 +40,25 @@ impl From<WasmError> for JsValue {
 
 #[wasm_bindgen]
 pub struct WasmClient {
+    /// Ephemeral identity for the session.
     identity: Identity,
+    /// Session identifier derived from the invite.
     session: SessionId,
+    /// Symmetric channel key for AES-GCM.
     channel_key: [u8; 32],
+    /// Local sequence counter for frames.
     seq: u32,
 }
 
 #[wasm_bindgen]
 pub struct InviteInfo {
+    /// Channel name embedded in the invite.
     channel_name: String,
+    /// Whether a password was set.
     has_password: bool,
+    /// Protocol version.
     version: u8,
+    /// Invite creation timestamp.
     created_at: u64,
 }
 
@@ -109,6 +124,7 @@ pub fn join_invite(invite_url: String) -> Result<WasmClient, JsValue> {
 
 #[wasm_bindgen]
 impl WasmClient {
+    /// Construct a client from an invite.
     fn from_invite(invite: Invite) -> Self {
         let identity = Identity::generate();
         let session = SessionId::from_channel(&invite.channel_name, invite.password.as_deref());
@@ -120,16 +136,19 @@ impl WasmClient {
         }
     }
 
+    /// Return this client's peer id as hex.
     #[wasm_bindgen(getter)]
     pub fn peer_id(&self) -> String {
         self.identity.peer_id.to_hex()
     }
 
+    /// Return the session id as hex.
     #[wasm_bindgen(getter)]
     pub fn session_id(&self) -> String {
         self.session.to_hex()
     }
 
+    /// Encode a text message into an encrypted Rift frame.
     #[wasm_bindgen]
     pub fn encode_text(&mut self, text: String) -> Result<Uint8Array, JsValue> {
         let timestamp = now_ms();
@@ -150,6 +169,7 @@ impl WasmClient {
         Ok(Uint8Array::from(frame.as_slice()))
     }
 
+    /// Decode an encrypted Rift frame into a JSON-compatible JS object.
     #[wasm_bindgen]
     pub fn decode_text(&self, bytes: Uint8Array) -> Result<JsValue, JsValue> {
         let data = bytes.to_vec();
@@ -168,6 +188,7 @@ impl WasmClient {
         serde_wasm_bindgen::to_value(&decoded).map_err(|err| err.into())
     }
 
+    /// Encrypt a payload using the channel key.
     fn encrypt_payload(&self, payload: &RiftPayload) -> Result<RiftPayload, JsValue> {
         let serialized = bincode::serialize(payload)
             .map_err(|err| WasmError::PayloadDecode(err.to_string()))?;
@@ -184,6 +205,7 @@ impl WasmClient {
         }))
     }
 
+    /// Decrypt a payload using the channel key.
     fn decrypt_payload(&self, payload: &RiftPayload) -> Result<RiftPayload, JsValue> {
         let RiftPayload::Encrypted(encrypted) = payload else {
             return Err(WasmError::PayloadDecode("missing encrypted payload".to_string()).into());
@@ -200,10 +222,12 @@ impl WasmClient {
     }
 }
 
+/// Current time in milliseconds (JS Date).
 fn now_ms() -> u64 {
     Date::now() as u64
 }
 
+/// Generate a random AES-GCM nonce.
 fn random_nonce() -> [u8; 12] {
     let mut nonce = [0u8; 12];
     getrandom::getrandom(&mut nonce).expect("random nonce");

@@ -1,3 +1,8 @@
+//! Audio capture, playback, and codec helpers.
+//!
+//! This module wraps CPAL for audio I/O and Opus for encoding/decoding.
+//! It also provides a simple mixer for combining multiple streams.
+
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -8,9 +13,13 @@ use rift_protocol::CodecId;
 
 #[derive(Debug, Clone)]
 pub struct AudioConfig {
+    /// Sample rate in Hz.
     pub sample_rate: u32,
+    /// Frame duration in milliseconds.
     pub frame_duration_ms: u32,
+    /// Channel count (mono/stereo).
     pub channels: u16,
+    /// Target bitrate for Opus.
     pub bitrate: u32,
 }
 
@@ -26,16 +35,19 @@ impl Default for AudioConfig {
 }
 
 impl AudioConfig {
+    /// Number of samples per frame (all channels included).
     pub fn frame_samples(&self) -> usize {
         let per_channel = (self.sample_rate as usize * self.frame_duration_ms as usize) / 1000;
         per_channel * self.channels as usize
     }
 
+    /// Frame duration as a `Duration`.
     pub fn frame_duration(&self) -> Duration {
         Duration::from_millis(self.frame_duration_ms as u64)
     }
 }
 
+/// Encode a single audio frame into the requested codec.
 pub fn encode_frame(codec: CodecId, frame: &[i16], encoder: &mut OpusEncoder) -> Result<Vec<u8>> {
     match codec {
         CodecId::Opus => {
@@ -55,6 +67,7 @@ pub fn encode_frame(codec: CodecId, frame: &[i16], encoder: &mut OpusEncoder) ->
     }
 }
 
+/// Decode a single audio frame payload into PCM samples.
 pub fn decode_frame(
     codec: CodecId,
     payload: &[u8],
@@ -79,15 +92,18 @@ pub fn decode_frame(
     }
 }
 
+/// Active audio input stream wrapper.
 pub struct AudioIn {
     _stream: cpal::Stream,
 }
 
 impl AudioIn {
+    /// Open the default input device and start capturing.
     pub fn new(config: &AudioConfig) -> Result<(Self, tokio::sync::mpsc::Receiver<Vec<i16>>)> {
         Self::new_with_device(config, None)
     }
 
+    /// Open a specific input device by name (or default if None).
     pub fn new_with_device(
         config: &AudioConfig,
         device_name: Option<&str>,
@@ -151,6 +167,7 @@ impl AudioIn {
     }
 }
 
+/// Buffer callback for audio input streams.
 fn audio_in_callback(
     data: &[i16],
     frame_samples: usize,
@@ -165,6 +182,7 @@ fn audio_in_callback(
     }
 }
 
+/// Active audio output stream wrapper.
 pub struct AudioOut {
     _stream: cpal::Stream,
     queue: Arc<Mutex<VecDeque<i16>>>,
@@ -173,10 +191,12 @@ pub struct AudioOut {
 }
 
 impl AudioOut {
+    /// Open the default output device and start playback.
     pub fn new(config: &AudioConfig) -> Result<Self> {
         Self::new_with_device(config, None)
     }
 
+    /// Open a specific output device by name (or default if None).
     pub fn new_with_device(config: &AudioConfig, device_name: Option<&str>) -> Result<Self> {
         let host = cpal::default_host();
         let device = if let Some(name) = device_name {
@@ -237,6 +257,7 @@ impl AudioOut {
         })
     }
 
+    /// Push a PCM frame into the playback queue.
     pub fn push_frame(&self, frame: &[i16]) {
         let mut queue = self.queue.lock().unwrap();
         for sample in frame {
@@ -244,20 +265,24 @@ impl AudioOut {
         }
     }
 
+    /// Number of samples per frame.
     pub fn frame_samples(&self) -> usize {
         self.frame_samples
     }
 
+    /// Channel count.
     pub fn channels(&self) -> u16 {
         self.channels
     }
 
+    /// Samples currently queued for playback.
     pub fn queued_samples(&self) -> usize {
         let queue = self.queue.lock().unwrap();
         queue.len()
     }
 }
 
+/// Find an input device by name.
 fn find_input_device(host: &cpal::Host, name: &str) -> Result<cpal::Device> {
     for device in host.input_devices()? {
         if let Ok(dev_name) = device.name() {
@@ -269,6 +294,7 @@ fn find_input_device(host: &cpal::Host, name: &str) -> Result<cpal::Device> {
     Err(anyhow!("input device not found: {}", name))
 }
 
+/// Find an output device by name.
 fn find_output_device(host: &cpal::Host, name: &str) -> Result<cpal::Device> {
     for device in host.output_devices()? {
         if let Ok(dev_name) = device.name() {
@@ -280,6 +306,7 @@ fn find_output_device(host: &cpal::Host, name: &str) -> Result<cpal::Device> {
     Err(anyhow!("output device not found: {}", name))
 }
 
+/// Write queued PCM data into an i16 output buffer.
 fn audio_out_callback_i16(data: &mut [i16], queue: &Arc<Mutex<VecDeque<i16>>>) {
     let mut q = queue.lock().unwrap();
     for sample in data.iter_mut() {
@@ -287,6 +314,7 @@ fn audio_out_callback_i16(data: &mut [i16], queue: &Arc<Mutex<VecDeque<i16>>>) {
     }
 }
 
+/// Write queued PCM data into an f32 output buffer.
 fn audio_out_callback_f32(data: &mut [f32], queue: &Arc<Mutex<VecDeque<i16>>>) {
     let mut q = queue.lock().unwrap();
     for sample in data.iter_mut() {
@@ -295,6 +323,7 @@ fn audio_out_callback_f32(data: &mut [f32], queue: &Arc<Mutex<VecDeque<i16>>>) {
     }
 }
 
+/// Write queued PCM data into a u16 output buffer.
 fn audio_out_callback_u16(data: &mut [u16], queue: &Arc<Mutex<VecDeque<i16>>>) {
     let mut q = queue.lock().unwrap();
     for sample in data.iter_mut() {
@@ -303,11 +332,13 @@ fn audio_out_callback_u16(data: &mut [u16], queue: &Arc<Mutex<VecDeque<i16>>>) {
     }
 }
 
+/// Thin wrapper around Opus encoder with Rift-friendly defaults.
 pub struct OpusEncoder {
     inner: opus::Encoder,
 }
 
 impl OpusEncoder {
+    /// Construct an Opus encoder based on the audio config.
     pub fn new(config: &AudioConfig) -> Result<Self> {
         let channels = match config.channels {
             1 => opus::Channels::Mono,
@@ -319,27 +350,32 @@ impl OpusEncoder {
         Ok(Self { inner: encoder })
     }
 
+    /// Encode i16 PCM samples.
     pub fn encode_i16(&mut self, frame: &[i16], out: &mut [u8]) -> Result<usize> {
         let len = self.inner.encode(frame, out)?;
         Ok(len)
     }
 
+    /// Encode f32 PCM samples.
     pub fn encode_f32(&mut self, frame: &[f32], out: &mut [u8]) -> Result<usize> {
         let len = self.inner.encode_float(frame, out)?;
         Ok(len)
     }
 
+    /// Update target bitrate.
     pub fn set_bitrate(&mut self, bitrate: u32) -> Result<()> {
         self.inner
             .set_bitrate(opus::Bitrate::Bits(bitrate as i32))?;
         Ok(())
     }
 
+    /// Enable or disable in-band FEC.
     pub fn set_fec(&mut self, enabled: bool) -> Result<()> {
         self.inner.set_inband_fec(enabled)?;
         Ok(())
     }
 
+    /// Set expected packet loss percentage.
     pub fn set_packet_loss(&mut self, loss_pct: u8) -> Result<()> {
         let pct = loss_pct.min(100);
         self.inner.set_packet_loss_perc(pct as i32)?;
@@ -347,11 +383,13 @@ impl OpusEncoder {
     }
 }
 
+/// Thin wrapper around Opus decoder.
 pub struct OpusDecoder {
     inner: opus::Decoder,
 }
 
 impl OpusDecoder {
+    /// Construct an Opus decoder based on the audio config.
     pub fn new(config: &AudioConfig) -> Result<Self> {
         let channels = match config.channels {
             1 => opus::Channels::Mono,
@@ -362,11 +400,13 @@ impl OpusDecoder {
         Ok(Self { inner: decoder })
     }
 
+    /// Decode Opus payload into i16 PCM samples.
     pub fn decode_i16(&mut self, data: &[u8], out: &mut [i16]) -> Result<usize> {
         let len = self.inner.decode(data, out, false)?;
         Ok(len)
     }
 
+    /// Decode Opus payload into f32 PCM samples.
     pub fn decode_f32(&mut self, data: &[u8], out: &mut [f32]) -> Result<usize> {
         let len = self.inner.decode_float(data, out, false)?;
         Ok(len)
@@ -375,11 +415,15 @@ impl OpusDecoder {
 
 #[derive(Debug, Clone)]
 pub struct VoiceFrame {
+    /// Sequence number assigned by sender.
     pub seq: u32,
+    /// Capture timestamp in milliseconds.
     pub timestamp: u64,
+    /// Encoded audio payload.
     pub payload: Vec<u8>,
 }
 
+/// Simple audio mixer for combining multiple PCM streams.
 pub struct AudioMixer {
     frame_samples: usize,
     prebuffer_frames: usize,
@@ -392,10 +436,12 @@ struct StreamState {
 }
 
 impl AudioMixer {
+    /// Create a mixer with no prebuffer.
     pub fn new(frame_samples: usize) -> Self {
         Self::with_prebuffer(frame_samples, 0)
     }
 
+    /// Create a mixer with a specified prebuffer in frames.
     pub fn with_prebuffer(frame_samples: usize, prebuffer_frames: usize) -> Self {
         Self {
             frame_samples,
@@ -404,6 +450,7 @@ impl AudioMixer {
         }
     }
 
+    /// Push a new frame into a stream's queue.
     pub fn push(&mut self, stream_id: u64, frame: Vec<i16>) {
         let entry = self.streams.entry(stream_id).or_insert_with(|| StreamState {
             queue: VecDeque::new(),
@@ -412,11 +459,13 @@ impl AudioMixer {
         entry.queue.push_back(frame);
     }
 
+    /// Mix the next frame without returning activity information.
     pub fn mix_next(&mut self) -> Vec<i16> {
         let (frame, _active) = self.mix_next_with_activity();
         frame
     }
 
+    /// Mix the next frame and report whether any streams were active.
     pub fn mix_next_with_activity(&mut self) -> (Vec<i16>, bool) {
         let mut active = 0usize;
         let mut mix = vec![0i32; self.frame_samples];

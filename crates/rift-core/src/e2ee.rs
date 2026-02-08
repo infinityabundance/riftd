@@ -1,3 +1,10 @@
+//! End-to-end encryption helpers.
+//!
+//! This module provides:
+//! - X25519 keypair generation for session encryption
+//! - Ed25519 signatures over ephemeral keys
+//! - HKDF-based shared key derivation
+
 use ed25519_dalek::{PublicKey as Ed25519PublicKey, Signature, Signer, Verifier};
 use hkdf::Hkdf;
 use rand_core::OsRng;
@@ -7,22 +14,27 @@ use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 use crate::Identity;
 
 pub struct E2eeKeypair {
+    /// X25519 private key.
     pub secret: StaticSecret,
+    /// X25519 public key.
     pub public: X25519PublicKey,
 }
 
+/// Generate an ephemeral X25519 keypair for E2EE.
 pub fn generate_e2ee_keypair() -> E2eeKeypair {
     let secret = StaticSecret::new(OsRng);
     let public = X25519PublicKey::from(&secret);
     E2eeKeypair { secret, public }
 }
 
+/// Sign the ephemeral public key with the long-term Ed25519 identity.
 pub fn sign_e2ee_public(identity: &Identity, session_id: &[u8], public: &X25519PublicKey) -> Vec<u8> {
     let msg = e2ee_message(session_id, public);
     let signature: Signature = identity.keypair.sign(&msg);
     signature.to_bytes().to_vec()
 }
 
+/// Verify a peer's signature over their ephemeral public key.
 pub fn verify_e2ee_public(
     peer_public: &Ed25519PublicKey,
     session_id: &[u8],
@@ -36,6 +48,7 @@ pub fn verify_e2ee_public(
     peer_public.verify(&msg, &signature).is_ok()
 }
 
+/// Derive the shared session key from X25519 DH + HKDF.
 pub fn derive_e2ee_shared_key(
     secret: &StaticSecret,
     remote_public: &X25519PublicKey,
@@ -49,6 +62,7 @@ pub fn derive_e2ee_shared_key(
     out
 }
 
+/// Compose the message used for signature verification.
 fn e2ee_message(session_id: &[u8], public: &X25519PublicKey) -> Vec<u8> {
     let mut msg = Vec::with_capacity(16 + session_id.len() + 32);
     msg.extend_from_slice(b"rift-e2ee");
@@ -57,10 +71,12 @@ fn e2ee_message(session_id: &[u8], public: &X25519PublicKey) -> Vec<u8> {
     msg
 }
 
+/// Helper to convert raw bytes into an X25519 public key.
 pub fn public_key_from_bytes(bytes: [u8; 32]) -> X25519PublicKey {
     X25519PublicKey::from(bytes)
 }
 
+/// Helper to convert raw bytes into an Ed25519 public key.
 pub fn ed25519_public_from_bytes(bytes: &[u8]) -> Option<Ed25519PublicKey> {
     Ed25519PublicKey::from_bytes(bytes).ok()
 }

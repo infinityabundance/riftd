@@ -1,3 +1,9 @@
+//! On-disk identity storage and rotation.
+//!
+//! The keystore is a native-only utility. WASM targets return explicit
+//! "unsupported" errors and should provide their own storage abstractions
+//! (e.g., IndexedDB or in-memory).
+
 #[cfg(not(target_arch = "wasm32"))]
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -11,23 +17,30 @@ use crate::{CoreError, Identity};
 
 #[derive(Debug, Error)]
 pub enum KeyStoreError {
+    /// I/O error reading or writing identity material.
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    /// Corrupted identity file or incorrect key length.
     #[error("invalid key length")]
     InvalidKeyLength,
+    /// Missing identity file.
     #[error("identity not found at {0}")]
     IdentityMissing(String),
+    /// Wrapped error from core helpers.
     #[error("core error: {0}")]
     Core(#[from] CoreError),
 }
 
 pub struct KeyStore {
+    /// Path to the current identity file.
     path: PathBuf,
+    /// Cached identity material.
     identity: Identity,
 }
 
 impl KeyStore {
     #[cfg(not(target_arch = "wasm32"))]
+    /// Load an identity or create it if it doesn't exist.
     pub fn load_or_generate(path: &Path) -> Result<Identity, KeyStoreError> {
         match Identity::load(Some(path)) {
             Ok(identity) => Ok(identity),
@@ -43,11 +56,13 @@ impl KeyStore {
     }
 
     #[cfg(target_arch = "wasm32")]
+    /// WASM targets are ephemeral: always generate a fresh identity.
     pub fn load_or_generate(_path: &Path) -> Result<Identity, KeyStoreError> {
         Ok(Identity::generate())
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    /// Open an existing keystore at a specific path.
     pub fn open(path: &Path) -> Result<Self, KeyStoreError> {
         let identity = Identity::load(Some(path)).map_err(KeyStoreError::Core)?;
         Ok(Self {
@@ -57,6 +72,7 @@ impl KeyStore {
     }
 
     #[cfg(target_arch = "wasm32")]
+    /// WASM targets cannot open a file-backed keystore.
     pub fn open(_path: &Path) -> Result<Self, KeyStoreError> {
         Err(KeyStoreError::Io(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
@@ -65,6 +81,7 @@ impl KeyStore {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    /// Rotate the identity by archiving the current key and generating a new one.
     pub fn rotate(&mut self) -> Result<(), KeyStoreError> {
         let old_dir = self.old_dir();
         fs::create_dir_all(&old_dir)?;
@@ -84,6 +101,7 @@ impl KeyStore {
     }
 
     #[cfg(target_arch = "wasm32")]
+    /// WASM targets cannot rotate a file-backed keystore.
     pub fn rotate(&mut self) -> Result<(), KeyStoreError> {
         Err(KeyStoreError::Io(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
@@ -92,6 +110,7 @@ impl KeyStore {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    /// Return all known public keys, including archived ones.
     pub fn list_public_keys(&self) -> Vec<PublicKey> {
         let mut keys = Vec::new();
         if let Ok(keypair) = read_keypair(&self.path) {
@@ -108,15 +127,18 @@ impl KeyStore {
     }
 
     #[cfg(target_arch = "wasm32")]
+    /// WASM targets only have the in-memory identity.
     pub fn list_public_keys(&self) -> Vec<PublicKey> {
         vec![self.identity.keypair.public]
     }
 
+    /// Borrow the current identity.
     pub fn identity(&self) -> &Identity {
         &self.identity
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    /// Directory for archived keys.
     fn old_dir(&self) -> PathBuf {
         self.path
             .parent()
@@ -125,12 +147,14 @@ impl KeyStore {
     }
 
     #[cfg(target_arch = "wasm32")]
+    /// No archive directory in WASM.
     fn old_dir(&self) -> PathBuf {
         PathBuf::new()
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+/// Read a keypair from disk with length validation.
 fn read_keypair(path: &Path) -> Result<Keypair, KeyStoreError> {
     let bytes = fs::read(path)?;
     if bytes.len() != 64 {

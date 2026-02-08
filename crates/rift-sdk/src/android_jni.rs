@@ -1,3 +1,8 @@
+//! JNI bindings for Android integration.
+//!
+//! This module exposes a small JNI surface for initializing the SDK and
+//! bridging events into the Java/Kotlin layer.
+
 use jni::objects::{JClass, JObject, JString, JValue};
 use jni::sys::{jboolean, jint, jlong, jobject};
 use jni::JNIEnv;
@@ -11,12 +16,15 @@ use ndk_context::initialize_android_context;
 
 use crate::{RiftConfig, RiftEvent, RiftHandle};
 
+/// Bundle of runtime + handle kept behind a raw pointer for JNI.
 struct JniHandle {
     handle: RiftHandle,
     rt: Runtime,
 }
 
+/// Last error string for JNI callers to inspect.
 static LAST_ERROR: Mutex<Option<String>> = Mutex::new(None);
+/// Global panic hook to surface crashes to Android logs.
 static PANIC_HOOK: Once = Once::new();
 
 fn set_last_error(message: &str) {
@@ -25,6 +33,7 @@ fn set_last_error(message: &str) {
     }
 }
 
+/// Write an error to both the in-memory last-error slot and Android logs.
 fn log_error(message: &str) {
     set_last_error(message);
     const ANDROID_LOG_ERROR: i32 = 6;
@@ -45,10 +54,12 @@ fn log_error(message: &str) {
     }
 }
 
+/// Convert a raw JNI handle into a mutable reference.
 fn with_handle<'a>(handle: jlong) -> &'a mut JniHandle {
     unsafe { &mut *(handle as *mut JniHandle) }
 }
 
+/// Initialize the SDK from Android and return a native handle pointer.
 #[no_mangle]
 pub extern "system" fn Java_com_example_riftmobile_sdk_RiftNative_init(
     mut env: JNIEnv,
@@ -141,6 +152,7 @@ pub extern "system" fn Java_com_example_riftmobile_sdk_RiftNative_init(
     Box::into_raw(boxed) as jlong
 }
 
+/// Join a channel from the Android layer.
 #[no_mangle]
 pub extern "system" fn Java_com_example_riftmobile_sdk_RiftNative_joinChannel(
     mut env: JNIEnv,
@@ -179,6 +191,7 @@ pub extern "system" fn Java_com_example_riftmobile_sdk_RiftNative_joinChannel(
     }
 }
 
+/// Set DHT bootstrap nodes.
 #[no_mangle]
 pub extern "system" fn Java_com_example_riftmobile_sdk_RiftNative_setBootstrapNodes(
     mut env: JNIEnv,
@@ -203,6 +216,7 @@ pub extern "system" fn Java_com_example_riftmobile_sdk_RiftNative_setBootstrapNo
     let _ = handle.rt.block_on(handle.handle.set_bootstrap_nodes(list));
 }
 
+/// Enable or disable DHT discovery.
 #[no_mangle]
 pub extern "system" fn Java_com_example_riftmobile_sdk_RiftNative_setDhtEnabled(
     _env: JNIEnv,
@@ -219,6 +233,7 @@ pub extern "system" fn Java_com_example_riftmobile_sdk_RiftNative_setDhtEnabled(
         .block_on(handle.handle.set_dht_enabled(enabled != 0));
 }
 
+/// Override the invite link used for joining.
 #[no_mangle]
 pub extern "system" fn Java_com_example_riftmobile_sdk_RiftNative_setInvite(
     mut env: JNIEnv,
@@ -240,6 +255,7 @@ pub extern "system" fn Java_com_example_riftmobile_sdk_RiftNative_setInvite(
     let _ = handle.rt.block_on(handle.handle.set_invite(invite));
 }
 
+/// Configure TURN servers for relay fallback.
 #[no_mangle]
 pub extern "system" fn Java_com_example_riftmobile_sdk_RiftNative_setTurnServers(
     mut env: JNIEnv,
@@ -264,6 +280,7 @@ pub extern "system" fn Java_com_example_riftmobile_sdk_RiftNative_setTurnServers
     let _ = handle.rt.block_on(handle.handle.set_turn_servers(list));
 }
 
+/// Override the audio quality preset.
 #[no_mangle]
 pub extern "system" fn Java_com_example_riftmobile_sdk_RiftNative_setAudioQuality(
     mut env: JNIEnv,
@@ -285,6 +302,7 @@ pub extern "system" fn Java_com_example_riftmobile_sdk_RiftNative_setAudioQualit
     let _ = handle.rt.block_on(handle.handle.set_audio_quality(quality));
 }
 
+/// Generate an invite string for sharing.
 #[no_mangle]
 pub extern "system" fn Java_com_example_riftmobile_sdk_RiftNative_generateInvite(
     mut env: JNIEnv,
@@ -323,6 +341,7 @@ pub extern "system" fn Java_com_example_riftmobile_sdk_RiftNative_generateInvite
     JObject::from(jstr).into_raw()
 }
 
+/// Leave the current channel.
 #[no_mangle]
 pub extern "system" fn Java_com_example_riftmobile_sdk_RiftNative_leaveChannel(
     mut env: JNIEnv,
@@ -339,6 +358,7 @@ pub extern "system" fn Java_com_example_riftmobile_sdk_RiftNative_leaveChannel(
     if result.is_ok() { 0 } else { -1 }
 }
 
+/// Send a chat message to peers.
 #[no_mangle]
 pub extern "system" fn Java_com_example_riftmobile_sdk_RiftNative_sendChat(
     mut env: JNIEnv,
@@ -355,6 +375,7 @@ pub extern "system" fn Java_com_example_riftmobile_sdk_RiftNative_sendChat(
     if result.is_ok() { 0 } else { -1 }
 }
 
+/// Enable push-to-talk.
 #[no_mangle]
 pub extern "system" fn Java_com_example_riftmobile_sdk_RiftNative_startPtt(
     _env: JNIEnv,
@@ -369,6 +390,7 @@ pub extern "system" fn Java_com_example_riftmobile_sdk_RiftNative_startPtt(
     0
 }
 
+/// Disable push-to-talk.
 #[no_mangle]
 pub extern "system" fn Java_com_example_riftmobile_sdk_RiftNative_stopPtt(
     _env: JNIEnv,
@@ -383,6 +405,7 @@ pub extern "system" fn Java_com_example_riftmobile_sdk_RiftNative_stopPtt(
     0
 }
 
+/// Poll the next event and return it as a Java object.
 #[no_mangle]
 pub extern "system" fn Java_com_example_riftmobile_sdk_RiftNative_pollEvent(
     mut env: JNIEnv,
@@ -468,6 +491,7 @@ pub extern "system" fn Java_com_example_riftmobile_sdk_RiftNative_pollEvent(
     obj.map(|o| o.into_raw()).unwrap_or(std::ptr::null_mut())
 }
 
+/// Return the last error string stored by JNI helpers.
 #[no_mangle]
 pub extern "system" fn Java_com_example_riftmobile_sdk_RiftNative_lastError(
     env: JNIEnv,

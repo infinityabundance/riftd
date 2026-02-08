@@ -1,6 +1,9 @@
+//! Criterion benchmark for Noise transport encrypt/decrypt.
+
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use rift_core::noise::{noise_builder, NoiseSession};
 
+/// Bench encrypt/decrypt throughput with a negotiated Noise session.
 fn bench_noise_encrypt(c: &mut Criterion) {
     let builder = noise_builder();
     let static_kp = builder.generate_keypair().unwrap();

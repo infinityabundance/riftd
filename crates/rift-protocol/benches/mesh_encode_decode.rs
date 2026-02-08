@@ -1,7 +1,10 @@
+//! Criterion benchmark for protocol frame encoding/decoding.
+
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use rift_core::{MessageId, PeerId};
 use rift_protocol::{ChatMessage, ControlMessage, ProtocolVersion, RiftFrameHeader, RiftPayload, StreamKind};
 
+/// Encode + decode a representative chat frame.
 fn bench_encode_decode(c: &mut Criterion) {
     let header = RiftFrameHeader {
         version: ProtocolVersion::V1,

@@ -1,3 +1,9 @@
+//! C FFI bindings for the Rift SDK.
+//!
+//! This module exposes a minimal C ABI for initializing the SDK, joining
+//! channels, and receiving events. It is intentionally narrow to keep ABI
+//! compatibility manageable.
+
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int};
 use std::ptr;
@@ -8,19 +14,23 @@ use rift_core::PeerId;
 
 #[repr(C)]
 pub struct RiftHandleC {
+    /// Dedicated Tokio runtime for the SDK.
     runtime: tokio::runtime::Runtime,
+    /// Rust-side SDK handle.
     handle: RiftHandle,
 }
 
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct PeerIdC {
+    /// Raw peer id bytes.
     pub bytes: [u8; 32],
 }
 
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct SessionIdC {
+    /// Raw session id bytes.
     pub bytes: [u8; 32],
 }
 
@@ -38,10 +48,15 @@ pub enum RiftEventTag {
 
 #[repr(C)]
 pub struct RiftEventC {
+    /// Event type discriminator.
     pub tag: RiftEventTag,
+    /// Peer associated with the event.
     pub peer: PeerIdC,
+    /// Session associated with the event.
     pub session: SessionIdC,
+    /// Audio level (if applicable).
     pub level: f32,
+    /// Optional text payload (heap-allocated C string).
     pub text: *mut c_char,
 }
 
@@ -62,6 +77,10 @@ fn session_to_c(session: SessionId) -> SessionIdC {
     SessionIdC { bytes: session.0 }
 }
 
+/// Initialize the SDK from a TOML config path (or defaults if null).
+///
+/// # Safety
+/// `config_path` must be a valid null-terminated string if non-null.
 #[no_mangle]
 pub extern "C" fn rift_init(config_path: *const c_char, out_error: *mut RiftErrorCode) -> *mut RiftHandleC {
     unsafe {
@@ -137,16 +156,22 @@ pub extern "C" fn rift_init(config_path: *const c_char, out_error: *mut RiftErro
     Box::into_raw(boxed)
 }
 
+/// Return the SDK version string.
 #[no_mangle]
 pub extern "C" fn rift_sdk_version() -> *const c_char {
     concat!(env!("CARGO_PKG_VERSION"), "\0").as_ptr() as *const c_char
 }
 
+/// Return the SDK ABI version.
 #[no_mangle]
 pub extern "C" fn rift_sdk_abi_version() -> c_int {
     SDK_ABI_VERSION as c_int
 }
 
+/// Free a previously allocated Rift handle.
+///
+/// # Safety
+/// `handle` must be a pointer returned by `rift_init`.
 #[no_mangle]
 pub extern "C" fn rift_free(handle: *mut RiftHandleC) {
     if handle.is_null() {
@@ -157,6 +182,10 @@ pub extern "C" fn rift_free(handle: *mut RiftHandleC) {
     }
 }
 
+/// Join a channel by name/password.
+///
+/// # Safety
+/// `handle` must be valid. Strings must be null-terminated if non-null.
 #[no_mangle]
 pub extern "C" fn rift_join_channel(
     handle: *mut RiftHandleC,
@@ -182,6 +211,10 @@ pub extern "C" fn rift_join_channel(
     }
 }
 
+/// Leave the current channel.
+///
+/// # Safety
+/// `handle` must be valid. `name` must be a null-terminated string if non-null.
 #[no_mangle]
 pub extern "C" fn rift_leave_channel(handle: *mut RiftHandleC, name: *const c_char) -> c_int {
     if handle.is_null() {
@@ -200,6 +233,10 @@ pub extern "C" fn rift_leave_channel(handle: *mut RiftHandleC, name: *const c_ch
     }
 }
 
+/// Send a chat message to peers.
+///
+/// # Safety
+/// `handle` must be valid. `text` must be a null-terminated string if non-null.
 #[no_mangle]
 pub extern "C" fn rift_send_chat(handle: *mut RiftHandleC, text: *const c_char) -> c_int {
     if handle.is_null() || text.is_null() {
@@ -214,6 +251,10 @@ pub extern "C" fn rift_send_chat(handle: *mut RiftHandleC, text: *const c_char) 
     }
 }
 
+/// Enable push-to-talk.
+///
+/// # Safety
+/// `handle` must be valid.
 #[no_mangle]
 pub extern "C" fn rift_start_ptt(handle: *mut RiftHandleC) -> c_int {
     if handle.is_null() {
@@ -224,6 +265,10 @@ pub extern "C" fn rift_start_ptt(handle: *mut RiftHandleC) -> c_int {
     0
 }
 
+/// Disable push-to-talk.
+///
+/// # Safety
+/// `handle` must be valid.
 #[no_mangle]
 pub extern "C" fn rift_stop_ptt(handle: *mut RiftHandleC) -> c_int {
     if handle.is_null() {
@@ -234,6 +279,10 @@ pub extern "C" fn rift_stop_ptt(handle: *mut RiftHandleC) -> c_int {
     0
 }
 
+/// Mute or unmute microphone capture.
+///
+/// # Safety
+/// `handle` must be valid.
 #[no_mangle]
 pub extern "C" fn rift_set_mute(handle: *mut RiftHandleC, muted: c_int) -> c_int {
     if handle.is_null() {
@@ -244,6 +293,10 @@ pub extern "C" fn rift_set_mute(handle: *mut RiftHandleC, muted: c_int) -> c_int
     0
 }
 
+/// Start a call to a specific peer.
+///
+/// # Safety
+/// `handle` must be valid. `peer` must point to a valid `PeerIdC`.
 #[no_mangle]
 pub extern "C" fn rift_start_call(handle: *mut RiftHandleC, peer: *const PeerIdC) -> SessionIdC {
     if handle.is_null() || peer.is_null() {
@@ -259,6 +312,10 @@ pub extern "C" fn rift_start_call(handle: *mut RiftHandleC, peer: *const PeerIdC
     }
 }
 
+/// Accept an incoming call.
+///
+/// # Safety
+/// `handle` must be valid.
 #[no_mangle]
 pub extern "C" fn rift_accept_call(handle: *mut RiftHandleC, session: SessionIdC) -> c_int {
     if handle.is_null() {
@@ -273,6 +330,10 @@ pub extern "C" fn rift_accept_call(handle: *mut RiftHandleC, session: SessionIdC
     }
 }
 
+/// Decline an incoming call with optional reason.
+///
+/// # Safety
+/// `handle` must be valid. `reason` must be a null-terminated string if non-null.
 #[no_mangle]
 pub extern "C" fn rift_decline_call(
     handle: *mut RiftHandleC,
@@ -298,6 +359,10 @@ pub extern "C" fn rift_decline_call(
     }
 }
 
+/// End an active call.
+///
+/// # Safety
+/// `handle` must be valid.
 #[no_mangle]
 pub extern "C" fn rift_end_call(handle: *mut RiftHandleC, session: SessionIdC) -> c_int {
     if handle.is_null() {
@@ -312,6 +377,10 @@ pub extern "C" fn rift_end_call(handle: *mut RiftHandleC, session: SessionIdC) -
     }
 }
 
+/// Fetch the next event without blocking.
+///
+/// # Safety
+/// `handle` and `out_event` must be valid pointers.
 #[no_mangle]
 pub extern "C" fn rift_next_event(handle: *mut RiftHandleC, out_event: *mut RiftEventC) -> c_int {
     if handle.is_null() || out_event.is_null() {
@@ -374,6 +443,10 @@ pub extern "C" fn rift_next_event(handle: *mut RiftHandleC, out_event: *mut Rift
     1
 }
 
+/// Free strings owned by an event.
+///
+/// # Safety
+/// `event` must be a pointer returned by `rift_next_event`.
 #[no_mangle]
 pub extern "C" fn rift_event_free(event: *mut RiftEventC) {
     if event.is_null() {

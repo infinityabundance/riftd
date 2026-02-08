@@ -1,3 +1,9 @@
+//! Libp2p-based DHT integration for internet discovery.
+//!
+//! This module maintains a lightweight Kademlia DHT used to announce and
+//! discover peer endpoints keyed by channel id. It exposes a simple async
+//! handle (`DhtHandle`) to announce or lookup peers.
+
 use std::collections::HashMap;
 use std::net::SocketAddr;
 
@@ -21,47 +27,58 @@ use futures::StreamExt;
 
 #[derive(Debug, Clone)]
 pub struct DhtConfig {
+    /// Bootstrap node socket addresses.
     pub bootstrap_nodes: Vec<SocketAddr>,
+    /// Local listen address for the DHT.
     pub listen_addr: SocketAddr,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerEndpointInfo {
+    /// Rift peer id.
     pub peer_id: RiftPeerId,
+    /// Known socket addresses for the peer.
     pub addrs: Vec<SocketAddr>,
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum DhtError {
+    /// Transport/IO errors from the libp2p stack.
     #[error("transport error: {0}")]
     Transport(String),
+    /// DHT query errors.
     #[error("dht error: {0}")]
     Dht(String),
 }
 
 #[derive(Clone)]
 pub struct DhtHandle {
+    /// Command channel for interacting with the background swarm task.
     cmd_tx: mpsc::Sender<Command>,
 }
 
 enum Command {
+    /// Announce peer info for a channel and become a provider.
     Announce {
         key: ChannelId,
         info: PeerEndpointInfo,
         resp: oneshot::Sender<Result<(), DhtError>>,
     },
+    /// Lookup peers providing a channel.
     Lookup {
         key: ChannelId,
         resp: oneshot::Sender<Result<Vec<PeerEndpointInfo>, DhtError>>,
     },
 }
 
+/// Combined network behaviours used by the libp2p swarm.
 #[derive(NetworkBehaviour)]
 struct Behaviour {
     kademlia: Kademlia<MemoryStore>,
     identify: Identify,
 }
 
+/// Tracks in-flight lookups to aggregate multiple record results.
 struct LookupState {
     channel: ChannelId,
     pending: usize,
@@ -69,12 +86,14 @@ struct LookupState {
     resp: oneshot::Sender<Result<Vec<PeerEndpointInfo>, DhtError>>,
 }
 
+/// Internal classifier to connect query ids with lookup stages.
 enum LookupKind {
     Providers { lookup_id: u64 },
     Record { lookup_id: u64 },
 }
 
 impl DhtHandle {
+    /// Spawn the DHT swarm and return a handle for interaction.
     pub async fn new(config: DhtConfig) -> Result<DhtHandle, DhtError> {
         let local_key = libp2p::identity::Keypair::generate_ed25519();
         let local_peer_id = PeerId::from(local_key.public());
@@ -117,6 +136,7 @@ impl DhtHandle {
             let _ = swarm.dial(multi);
         }
 
+        // Background task: drive swarm and answer requests.
         tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -253,6 +273,7 @@ impl DhtHandle {
         Ok(DhtHandle { cmd_tx })
     }
 
+    /// Announce the current peer for a channel.
     pub async fn announce(&self, key: ChannelId, info: PeerEndpointInfo) -> Result<(), DhtError> {
         metrics::inc_counter("rift_dht_announce", &[]);
         debug!(channel = %key.to_hex(), "dht announce");
@@ -262,6 +283,7 @@ impl DhtHandle {
         rx.await.unwrap_or(Err(DhtError::Dht("announce failed".to_string())))
     }
 
+    /// Lookup all peers advertising a given channel.
     pub async fn lookup(&self, key: ChannelId) -> Result<Vec<PeerEndpointInfo>, DhtError> {
         metrics::inc_counter("rift_dht_lookup", &[]);
         debug!(channel = %key.to_hex(), "dht lookup");
@@ -272,6 +294,7 @@ impl DhtHandle {
     }
 }
 
+/// Convert a socket address to a multiaddr used by libp2p.
 fn socket_to_multiaddr(addr: SocketAddr) -> Multiaddr {
     match addr {
         SocketAddr::V4(v4) => Multiaddr::empty()
@@ -283,10 +306,12 @@ fn socket_to_multiaddr(addr: SocketAddr) -> Multiaddr {
     }
 }
 
+/// Record key used to advertise a channel.
 fn channel_key(channel: ChannelId) -> RecordKey {
     RecordKey::new(&channel.0)
 }
 
+/// Record key used to store a peer record within a channel.
 fn peer_record_key(channel: ChannelId, peer_id: RiftPeerId) -> RecordKey {
     let mut bytes = Vec::with_capacity(64);
     bytes.extend_from_slice(&channel.0);
@@ -294,6 +319,7 @@ fn peer_record_key(channel: ChannelId, peer_id: RiftPeerId) -> RecordKey {
     RecordKey::new(&bytes)
 }
 
+/// Record key used when we only have a libp2p peer id.
 fn peer_record_key_from_peer(channel: ChannelId, peer_id: PeerId) -> RecordKey {
     let mut bytes = Vec::with_capacity(64);
     bytes.extend_from_slice(&channel.0);
