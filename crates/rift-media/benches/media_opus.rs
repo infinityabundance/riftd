@@ -1,6 +1,9 @@
+//! Criterion benchmark for Opus encode/decode.
+
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use rift_media::{AudioConfig, OpusDecoder, OpusEncoder};
 
+/// Bench Opus encoding and decoding for a single frame.
 fn bench_opus(c: &mut Criterion) {
     let config = AudioConfig::default();
     let frame_samples = (config.sample_rate as usize * config.frame_duration_ms as usize / 1000)

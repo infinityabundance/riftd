@@ -1,3 +1,12 @@
+//! TURN (Traversal Using Relays around NAT) client implementation.
+//!
+//! This module provides a minimal TURN allocator for UDP relays. It supports:
+//! - Allocation requests with long-term credentials
+//! - Permission and channel binding management
+//! - Send/receive data indications
+//!
+//! The implementation favors simplicity and correctness over completeness.
+
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -47,49 +56,72 @@ const TURN_DEFAULT_PORT: u16 = 3478;
 
 #[derive(Debug, Clone)]
 pub struct TurnServerConfig {
+    /// TURN server socket address.
     pub addr: SocketAddr,
+    /// Optional long-term auth username.
     pub username: Option<String>,
+    /// Optional long-term auth credential (password).
     pub credential: Option<String>,
 }
 
 #[derive(Debug)]
 pub struct TurnRelay {
+    /// UDP socket used for TURN control/data.
     socket: Arc<UdpSocket>,
+    /// TURN server address.
     server: SocketAddr,
+    /// Allocated relay address provided by the TURN server.
     relay_addr: SocketAddr,
+    /// TURN realm provided by server during auth challenge.
     realm: Option<String>,
+    /// TURN nonce provided by server during auth challenge.
     nonce: Option<String>,
+    /// Username for long-term auth.
     username: Option<String>,
+    /// Credential for long-term auth.
     credential: Option<String>,
+    /// Cached channel bindings (peer addr -> channel number).
     channels: Mutex<HashMap<SocketAddr, u16>>,
+    /// Cached permissions for peer addresses.
     permissions: Mutex<HashSet<SocketAddr>>,
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum TurnError {
+    /// No TURN servers configured.
     #[error("no turn servers configured")]
     NoServers,
+    /// TURN credentials were required but missing.
     #[error("turn server missing credentials")]
     MissingCredentials,
+    /// Allocation attempt failed after retries.
     #[error("turn allocation failed")]
     AllocationFailed,
+    /// Response from TURN server was invalid.
     #[error("turn response invalid")]
     InvalidResponse,
+    /// Authentication failed.
     #[error("turn auth failed")]
     AuthFailed,
+    /// Underlying socket I/O error.
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    /// STUN parsing errors.
     #[error("stun error: {0}")]
     Stun(#[from] StunError),
 }
 
 #[derive(Debug, Clone)]
 pub struct TurnCandidate {
+    /// Relay address on the TURN server.
     pub relay_addr: SocketAddr,
+    /// TURN server address.
     pub server: SocketAddr,
+    /// Shared relay handle.
     pub relay: Arc<TurnRelay>,
 }
 
+/// Periodically send empty datagrams to keep the TURN allocation alive.
 pub fn spawn_turn_keepalive(relay: Arc<TurnRelay>, interval_ms: u64) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_millis(interval_ms.max(1000)));
@@ -100,6 +132,7 @@ pub fn spawn_turn_keepalive(relay: Arc<TurnRelay>, interval_ms: u64) -> tokio::t
     })
 }
 
+/// Parse a TURN server URI into a config struct.
 pub fn parse_turn_server(uri: &str) -> Result<TurnServerConfig, TurnError> {
     let trimmed = uri.trim();
     let trimmed = trimmed.strip_prefix("turn:").unwrap_or(trimmed);
@@ -141,6 +174,10 @@ pub async fn allocate_turn_relay(
     server: TurnServerConfig,
     timeout_ms: u64,
 ) -> Result<TurnCandidate, TurnError> {
+    // Allocate a TURN relay:
+    // 1) Send allocate request
+    // 2) Handle auth challenge (nonce/realm)
+    // 3) Extract relayed address on success
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
     let socket = Arc::new(socket);
 
@@ -207,10 +244,12 @@ pub async fn allocate_turn_relay(
 }
 
 impl TurnRelay {
+    /// Return the allocated relay address.
     pub fn relay_addr(&self) -> SocketAddr {
         self.relay_addr
     }
 
+    /// Send a payload to a peer via TURN (channel data preferred, send indication fallback).
     pub async fn send_to(&self, peer: SocketAddr, data: &[u8]) -> Result<(), TurnError> {
         self.ensure_permission(peer).await?;
         let channel = self.ensure_channel(peer).await.ok();
@@ -232,6 +271,7 @@ impl TurnRelay {
         Ok(())
     }
 
+    /// Receive the next payload from the TURN relay.
     pub async fn recv_from(&self, buf: &mut [u8]) -> Result<(usize, SocketAddr), TurnError> {
         loop {
             let (len, _addr) = self.socket.recv_from(buf).await?;
@@ -262,6 +302,7 @@ impl TurnRelay {
     }
 
     async fn ensure_permission(&self, peer: SocketAddr) -> Result<(), TurnError> {
+        // TURN requires explicit permission before relaying to a peer.
         {
             let perms = self.permissions.lock().await;
             if perms.contains(&peer) {
@@ -280,6 +321,7 @@ impl TurnRelay {
     }
 
     async fn ensure_channel(&self, peer: SocketAddr) -> Result<u16, TurnError> {
+        // Channel bindings provide efficient data framing for frequent peers.
         if let Some(channel) = { self.channels.lock().await.get(&peer).copied() } {
             return Ok(channel);
         }
@@ -296,10 +338,12 @@ impl TurnRelay {
     }
 
     fn should_auth(&self) -> bool {
+        // Auth is required once we have all parameters for long-term credentials.
         self.username.is_some() && self.credential.is_some() && self.realm.is_some() && self.nonce.is_some()
     }
 
     fn add_auth(&self, msg: &mut Vec<u8>) -> Result<(), TurnError> {
+        // Add MESSAGE-INTEGRITY and FINGERPRINT to a TURN message.
         let username = self.username.as_ref().ok_or(TurnError::MissingCredentials)?;
         let credential = self.credential.as_ref().ok_or(TurnError::MissingCredentials)?;
         let realm = self.realm.as_ref().ok_or(TurnError::MissingCredentials)?;
@@ -328,6 +372,7 @@ fn build_allocate_request(
     nonce: &Option<String>,
     realm: &Option<String>,
 ) -> Result<Vec<u8>, TurnError> {
+    // Build TURN allocate request with optional auth parameters.
     let mut msg = build_stun_header(TURN_ALLOCATE_REQUEST, tx_id);
     add_attr_u32(&mut msg, ATTR_REQUESTED_TRANSPORT, (TURN_UDP_TRANSPORT as u32) << 24);
     if let Some(username) = username {
@@ -344,6 +389,7 @@ fn build_allocate_request(
 }
 
 fn build_create_permission(tx_id: &[u8; 12], peer: SocketAddr) -> Vec<u8> {
+    // Build TURN create-permission request for a peer.
     let mut msg = build_stun_header(TURN_CREATE_PERMISSION_REQUEST, tx_id);
     add_attr_bytes(&mut msg, ATTR_XOR_PEER_ADDRESS, &encode_xor_addr(peer, tx_id));
     finalize_length(&mut msg);
@@ -351,6 +397,7 @@ fn build_create_permission(tx_id: &[u8; 12], peer: SocketAddr) -> Vec<u8> {
 }
 
 fn build_channel_bind(tx_id: &[u8; 12], peer: SocketAddr, channel: u16) -> Vec<u8> {
+    // Build TURN channel bind request for a peer + channel.
     let mut msg = build_stun_header(TURN_CHANNEL_BIND_REQUEST, tx_id);
     add_attr_u32(&mut msg, ATTR_CHANNEL_NUMBER, (channel as u32) << 16);
     add_attr_bytes(&mut msg, ATTR_XOR_PEER_ADDRESS, &encode_xor_addr(peer, tx_id));
@@ -359,6 +406,7 @@ fn build_channel_bind(tx_id: &[u8; 12], peer: SocketAddr, channel: u16) -> Vec<u
 }
 
 fn build_send_indication(tx_id: &[u8; 12], peer: SocketAddr, data: &[u8]) -> Vec<u8> {
+    // Build TURN send indication (no channel binding required).
     let mut msg = build_stun_header(TURN_SEND_INDICATION, tx_id);
     add_attr_bytes(&mut msg, ATTR_XOR_PEER_ADDRESS, &encode_xor_addr(peer, tx_id));
     add_attr_bytes(&mut msg, ATTR_DATA, data);
@@ -367,6 +415,7 @@ fn build_send_indication(tx_id: &[u8; 12], peer: SocketAddr, data: &[u8]) -> Vec
 }
 
 fn parse_turn_response(buf: &[u8], tx_id: &[u8; 12]) -> Result<TurnResponse, TurnError> {
+    // Parse STUN/TURN response and extract success or auth challenge.
     if buf.len() < STUN_HEADER_LEN {
         return Err(TurnError::InvalidResponse);
     }

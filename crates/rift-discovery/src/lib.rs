@@ -1,3 +1,9 @@
+//! Peer discovery helpers (mDNS + optional DHT).
+//!
+//! This module provides LAN discovery via mDNS and optional internet discovery
+//! via the DHT. It exposes async helpers to start advertisements and streams of
+//! discovered peers.
+
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
@@ -9,17 +15,23 @@ use tokio_stream::Stream;
 use rift_core::{ChannelId, PeerId};
 use rift_dht::{DhtConfig, DhtHandle, PeerEndpointInfo};
 
+/// mDNS service type used for LAN discovery.
 const SERVICE_TYPE: &str = "_rift._udp.local.";
 
 #[derive(Debug, Clone)]
 pub struct DiscoveryConfig {
+    /// Channel name used to compute the discovery key.
     pub channel_name: String,
+    /// Optional channel password.
     pub password: Option<String>,
+    /// Local peer id to advertise.
     pub peer_id: PeerId,
+    /// Local UDP listen port.
     pub listen_port: u16,
 }
 
 impl DiscoveryConfig {
+    /// Derive the channel id used for discovery filtering.
     pub fn channel_id(&self) -> ChannelId {
         ChannelId::from_channel(&self.channel_name, self.password.as_deref())
     }
@@ -27,34 +39,44 @@ impl DiscoveryConfig {
 
 #[derive(Debug, Clone)]
 pub struct PeerInfo {
+    /// Peer id discovered on the network.
     pub peer_id: PeerId,
+    /// Primary socket address for the peer.
     pub addr: SocketAddr,
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum DiscoveryError {
+    /// mDNS library errors.
     #[error("mdns error: {0}")]
     Mdns(#[from] mdns_sd::Error),
+    /// Missing expected metadata in mDNS records.
     #[error("missing peer info in mDNS record")]
     MissingPeerInfo,
+    /// Peer id could not be parsed.
     #[error("invalid peer id")]
     InvalidPeerId,
+    /// DHT errors are wrapped as strings.
     #[error("dht error: {0}")]
     Dht(String),
 }
 
 #[derive(Debug, Clone)]
 pub enum DiscoveryMode {
+    /// Local LAN discovery only.
     Lan,
+    /// Internet discovery via DHT.
     Dht(DhtConfig),
 }
 
+/// Start a DHT instance for internet discovery.
 pub async fn start_dht(config: DhtConfig) -> Result<DhtHandle, DiscoveryError> {
     DhtHandle::new(config)
         .await
         .map_err(|e| DiscoveryError::Dht(e.to_string()))
 }
 
+/// Announce a peer in the DHT for the given channel.
 pub async fn dht_announce(
     handle: &DhtHandle,
     channel_id: ChannelId,
@@ -66,6 +88,7 @@ pub async fn dht_announce(
         .map_err(|e| DiscoveryError::Dht(e.to_string()))
 }
 
+/// Lookup peers in the DHT for the given channel.
 pub async fn dht_lookup(
     handle: &DhtHandle,
     channel_id: ChannelId,
@@ -76,12 +99,14 @@ pub async fn dht_lookup(
         .map_err(|e| DiscoveryError::Dht(e.to_string()))
 }
 
+/// Keeps the mDNS daemon and service registration alive.
 pub struct MdnsHandle {
     _daemon: Arc<ServiceDaemon>,
     _service: ServiceInfo,
 }
 
 impl MdnsHandle {
+    /// Construct a handle from daemon + service info.
     pub fn new(daemon: Arc<ServiceDaemon>, service: ServiceInfo) -> Self {
         Self {
             _daemon: daemon,
@@ -90,6 +115,7 @@ impl MdnsHandle {
     }
 }
 
+/// Publish this peer's presence on the LAN via mDNS.
 pub fn start_mdns_advertisement(config: DiscoveryConfig) -> Result<MdnsHandle, DiscoveryError> {
     let daemon = Arc::new(ServiceDaemon::new()?);
     let channel_id = config.channel_id();
@@ -115,6 +141,7 @@ pub fn start_mdns_advertisement(config: DiscoveryConfig) -> Result<MdnsHandle, D
     Ok(MdnsHandle::new(daemon, service))
 }
 
+/// Start browsing for peers in the same channel on the LAN.
 pub fn discover_peers(
     config: DiscoveryConfig,
 ) -> Result<impl Stream<Item = PeerInfo>, DiscoveryError> {
@@ -139,6 +166,7 @@ pub fn discover_peers(
     })
 }
 
+/// Extract peer metadata from an mDNS service record.
 fn peer_info_from_service(info: &ServiceInfo, channel_hex: &str) -> Option<PeerInfo> {
     let channel = info.get_property_val_str("channel")?;
     if channel != channel_hex {
@@ -167,6 +195,7 @@ fn peer_info_from_service(info: &ServiceInfo, channel_hex: &str) -> Option<PeerI
     })
 }
 
+/// Stream wrapper that keeps the mDNS daemon alive.
 struct MdnsStream {
     _daemon: ServiceDaemon,
     inner: ReceiverStream<PeerInfo>,
@@ -175,6 +204,7 @@ struct MdnsStream {
 impl Stream for MdnsStream {
     type Item = PeerInfo;
 
+    /// Delegate polling to the underlying receiver stream.
     fn poll_next(
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
@@ -183,6 +213,7 @@ impl Stream for MdnsStream {
     }
 }
 
+/// Enumerate local IPv4 addresses for mDNS advertisement.
 pub fn local_ipv4_addrs() -> Result<Vec<IpAddr>, DiscoveryError> {
     let mut addrs = Vec::new();
     let interfaces = if_addrs::get_if_addrs()

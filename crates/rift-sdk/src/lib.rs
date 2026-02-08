@@ -1,4 +1,7 @@
 //! Rift SDK: high-level API for embedding Rift VoIP in other applications.
+//!
+//! This crate wraps mesh, media, discovery, and NAT components into a cohesive
+//! runtime with a simpler API surface for native embedding.
 
 use std::collections::HashMap;
 use std::fs;
@@ -43,40 +46,64 @@ pub const SDK_ABI_VERSION: i32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RiftConfig {
+    /// Optional path to the identity key.
     pub identity_path: Option<PathBuf>,
+    /// UDP listen port.
     pub listen_port: u16,
+    /// Whether this node can act as a relay.
     pub relay: bool,
+    /// Optional display name for UI surfaces.
     pub user_name: Option<String>,
+    /// Preferred codecs for negotiation.
     pub preferred_codecs: Vec<CodecId>,
+    /// Preferred feature flags for negotiation.
     pub preferred_features: Vec<FeatureFlag>,
+    /// QoS tuning parameters.
     #[serde(default)]
     pub qos: QosProfile,
+    /// Whether metrics are enabled.
     #[serde(default)]
     pub metrics_enabled: bool,
+    /// Security settings (E2EE, auth, etc).
     #[serde(default)]
     pub security: SecurityConfig,
+    /// DHT configuration.
     pub dht: DhtConfigSdk,
+    /// Audio configuration.
     pub audio: AudioConfigSdk,
+    /// Network configuration.
     pub network: NetworkConfigSdk,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioConfigSdk {
+    /// Enable audio capture/playback.
     pub enabled: bool,
+    /// Optional input device name.
     pub input_device: Option<String>,
+    /// Optional output device name.
     pub output_device: Option<String>,
+    /// Quality preset identifier.
     pub quality: String,
+    /// Push-to-talk enabled.
     pub ptt: bool,
+    /// Voice activity detection enabled.
     pub vad: bool,
+    /// Mute output playback.
     pub mute_output: bool,
+    /// Emit raw voice frames to consumers.
     pub emit_voice_frames: bool,
+    /// Allow audio init failures without crashing.
     pub allow_fail: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkConfigSdk {
+    /// Prefer direct P2P routes if possible.
     pub prefer_p2p: bool,
+    /// Explicit list of local ports to bind.
     pub local_ports: Option<Vec<u16>>,
+    /// Explicit peers to contact on startup.
     pub known_peers: Vec<std::net::SocketAddr>,
     pub invite: Option<String>,
     #[serde(default)]
@@ -101,8 +128,11 @@ pub struct NetworkConfigSdk {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DhtConfigSdk {
+    /// Enable DHT discovery.
     pub enabled: bool,
+    /// Bootstrap node addresses (string form).
     pub bootstrap_nodes: Vec<String>,
+    /// Optional local listen addr override.
     pub listen_addr: Option<String>,
 }
 
@@ -133,11 +163,17 @@ impl Default for RiftConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SecurityConfig {
+    /// Trust first-seen identity keys.
     pub trust_on_first_use: bool,
+    /// Optional path for known-hosts storage.
     pub known_hosts_path: Option<PathBuf>,
+    /// Reject peers on key mismatch.
     pub reject_on_mismatch: bool,
+    /// Optional channel shared secret.
     pub channel_shared_secret: Option<String>,
+    /// Optional audit log path.
     pub audit_log_path: Option<PathBuf>,
+    /// Rekey interval in seconds.
     pub rekey_interval_secs: Option<u64>,
 }
 
@@ -205,18 +241,27 @@ impl Default for DhtConfigSdk {
 
 #[derive(Debug, Clone, Copy)]
 pub struct LinkStats {
+    /// Round-trip time in milliseconds.
     pub rtt_ms: f32,
+    /// Packet loss fraction.
     pub loss: f32,
+    /// Jitter in milliseconds.
     pub jitter_ms: f32,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct GlobalStats {
+    /// Connected peers.
     pub num_peers: usize,
+    /// Active sessions.
     pub num_sessions: usize,
+    /// Packets sent.
     pub packets_sent: u64,
+    /// Packets received.
     pub packets_received: u64,
+    /// Bytes sent.
     pub bytes_sent: u64,
+    /// Bytes received.
     pub bytes_received: u64,
 }
 
@@ -228,39 +273,62 @@ pub enum RouteKind {
 
 #[derive(Debug, Clone)]
 pub enum RiftEvent {
+    /// Incoming chat message.
     IncomingChat(ChatMessage),
+    /// Incoming call invitation.
     IncomingCall { session: SessionId, from: PeerId },
+    /// Call state changes (ringing/active/ended).
     CallStateChanged { session: SessionId, state: CallState },
+    /// A peer joined the channel.
     PeerJoinedChannel { peer: PeerId, channel: String },
+    /// A peer left the channel.
     PeerLeftChannel { peer: PeerId, channel: String },
+    /// Peer capability advertisement.
     PeerCapabilities { peer: PeerId, capabilities: Capabilities },
+    /// Audio level update for UI metering.
     AudioLevel { peer: PeerId, level: f32 },
+    /// Codec selection update.
     CodecSelected { codec: CodecId },
+    /// Audio bitrate update for diagnostics.
     AudioBitrate { bitrate: u32 },
+    /// Periodic stats update.
     StatsUpdate { peer: PeerId, stats: LinkStats, global: GlobalStats },
+    /// Routing update for a peer.
     RouteUpdated { peer: PeerId, route: RouteKind },
+    /// Group topology update.
     GroupTopology { session: SessionId, mode: GroupMode },
+    /// Peer fingerprint for trust UX.
     PeerFingerprint { peer: PeerId, fingerprint: String },
+    /// Security-related notice (TOFU, mismatch, etc).
     SecurityNotice { message: String },
+    /// Raw voice samples (when enabled).
     VoiceFrame { peer: PeerId, samples: Vec<i16> },
 }
 
 #[derive(Debug, thiserror::Error)]
+/// High-level SDK error type.
 pub enum RiftError {
+    /// SDK runtime not initialized.
     #[error("not initialized")]
     NotInitialized,
+    /// Channel already joined.
     #[error("channel already joined")]
     AlreadyJoined,
+    /// Channel not joined.
     #[error("channel not joined")]
     NotJoined,
+    /// Mesh subsystem error.
     #[error("mesh error: {0}")]
     Mesh(String),
+    /// Audio subsystem error.
     #[error("audio error: {0}")]
     Audio(String),
+    /// Generic failure.
     #[error("other: {0}")]
     Other(String),
 }
 
+/// Runtime state for audio capture, mixing, and encoding.
 struct VoiceRuntime {
     _audio_in: AudioIn,
     mixer: Arc<StdMutex<AudioMixer>>,
@@ -270,6 +338,7 @@ struct VoiceRuntime {
     tuning: Arc<StdMutex<AudioTuning>>,
 }
 
+/// Current audio tuning parameters.
 #[derive(Debug, Clone)]
 struct AudioTuning {
     bitrate: u32,
@@ -277,6 +346,7 @@ struct AudioTuning {
     loss_pct: u8,
 }
 
+/// QoS state used to adapt audio settings to current network stats.
 struct QosState {
     profile: QosProfile,
     peer_stats: HashMap<PeerId, LinkStats>,
@@ -284,6 +354,7 @@ struct QosState {
     last_adjust: Instant,
 }
 
+/// Per-session runtime handle for mesh + audio + DHT.
 struct SessionRuntime {
     _channel: String,
     handle: MeshHandle,
@@ -291,12 +362,19 @@ struct SessionRuntime {
     _dht: Option<DhtHandle>,
 }
 
+/// Primary SDK handle exposed to callers.
 pub struct RiftHandle {
+    /// Persistent identity (if initialized).
     identity: Mutex<Option<Identity>>,
+    /// Local peer id (generated at startup).
     local_peer_id: PeerId,
+    /// Effective runtime configuration.
     config: RiftConfig,
+    /// In-memory overrides (PTT, mute, etc).
     overrides: Mutex<RiftConfigOverrides>,
+    /// Session runtime (mesh/audio/dht).
     runtime: Mutex<Option<SessionRuntime>>,
+    /// Event receiver for consumer-facing events.
     event_rx: Mutex<mpsc::UnboundedReceiver<RiftEvent>>,
     event_tx: mpsc::UnboundedSender<RiftEvent>,
     ptt_active: Arc<AtomicBool>,
@@ -304,6 +382,7 @@ pub struct RiftHandle {
 }
 
 #[derive(Debug, Default, Clone)]
+/// Runtime configuration overrides applied before joining.
 struct RiftConfigOverrides {
     dht_enabled: Option<bool>,
     bootstrap_nodes: Option<Vec<String>>,
@@ -313,6 +392,7 @@ struct RiftConfigOverrides {
 }
 
 impl RiftHandle {
+    /// Initialize the SDK runtime with the given config and identity.
     pub async fn new(config: RiftConfig) -> Result<Self, RiftError> {
         rift_metrics::set_enabled(config.metrics_enabled);
         let (event_tx, event_rx) = mpsc::unbounded_channel();
@@ -341,31 +421,37 @@ impl RiftHandle {
         })
     }
 
+    /// Enable or disable DHT discovery for subsequent joins.
     pub async fn set_dht_enabled(&self, enabled: bool) {
         let mut overrides = self.overrides.lock().await;
         overrides.dht_enabled = Some(enabled);
     }
 
+    /// Override DHT bootstrap nodes.
     pub async fn set_bootstrap_nodes(&self, nodes: Vec<String>) {
         let mut overrides = self.overrides.lock().await;
         overrides.bootstrap_nodes = Some(nodes);
     }
 
+    /// Provide an invite link override for joining.
     pub async fn set_invite(&self, invite: Option<String>) {
         let mut overrides = self.overrides.lock().await;
         overrides.invite = invite;
     }
 
+    /// Configure TURN servers for relay fallback.
     pub async fn set_turn_servers(&self, servers: Vec<String>) {
         let mut overrides = self.overrides.lock().await;
         overrides.turn_servers = Some(servers);
     }
 
+    /// Override the audio quality preset.
     pub async fn set_audio_quality(&self, quality: Option<String>) {
         let mut overrides = self.overrides.lock().await;
         overrides.audio_quality = quality;
     }
 
+    /// Join a channel by name/password, optionally using internet mode.
     pub async fn join_channel(
         &self,
         name: &str,
@@ -799,6 +885,7 @@ impl RiftHandle {
         Ok(())
     }
 
+    /// Leave the currently joined channel and tear down runtime state.
     pub async fn leave_channel(&self, _name: &str) -> Result<(), RiftError> {
         let mut runtime_guard = self.runtime.lock().await;
         if runtime_guard.is_none() {
@@ -808,6 +895,7 @@ impl RiftHandle {
         Ok(())
     }
 
+    /// Send a chat message to all peers.
     pub async fn send_chat(&self, text: &str) -> Result<(), RiftError> {
         let runtime_guard = self.runtime.lock().await;
         let runtime = runtime_guard.as_ref().ok_or(RiftError::NotJoined)?;
@@ -818,6 +906,7 @@ impl RiftHandle {
             .map_err(|e| RiftError::Mesh(format!("{e}")))
     }
 
+    /// Start a call with a specific peer.
     pub async fn start_call(&self, peer: PeerId) -> Result<SessionId, RiftError> {
         let runtime_guard = self.runtime.lock().await;
         let runtime = runtime_guard.as_ref().ok_or(RiftError::NotJoined)?;
@@ -828,6 +917,7 @@ impl RiftHandle {
             .map_err(|e| RiftError::Mesh(format!("{e}")))
     }
 
+    /// Accept an incoming call.
     pub async fn accept_call(&self, session: SessionId) -> Result<(), RiftError> {
         let runtime_guard = self.runtime.lock().await;
         let runtime = runtime_guard.as_ref().ok_or(RiftError::NotJoined)?;
@@ -838,6 +928,7 @@ impl RiftHandle {
             .map_err(|e| RiftError::Mesh(format!("{e}")))
     }
 
+    /// Decline an incoming call with optional reason.
     pub async fn decline_call(&self, session: SessionId, reason: Option<&str>) -> Result<(), RiftError> {
         let runtime_guard = self.runtime.lock().await;
         let runtime = runtime_guard.as_ref().ok_or(RiftError::NotJoined)?;
@@ -848,6 +939,7 @@ impl RiftHandle {
             .map_err(|e| RiftError::Mesh(format!("{e}")))
     }
 
+    /// End an active call session.
     pub async fn end_call(&self, session: SessionId) -> Result<(), RiftError> {
         let runtime_guard = self.runtime.lock().await;
         let runtime = runtime_guard.as_ref().ok_or(RiftError::NotJoined)?;
@@ -858,24 +950,29 @@ impl RiftHandle {
             .map_err(|e| RiftError::Mesh(format!("{e}")))
     }
 
+    /// Await the next event from the SDK.
     pub async fn next_event(&self) -> Option<RiftEvent> {
         let mut rx = self.event_rx.lock().await;
         rx.recv().await
     }
 
+    /// Try to fetch the next event without awaiting.
     pub fn try_next_event(&self) -> Option<RiftEvent> {
         let mut rx = self.event_rx.blocking_lock();
         rx.try_recv().ok()
     }
 
+    /// Set push-to-talk active state.
     pub fn set_ptt_active(&self, active: bool) {
         self.ptt_active.store(active, Ordering::Relaxed);
     }
 
+    /// Mute or unmute microphone capture.
     pub fn set_mute(&self, muted: bool) {
         self.mute_active.store(muted, Ordering::Relaxed);
     }
 
+    /// Return the local peer id.
     pub fn local_peer_id(&self) -> PeerId {
         self.local_peer_id
     }
@@ -889,6 +986,7 @@ struct VoiceRuntimeRef {
     tuning: Arc<StdMutex<AudioTuning>>,
 }
 
+/// Initialize the audio capture/playback pipeline and spawn processing tasks.
 fn start_audio_pipeline(
     config: RiftConfig,
     handle: MeshHandle,
@@ -1047,6 +1145,7 @@ fn is_frame_active(frame: &[i16]) -> bool {
     avg > 250
 }
 
+/// Compute the next audio tuning parameters based on current QoS stats.
 fn compute_next_tuning(qos: &mut QosState) -> Option<AudioTuning> {
     if qos.peer_stats.is_empty() {
         return None;
@@ -1160,6 +1259,7 @@ fn default_nat_config(
     }
 }
 
+/// Derive a per-channel auth token from a shared secret.
 fn derive_auth_token(secret: &str, channel: &str) -> Vec<u8> {
     let hk = Hkdf::<Sha256>::new(Some(channel.as_bytes()), secret.as_bytes());
     let mut out = [0u8; 32];
@@ -1267,6 +1367,7 @@ fn fingerprint_key(public_key: &[u8]) -> String {
     hex.chars().take(16).collect()
 }
 
+/// Verify and record peer identity for trust-on-first-use and mismatch handling.
 async fn handle_peer_identity(
     event_tx: &mpsc::UnboundedSender<RiftEvent>,
     handle: &MeshHandle,

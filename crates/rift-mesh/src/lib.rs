@@ -1,3 +1,12 @@
+//! Mesh routing, session handling, and peer management.
+//!
+//! This module is the heart of Rift's P2P system. It:
+//! - manages UDP sockets (direct + TURN relays)
+//! - negotiates sessions and capabilities
+//! - handles routing (direct vs relayed) and ICE-lite candidates
+//! - performs encryption/decryption and rate limiting
+//! - emits high-level events to clients
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -30,28 +39,44 @@ use aes_gcm::aead::{Aead, Payload};
 use rand::RngCore;
 use rand::rngs::OsRng;
 
+/// Maximum UDP payload size we attempt to parse.
 const MAX_PACKET: usize = 2048;
+/// Window used for per-peer rate limiting.
 const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(1);
+/// Max packets per second before rate limiting triggers.
 const RATE_LIMIT_PKTS_PER_SEC: u32 = 1200;
+/// Maximum peer count for full-mesh before switching to hybrid.
 const GROUP_MESH_MAX: usize = 5;
 
 #[derive(Debug, Clone)]
 pub struct MeshConfig {
+    /// Channel name for session id derivation.
     pub channel_name: String,
+    /// Optional channel password.
     pub password: Option<String>,
+    /// UDP listen port.
     pub listen_port: u16,
+    /// Whether this node can relay for others.
     pub relay_capable: bool,
+    /// QoS preferences for voice traffic.
     pub qos: QosProfile,
+    /// Optional auth token for access control.
     pub auth_token: Option<Vec<u8>>,
+    /// Whether auth is required for peers.
     pub require_auth: bool,
+    /// Optional pre-shared E2EE key for group encryption.
     pub e2ee_key: Option<[u8; 32]>,
+    /// Optional rekey interval for E2EE.
     pub rekey_interval_secs: Option<u64>,
+    /// Maximum number of direct peers before relaying.
     pub max_direct_peers: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
 pub enum PeerRoute {
+    /// Direct UDP connection to a peer address.
     Direct { addr: SocketAddr },
+    /// Relayed through another peer.
     Relayed { via: PeerId },
 }
 
@@ -63,9 +88,13 @@ enum MeshSocket {
 
 #[derive(Debug, Clone)]
 pub enum MeshEvent {
+    /// A peer joined the mesh.
     PeerJoined(PeerId),
+    /// A peer left the mesh.
     PeerLeft(PeerId),
+    /// Chat message received.
     ChatReceived(ChatMessage),
+    /// Voice packet received.
     VoiceFrame {
         from: PeerId,
         seq: u32,
@@ -74,9 +103,13 @@ pub enum MeshEvent {
         codec: CodecId,
         payload: Vec<u8>,
     },
+    /// Routing info updated for a peer.
     RouteUpdated { peer_id: PeerId, route: PeerRoute },
+    /// Route upgraded from relay to direct.
     RouteUpgraded(PeerId),
+    /// Peer capability advertisement received.
     PeerCapabilities { peer_id: PeerId, capabilities: Capabilities },
+    /// Peer session configuration received.
     PeerSessionConfig { peer_id: PeerId, codec: CodecId, frame_ms: u16 },
     GroupCodec(CodecId),
     StatsUpdate { peer: PeerId, stats: LinkStats, global: GlobalStats },
@@ -94,21 +127,31 @@ pub enum MeshEvent {
 
 #[derive(Debug, Clone, Copy)]
 pub struct LinkStats {
+    /// Round-trip time in milliseconds.
     pub rtt_ms: f32,
+    /// Loss fraction (0.0 to 1.0).
     pub loss: f32,
+    /// Jitter in milliseconds.
     pub jitter_ms: f32,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct GlobalStats {
+    /// Number of peers currently connected.
     pub num_peers: usize,
+    /// Number of active sessions.
     pub num_sessions: usize,
+    /// Total packets sent.
     pub packets_sent: u64,
+    /// Total packets received.
     pub packets_received: u64,
+    /// Total bytes sent.
     pub bytes_sent: u64,
+    /// Total bytes received.
     pub bytes_received: u64,
 }
 
+/// High-level mesh controller used by clients.
 pub struct Mesh {
     inner: Arc<MeshInner>,
     events_rx: mpsc::Receiver<MeshEvent>,
@@ -116,11 +159,20 @@ pub struct Mesh {
     _mdns: Option<MdnsHandle>,
 }
 
+/// Cloneable handle for sending commands without owning the event stream.
 #[derive(Clone)]
 pub struct MeshHandle {
     inner: Arc<MeshInner>,
 }
 
+/// Internal state shared across mesh tasks.
+///
+/// Many fields are guarded by mutexes because the mesh runs in multiple async
+/// tasks (receiver, timers, discovery). The fields are grouped roughly by:
+/// - sockets and relay management
+/// - peer metadata and capabilities
+/// - routing, ICE candidates, and NAT state
+/// - traffic stats, rate limiting, and sessions
 struct MeshInner {
     sockets: Mutex<Vec<MeshSocket>>,
     turn_relays: Mutex<HashMap<SocketAddr, usize>>,
@@ -205,8 +257,11 @@ impl RateLimitState {
 }
 
 #[derive(Debug, Clone)]
+/// Negotiated session configuration with a peer.
 pub struct SessionConfig {
+    /// Selected codec.
     pub codec: CodecId,
+    /// Frame duration in milliseconds.
     pub frame_ms: u16,
 }
 
@@ -376,6 +431,9 @@ impl SessionManager {
 }
 
 impl Mesh {
+    /// Create a new mesh instance bound to the configured UDP port.
+    /// This spawns background tasks for receiving, candidate checks, rekeying,
+    /// scaling decisions, and ping-based link stats.
     pub async fn new(identity: Identity, config: MeshConfig) -> Result<Self> {
         let addr = SocketAddr::from(([0, 0, 0, 0], config.listen_port));
         let socket = UdpSocket::bind(addr).await?;
@@ -458,10 +516,12 @@ impl Mesh {
         Ok(mesh)
     }
 
+    /// Return the local peer id.
     pub fn local_peer_id(&self) -> PeerId {
         self.inner.identity.peer_id
     }
 
+    /// Return the local UDP listen address.
     pub fn local_addr(&self) -> Result<SocketAddr> {
         let sockets = self.inner.sockets.blocking_lock();
         match sockets.first() {
@@ -471,6 +531,7 @@ impl Mesh {
         }
     }
 
+    /// Start LAN discovery via mDNS and spawn the discovery task.
     pub fn start_lan_discovery(&mut self) -> Result<()> {
         let mdns = start_mdns_advertisement(self.discovery_config.clone())?;
         self._mdns = Some(mdns);
@@ -478,6 +539,7 @@ impl Mesh {
         Ok(())
     }
 
+    /// Enable NAT traversal (STUN + TURN) and populate local candidates.
     pub async fn enable_nat(&mut self, nat_cfg: NatConfig) {
         let mut cfg = self.inner.nat_cfg.lock().await;
         *cfg = Some(nat_cfg);
@@ -545,6 +607,7 @@ impl Mesh {
         }
     }
 
+    /// Join peers from an invite using NAT traversal for connectivity.
     pub async fn join_invite(&mut self, invite: Invite, nat_cfg: NatConfig) -> Result<()> {
         {
             let mut cfg = self.inner.nat_cfg.lock().await;
@@ -605,40 +668,49 @@ impl Mesh {
         Ok(())
     }
 
+    /// Broadcast a chat message to all peers.
     pub async fn broadcast_chat(&self, text: String) -> Result<()> {
         self.inner.broadcast_chat(text).await
     }
 
+    /// Broadcast a voice packet to all peers.
     pub async fn broadcast_voice(&self, seq: u32, timestamp: u64, payload: Vec<u8>) -> Result<()> {
         self.inner
             .broadcast_voice(self.inner.identity.peer_id, seq, timestamp, payload)
             .await
     }
 
+    /// Start a call with a specific peer.
     pub async fn start_call(&self, to: PeerId) -> Result<SessionId> {
         self.inner.start_call(to).await
     }
 
+    /// Accept a pending call session.
     pub async fn accept_call(&self, session: SessionId) -> Result<()> {
         self.inner.accept_call(session).await
     }
 
+    /// Decline a pending call session with optional reason.
     pub async fn decline_call(&self, session: SessionId, reason: Option<String>) -> Result<()> {
         self.inner.decline_call(session, reason).await
     }
 
+    /// End an active call session.
     pub async fn end_call(&self, session: SessionId) -> Result<()> {
         self.inner.end_call(session).await
     }
 
+    /// Return the currently active session id.
     pub async fn active_session(&self) -> SessionId {
         *self.inner.active_session.lock().await
     }
 
+    /// Await the next mesh event.
     pub async fn next_event(&mut self) -> Option<MeshEvent> {
         self.events_rx.recv().await
     }
 
+    /// Obtain a cloneable handle for issuing commands.
     pub fn handle(&self) -> MeshHandle {
         MeshHandle {
             inner: self.inner.clone(),
@@ -3251,58 +3323,71 @@ impl MeshInner {
 }
 
 impl MeshHandle {
+    /// Broadcast a voice packet to all peers.
     pub async fn broadcast_voice(&self, seq: u32, timestamp: u64, payload: Vec<u8>) -> Result<()> {
         self.inner
             .broadcast_voice(self.inner.identity.peer_id, seq, timestamp, payload)
             .await
     }
 
+    /// Broadcast a chat message to all peers.
     pub async fn broadcast_chat(&self, text: String) -> Result<()> {
         self.inner.broadcast_chat(text).await
     }
 
+    /// Start a call with a specific peer.
     pub async fn start_call(&self, to: PeerId) -> Result<SessionId> {
         self.inner.start_call(to).await
     }
 
+    /// Accept a pending call.
     pub async fn accept_call(&self, session: SessionId) -> Result<()> {
         self.inner.accept_call(session).await
     }
 
+    /// Decline a pending call with an optional reason.
     pub async fn decline_call(&self, session: SessionId, reason: Option<String>) -> Result<()> {
         self.inner.decline_call(session, reason).await
     }
 
+    /// End an active call.
     pub async fn end_call(&self, session: SessionId) -> Result<()> {
         self.inner.end_call(session).await
     }
 
+    /// Update preferred codecs for capability negotiation.
     pub async fn set_preferred_codecs(&self, codecs: Vec<CodecId>) {
         self.inner.set_preferred_codecs(codecs).await;
     }
 
+    /// Update preferred feature flags for capability negotiation.
     pub async fn set_preferred_features(&self, features: Vec<FeatureFlag>) {
         self.inner.set_preferred_features(features).await;
     }
 
+    /// Retrieve the current session config for a peer.
     pub async fn peer_session_config(&self, peer_id: PeerId) -> Option<SessionConfig> {
         let sessions = self.inner.peer_session.lock().await;
         sessions.get(&peer_id).cloned()
     }
 
+    /// Return the current group codec.
     pub async fn group_codec(&self) -> CodecId {
         *self.inner.group_codec.lock().await
     }
 
+    /// Initiate a connection to a socket address.
     pub async fn connect_addr(&self, addr: SocketAddr) -> Result<()> {
         self.inner.initiate_handshake(addr, 0).await
     }
 
+    /// Initiate a connection using a pre-bound socket.
     pub async fn connect_with_socket(&self, socket: UdpSocket, addr: SocketAddr) -> Result<()> {
         let socket_idx = self.inner.add_socket(socket).await?;
         self.inner.initiate_handshake(addr, socket_idx).await
     }
 
+    /// Disconnect a peer and clean up any related routes.
     pub async fn disconnect_peer(&self, peer_id: PeerId) {
         let addr = {
             let peers = self.inner.peers_by_id.lock().await;

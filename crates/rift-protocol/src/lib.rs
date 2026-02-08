@@ -22,6 +22,7 @@ use rand::RngCore;
 const MAGIC: &[u8; 4] = b"RFT1";
 const MAX_FRAME_LEN: usize = 64 * 1024;
 
+/// On-the-wire protocol versions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum ProtocolVersion {
@@ -30,10 +31,12 @@ pub enum ProtocolVersion {
 }
 
 impl ProtocolVersion {
+    /// Convert to the raw u8 that is encoded on the wire.
     pub fn as_u8(self) -> u8 {
         self as u8
     }
 
+    /// Parse from a raw u8, returning None if unsupported.
     pub fn from_u8(value: u8) -> Option<Self> {
         match value {
             1 => Some(ProtocolVersion::V1),
@@ -43,6 +46,7 @@ impl ProtocolVersion {
     }
 }
 
+/// Logical stream classification used to multiplex payloads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StreamKind {
     Voice,
@@ -51,6 +55,7 @@ pub enum StreamKind {
     Custom(u16),
 }
 
+/// Audio codec identifiers used for voice frames.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CodecId {
     Opus,
@@ -58,6 +63,7 @@ pub enum CodecId {
     Experimental(u16),
 }
 
+/// Feature flags advertised during capability exchange.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FeatureFlag {
     Voice,
@@ -68,18 +74,22 @@ pub enum FeatureFlag {
     DataChannel,
 }
 
+/// Session identifier derived from channel metadata.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SessionId(pub [u8; 32]);
 
 impl SessionId {
+    /// An all-zero sentinel session id (unused for real sessions).
     pub const NONE: SessionId = SessionId([0u8; 32]);
 
+    /// Generate a random session id.
     pub fn random() -> Self {
         let mut bytes = [0u8; 32];
         OsRng.fill_bytes(&mut bytes);
         SessionId(bytes)
     }
 
+    /// Derive a deterministic session id from channel name + optional password.
     pub fn from_channel(name: &str, password: Option<&str>) -> Self {
         let mut hasher = blake3::Hasher::new();
         hasher.update(b"rift-channel:");
@@ -94,31 +104,46 @@ impl SessionId {
         SessionId(bytes)
     }
 
+    /// Convert to hex for logs and UI.
     pub fn to_hex(&self) -> String {
         hex::encode(self.0)
     }
 }
 
+/// Header for every framed message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RiftFrameHeader {
+    /// Negotiated protocol version for this session.
     pub version: ProtocolVersion,
+    /// Stream classification (text, voice, control, etc).
     pub stream: StreamKind,
+    /// Custom flags for future expansions.
     pub flags: u16,
+    /// Monotonic sequence number for the sender.
     pub seq: u32,
+    /// Sender timestamp in milliseconds.
     pub timestamp: u64,
+    /// Sender peer id.
     pub source: PeerId,
+    /// Session id the frame belongs to.
     pub session: SessionId,
 }
 
+/// High-level chat message payload.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
+    /// Content-addressed message id.
     pub id: MessageId,
+    /// Sender peer id.
     pub from: PeerId,
+    /// Sender timestamp.
     pub timestamp: u64,
+    /// Raw message text.
     pub text: String,
 }
 
 impl ChatMessage {
+    /// Construct a new message and compute its id.
     pub fn new(from: PeerId, timestamp: u64, text: String) -> Self {
         let id = MessageId::new(from, timestamp, &text);
         Self {
@@ -130,15 +155,22 @@ impl ChatMessage {
     }
 }
 
+/// Capability advertisement payload for negotiation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Capabilities {
+    /// Supported protocol versions in preference order.
     pub supported_versions: Vec<ProtocolVersion>,
+    /// Supported audio codecs.
     pub audio_codecs: Vec<CodecId>,
+    /// Feature flags (voice, text, E2EE, relay, etc).
     pub features: Vec<FeatureFlag>,
+    /// Optional bitrate ceiling.
     pub max_bitrate: Option<u32>,
+    /// Preferred audio frame duration.
     pub preferred_frame_duration_ms: Option<u16>,
 }
 
+/// Call session lifecycle state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CallState {
     Ringing,
@@ -146,6 +178,7 @@ pub enum CallState {
     Ended,
 }
 
+/// Group topology mode for multi-peer calls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GroupMode {
     Mesh,
@@ -154,6 +187,7 @@ pub enum GroupMode {
 
 pub type StreamId = u64;
 
+/// Group-level control messages.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GroupControl {
     Join { session: SessionId, peer_id: PeerId },
@@ -175,6 +209,7 @@ pub enum GroupControl {
     },
 }
 
+/// One-to-one call control messages.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CallControl {
     Invite {
@@ -201,6 +236,7 @@ pub enum CallControl {
     },
 }
 
+/// ICE-lite candidate classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CandidateType {
     Host,
@@ -208,14 +244,20 @@ pub enum CandidateType {
     Relay,
 }
 
+/// ICE-lite candidate structure.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IceCandidate {
+    /// Socket address for the candidate.
     pub addr: std::net::SocketAddr,
+    /// Candidate type (host/srflx/relay).
     pub cand_type: CandidateType,
+    /// Priority used for selection heuristics.
     pub priority: u32,
+    /// Foundation group for candidate correlation.
     pub foundation: u64,
 }
 
+/// Control plane messages exchanged over the Control stream.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ControlMessage {
     Join { peer_id: PeerId, display_name: Option<String> },
@@ -280,33 +322,50 @@ pub enum ControlMessage {
     },
 }
 
+/// Encrypted payload wrapper for E2EE.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EncryptedPayload {
+    /// AEAD nonce (12 bytes for AES-GCM).
     pub nonce: [u8; 12],
+    /// Ciphertext bytes.
     pub ciphertext: Vec<u8>,
 }
 
+/// Peer metadata used in peer lists and routing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerInfo {
+    /// Peer id.
     pub peer_id: PeerId,
+    /// Primary address.
     pub addr: std::net::SocketAddr,
+    /// Optional additional addresses.
     #[serde(default)]
     pub addrs: Vec<std::net::SocketAddr>,
+    /// Relay capability flag.
     pub relay_capable: bool,
 }
 
+/// Voice packet payload (pre-Opus or Opus-encoded audio data).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VoicePacket {
+    /// Codec for this packet.
     pub codec_id: CodecId,
+    /// Encoded audio payload.
     pub payload: Vec<u8>,
 }
 
+/// QoS profile for adaptive audio tuning.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QosProfile {
+    /// Target end-to-end latency.
     pub target_latency_ms: u32,
+    /// Maximum tolerated latency.
     pub max_latency_ms: u32,
+    /// Minimum bitrate to preserve intelligibility.
     pub min_bitrate: u32,
+    /// Maximum bitrate to avoid saturation.
     pub max_bitrate: u32,
+    /// Packet loss tolerance threshold.
     pub packet_loss_tolerance: f32,
 }
 
@@ -322,6 +381,7 @@ impl Default for QosProfile {
     }
 }
 
+/// The union of all possible payloads for a Rift frame.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RiftPayload {
     Control(ControlMessage),
@@ -368,6 +428,7 @@ mod tests {
     }
 }
 
+/// Errors encountered when decoding protocol frames.
 #[derive(Debug, Error)]
 pub enum FrameError {
     #[error("invalid magic")]
@@ -382,10 +443,12 @@ pub enum FrameError {
     Decode(#[from] bincode::Error),
 }
 
+/// Return the protocol versions supported by this build.
 pub fn supported_versions() -> &'static [ProtocolVersion] {
     &[ProtocolVersion::V2, ProtocolVersion::V1]
 }
 
+/// Select the highest mutual version between two peers.
 pub fn select_version(theirs: &[ProtocolVersion]) -> Option<ProtocolVersion> {
     let mut ours = supported_versions().to_vec();
     ours.sort();
@@ -396,6 +459,8 @@ pub fn select_version(theirs: &[ProtocolVersion]) -> Option<ProtocolVersion> {
         .find(|v| theirs.contains(v))
 }
 
+/// Encode a framed message into bytes:
+/// magic + version + length + bincode(body).
 pub fn encode_frame(header: &RiftFrameHeader, payload: &RiftPayload) -> Vec<u8> {
     let body = bincode::serialize(&(header, payload)).expect("serialize frame");
     let mut out = Vec::with_capacity(4 + 1 + 4 + body.len());
@@ -406,6 +471,7 @@ pub fn encode_frame(header: &RiftFrameHeader, payload: &RiftPayload) -> Vec<u8> 
     out
 }
 
+/// Decode a framed message from bytes, validating length and magic.
 pub fn decode_frame(bytes: &[u8]) -> Result<(RiftFrameHeader, RiftPayload), FrameError> {
     if bytes.len() < 9 {
         return Err(FrameError::LengthMismatch);

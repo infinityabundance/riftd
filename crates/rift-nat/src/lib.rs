@@ -1,3 +1,10 @@
+//! NAT traversal helpers (STUN, hole punching, TURN integration).
+//!
+//! This module provides:
+//! - STUN binding discovery for public addresses
+//! - UDP hole punching between peers
+//! - TURN relay allocation helpers (via `turn` module)
+
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use std::time::Duration;
@@ -20,13 +27,21 @@ pub use turn::{
 
 #[derive(Debug, Clone)]
 pub struct NatConfig {
+    /// Ports to attempt for local binding (0 means OS-assigned).
     pub local_ports: Vec<u16>,
+    /// STUN servers used for public address discovery.
     pub stun_servers: Vec<SocketAddr>,
+    /// Timeout for STUN binding requests.
     pub stun_timeout_ms: u64,
+    /// Interval between hole-punch packets.
     pub punch_interval_ms: u64,
+    /// Overall hole-punch timeout.
     pub punch_timeout_ms: u64,
+    /// TURN servers to use for relay allocation.
     pub turn_servers: Vec<TurnServerConfig>,
+    /// Timeout for TURN allocations.
     pub turn_timeout_ms: u64,
+    /// TURN keepalive interval.
     pub turn_keepalive_ms: u64,
 }
 
@@ -39,35 +54,47 @@ pub enum NatType {
 
 #[derive(Debug, Clone)]
 pub struct PeerEndpoint {
+    /// Peer id for logging/context.
     pub peer_id: PeerId,
+    /// Public addresses advertised by the peer.
     pub external_addrs: Vec<SocketAddr>,
+    /// Additional ports to try for hole punching.
     pub punch_ports: Vec<u16>,
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum HolePunchError {
+    /// No local UDP sockets could be bound.
     #[error("no local ports could be bound")]
     NoLocalPorts,
+    /// No remote addresses provided for punching.
     #[error("no remote addresses to punch")]
     NoRemoteAddrs,
+    /// Hole punch timed out without success.
     #[error("timeout while punching")]
     Timeout,
+    /// Low-level socket I/O error.
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum StunError {
+    /// STUN servers not configured.
     #[error("no stun servers configured")]
     NoServers,
+    /// No response from any STUN server.
     #[error("no stun responses received")]
     NoResponses,
+    /// Malformed or unexpected STUN response.
     #[error("invalid stun response")]
     InvalidResponse,
+    /// Low-level socket I/O error.
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }
 
+/// UDP payloads used for hole punching.
 const PUNCH_SYN: &[u8] = b"RIFT_PUNCH";
 const PUNCH_ACK: &[u8] = b"RIFT_ACK";
 const STUN_MAGIC_COOKIE: u32 = 0x2112A442;
@@ -77,6 +104,7 @@ const STUN_ATTR_MAPPED_ADDRESS: u16 = 0x0001;
 const STUN_ATTR_XOR_MAPPED_ADDRESS: u16 = 0x0020;
 const KEEPALIVE_BYTES: &[u8] = b"RIFT_KEEPALIVE";
 
+/// Allocate TURN relays and return candidates if successful.
 pub async fn gather_turn_candidates(nat_cfg: &NatConfig) -> Result<Vec<TurnCandidate>, TurnError> {
     if nat_cfg.turn_servers.is_empty() {
         return Err(TurnError::NoServers);
@@ -98,6 +126,7 @@ pub async fn gather_turn_candidates(nat_cfg: &NatConfig) -> Result<Vec<TurnCandi
     }
 }
 
+/// Attempt UDP hole punching with a peer and return the first successful socket.
 pub async fn attempt_hole_punch(
     nat_cfg: &NatConfig,
     peer: &PeerEndpoint,
@@ -216,6 +245,7 @@ pub fn gather_local_candidates(listen_port: u16) -> Vec<SocketAddr> {
     addrs
 }
 
+/// Compare local and public address lists to detect NAT behavior.
 pub fn detect_nat_type(local_addrs: &[SocketAddr], public_addrs: &[SocketAddr]) -> NatType {
     if public_addrs.is_empty() {
         return NatType::Unknown;
@@ -228,6 +258,7 @@ pub fn detect_nat_type(local_addrs: &[SocketAddr], public_addrs: &[SocketAddr]) 
     NatType::Natted
 }
 
+/// Query STUN servers to discover public-facing addresses.
 pub async fn gather_public_addrs(nat_cfg: &NatConfig) -> Result<Vec<SocketAddr>, StunError> {
     if nat_cfg.stun_servers.is_empty() {
         return Err(StunError::NoServers);
@@ -276,6 +307,7 @@ pub fn spawn_keepalive(
     })
 }
 
+/// Build all target socket addresses to try for hole punching.
 fn build_target_addrs(peer: &PeerEndpoint) -> Vec<SocketAddr> {
     let mut addrs = Vec::new();
     for addr in &peer.external_addrs {
@@ -289,6 +321,7 @@ fn build_target_addrs(peer: &PeerEndpoint) -> Vec<SocketAddr> {
     addrs
 }
 
+/// Perform a single STUN binding request and parse the response.
 async fn stun_binding_request(
     server: SocketAddr,
     local_port: u16,
@@ -315,6 +348,7 @@ async fn stun_binding_request(
     parse_stun_response(&buf[..len], &tx_id)
 }
 
+/// Parse a STUN binding response and extract the mapped address.
 fn parse_stun_response(buf: &[u8], tx_id: &[u8; 12]) -> Result<SocketAddr, StunError> {
     if buf.len() < 20 {
         return Err(StunError::InvalidResponse);
