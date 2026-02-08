@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=Rift
+Comment=P2P voice and text chat (Rift Protocol)
+Exec=rift-qt
+Icon=org.rift.Rift
+Terminal=false
+Type=Application
+Categories=Network;Chat;AudioVideo;
