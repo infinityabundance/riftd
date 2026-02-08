@@ -35,6 +35,9 @@ pub use rift_protocol::{
     SessionId as RiftSessionId,
 };
 
+pub const SDK_VERSION: &str = "0.1.0";
+pub const SDK_ABI_VERSION: i32 = 1;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RiftConfig {
     pub identity_path: Option<PathBuf>,
