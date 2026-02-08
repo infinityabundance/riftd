@@ -6,6 +6,9 @@
   </a>
 </p>
 
+[![Prior Art](https://img.shields.io/badge/Zenodo-Prior%20Art-blue)](https://zenodo.org/records/18528430)
+
+
 Serverless P2P voice + text chat over UDP with a mesh, NAT traversal, and optional relays.
 
 `riftd` is a small, pragmatic alternative to heavyweight WebRTC stacks. It is designed to work on LANs and across the internet without central servers, using mDNS discovery, UDP hole punching, and peer relays when needed. The project includes a terminal UI (TUI) client and a protocol crate that can be reused by other applications.
