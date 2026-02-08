@@ -70,7 +70,7 @@ class MainViewModel : ViewModel() {
     var channelName by mutableStateOf("gaming")
     var password by mutableStateOf("")
     var bootstrapNodes by mutableStateOf("")
-    var dhtEnabled by mutableStateOf(true)
+    var dhtEnabled by mutableStateOf(false)
     var connected by mutableStateOf(false)
     var statusText by mutableStateOf("disconnected")
     var peerCount by mutableStateOf(0)
@@ -103,11 +103,6 @@ class MainViewModel : ViewModel() {
             debugText = "connect blocked handle=$handle name='$name'"
             return
         }
-        if (dhtEnabled && bootstrapNodes.trim().isEmpty()) {
-            statusText = "bootstrap required"
-            debugText = "dht enabled but no bootstrap"
-            return
-        }
         val passwordValue = password.ifEmpty { null }
         statusText = "connecting"
         debugText = "connecting..."
@@ -115,7 +110,7 @@ class MainViewModel : ViewModel() {
         RiftNative.setDhtEnabled(handle, dhtEnabled)
         RiftNative.setBootstrapNodes(handle, bootstrapNodes)
         viewModelScope.launch(Dispatchers.IO) {
-            val result = RiftNative.joinChannel(handle, name, passwordValue, true, true)
+            val result = RiftNative.joinChannel(handle, name, passwordValue, true, dhtEnabled)
             withContext(Dispatchers.Main) {
                 if (result == 0) {
                     connected = true
@@ -142,6 +137,7 @@ class MainViewModel : ViewModel() {
                 connected = false
                 statusText = "disconnected"
                 debugText = "disconnected"
+                pttPressed = false
                 pollJob?.cancel()
                 pollJob = null
             }
@@ -154,6 +150,11 @@ class MainViewModel : ViewModel() {
         if (handle == 0L) {
             statusText = "init failed"
             debugText = "send blocked handle=0"
+            return
+        }
+        if (!connected) {
+            statusText = "not connected"
+            debugText = "send blocked not connected"
             return
         }
         val time = timeFormat.format(Date())
@@ -171,7 +172,7 @@ class MainViewModel : ViewModel() {
     }
 
     fun startPtt() {
-        if (!micPermission || handle == 0L) return
+        if (!micPermission || handle == 0L || !connected) return
         viewModelScope.launch(Dispatchers.IO) {
             RiftNative.startPtt(handle)
         }
