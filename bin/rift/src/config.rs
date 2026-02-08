@@ -54,6 +54,7 @@ use serde::Deserialize;
 // reject_on_mismatch = false
 // channel_shared_secret = ""
 // audit_log_path = "~/.config/rift/audit.log"
+// rekey_interval_secs = 600
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct UserConfig {
@@ -181,6 +182,7 @@ pub struct SecuritySection {
     pub reject_on_mismatch: Option<bool>,
     pub channel_shared_secret: Option<String>,
     pub audit_log_path: Option<String>,
+    pub rekey_interval_secs: Option<u64>,
 }
 
 impl Default for SecuritySection {
@@ -191,6 +193,7 @@ impl Default for SecuritySection {
             reject_on_mismatch: Some(false),
             channel_shared_secret: None,
             audit_log_path: None,
+            rekey_interval_secs: Some(600),
         }
     }
 }

@@ -33,6 +33,7 @@ pub struct MeshConfig {
     pub auth_token: Option<Vec<u8>>,
     pub require_auth: bool,
     pub e2ee_key: Option<[u8; 32]>,
+    pub rekey_interval_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -135,6 +136,7 @@ struct MeshInner {
     group_codec: Mutex<CodecId>,
     candidate_attempts: Mutex<HashMap<PeerId, tokio::time::Instant>>,
     e2ee_key: Option<[u8; 32]>,
+    rekey_interval_secs: Option<u64>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -349,11 +351,13 @@ impl Mesh {
             channel_session,
             candidate_attempts: Mutex::new(HashMap::new()),
             e2ee_key: config.e2ee_key,
+            rekey_interval_secs: config.rekey_interval_secs,
         });
 
         MeshInner::spawn_receiver(inner.clone(), 0, socket.clone());
         MeshInner::spawn_auto_upgrade(inner.clone());
         MeshInner::spawn_candidate_checks(inner.clone());
+        MeshInner::spawn_rekey(inner.clone());
         MeshInner::spawn_pinger(inner.clone());
 
         let mesh = Self {
@@ -708,6 +712,31 @@ impl MeshInner {
                     let _ = inner
                         .send_control_to_peer(peer_id, ping, SessionId::NONE)
                         .await;
+                }
+            }
+        });
+    }
+
+    fn spawn_rekey(inner: Arc<Self>) {
+        tokio::spawn(async move {
+            let interval = inner.rekey_interval_secs.unwrap_or(0);
+            if interval == 0 {
+                return;
+            }
+            let mut tick = tokio::time::interval(Duration::from_secs(interval));
+            loop {
+                tick.tick().await;
+                let routes = inner.routes.lock().await.clone();
+                let peers = inner.peers_by_id.lock().await.clone();
+                for (peer_id, route) in routes {
+                    if !matches!(route, PeerRoute::Direct { .. }) {
+                        continue;
+                    }
+                    if let Some(addr) = peers.get(&peer_id).copied() {
+                        if let Err(err) = inner.initiate_handshake(addr, 0).await {
+                            tracing::debug!(peer = %peer_id, "rekey handshake failed: {err}");
+                        }
+                    }
                 }
             }
         });
