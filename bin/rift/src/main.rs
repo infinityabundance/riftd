@@ -139,6 +139,10 @@ enum Commands {
         enable_stun: bool,
         #[arg(long, value_delimiter = ',', num_args = 1..)]
         stun_servers: Vec<String>,
+        #[arg(long)]
+        enable_turn: bool,
+        #[arg(long, value_delimiter = ',', num_args = 1..)]
+        turn_servers: Vec<String>,
     },
     Call {
         #[arg(long)]
@@ -163,6 +167,10 @@ enum Commands {
         enable_stun: bool,
         #[arg(long, value_delimiter = ',', num_args = 1..)]
         stun_servers: Vec<String>,
+        #[arg(long)]
+        enable_turn: bool,
+        #[arg(long, value_delimiter = ',', num_args = 1..)]
+        turn_servers: Vec<String>,
     },
     Accept {
         #[arg(long)]
@@ -187,6 +195,10 @@ enum Commands {
         enable_stun: bool,
         #[arg(long, value_delimiter = ',', num_args = 1..)]
         stun_servers: Vec<String>,
+        #[arg(long)]
+        enable_turn: bool,
+        #[arg(long, value_delimiter = ',', num_args = 1..)]
+        turn_servers: Vec<String>,
     },
     Decline {
         #[arg(long)]
@@ -213,6 +225,10 @@ enum Commands {
         enable_stun: bool,
         #[arg(long, value_delimiter = ',', num_args = 1..)]
         stun_servers: Vec<String>,
+        #[arg(long)]
+        enable_turn: bool,
+        #[arg(long, value_delimiter = ',', num_args = 1..)]
+        turn_servers: Vec<String>,
     },
     Invite {
         #[arg(long)]
@@ -233,6 +249,10 @@ enum Commands {
         enable_stun: bool,
         #[arg(long, value_delimiter = ',', num_args = 1..)]
         stun_servers: Vec<String>,
+        #[arg(long)]
+        enable_turn: bool,
+        #[arg(long, value_delimiter = ',', num_args = 1..)]
+        turn_servers: Vec<String>,
     },
 }
 
@@ -264,6 +284,8 @@ async fn main() -> Result<()> {
             dht,
             enable_stun,
             stun_servers,
+            enable_turn,
+            turn_servers,
         } => {
             cmd_create(
                 channel,
@@ -275,6 +297,8 @@ async fn main() -> Result<()> {
                 dht,
                 enable_stun,
                 stun_servers,
+                enable_turn,
+                turn_servers,
                 StartupAction::None,
             )
             .await
@@ -291,10 +315,24 @@ async fn main() -> Result<()> {
             invite,
             enable_stun,
             stun_servers,
+            enable_turn,
+            turn_servers,
         } => {
             let action = StartupAction::Call { peer };
             if let Some(invite) = invite {
-                cmd_join(invite, port, voice, relay, dht, enable_stun, stun_servers, action).await
+                cmd_join(
+                    invite,
+                    port,
+                    voice,
+                    relay,
+                    dht,
+                    enable_stun,
+                    stun_servers,
+                    enable_turn,
+                    turn_servers,
+                    action,
+                )
+                .await
             } else {
                 let channel = channel.context("--channel is required without --invite")?;
                 cmd_create(
@@ -307,6 +345,8 @@ async fn main() -> Result<()> {
                     dht,
                     enable_stun,
                     stun_servers,
+                    enable_turn,
+                    turn_servers,
                     action,
                 )
                 .await
@@ -324,11 +364,25 @@ async fn main() -> Result<()> {
             invite,
             enable_stun,
             stun_servers,
+            enable_turn,
+            turn_servers,
         } => {
             let session = parse_session_id(&session)?;
             let action = StartupAction::Accept { session };
             if let Some(invite) = invite {
-                cmd_join(invite, port, voice, relay, dht, enable_stun, stun_servers, action).await
+                cmd_join(
+                    invite,
+                    port,
+                    voice,
+                    relay,
+                    dht,
+                    enable_stun,
+                    stun_servers,
+                    enable_turn,
+                    turn_servers,
+                    action,
+                )
+                .await
             } else {
                 let channel = channel.context("--channel is required without --invite")?;
                 cmd_create(
@@ -341,6 +395,8 @@ async fn main() -> Result<()> {
                     dht,
                     enable_stun,
                     stun_servers,
+                    enable_turn,
+                    turn_servers,
                     action,
                 )
                 .await
@@ -359,11 +415,25 @@ async fn main() -> Result<()> {
             invite,
             enable_stun,
             stun_servers,
+            enable_turn,
+            turn_servers,
         } => {
             let session = parse_session_id(&session)?;
             let action = StartupAction::Decline { session, reason };
             if let Some(invite) = invite {
-                cmd_join(invite, port, voice, relay, dht, enable_stun, stun_servers, action).await
+                cmd_join(
+                    invite,
+                    port,
+                    voice,
+                    relay,
+                    dht,
+                    enable_stun,
+                    stun_servers,
+                    enable_turn,
+                    turn_servers,
+                    action,
+                )
+                .await
             } else {
                 let channel = channel.context("--channel is required without --invite")?;
                 cmd_create(
@@ -376,6 +446,8 @@ async fn main() -> Result<()> {
                     dht,
                     enable_stun,
                     stun_servers,
+                    enable_turn,
+                    turn_servers,
                     action,
                 )
                 .await
@@ -390,6 +462,8 @@ async fn main() -> Result<()> {
             dht,
             enable_stun,
             stun_servers,
+            enable_turn,
+            turn_servers,
         } => cmd_join(
             invite,
             port,
@@ -398,6 +472,8 @@ async fn main() -> Result<()> {
             dht,
             enable_stun,
             stun_servers,
+            enable_turn,
+            turn_servers,
             StartupAction::None,
         )
         .await,
@@ -531,6 +607,8 @@ async fn cmd_create(
     dht: bool,
     enable_stun: bool,
     stun_servers: Vec<String>,
+    enable_turn: bool,
+    turn_servers: Vec<String>,
     startup: StartupAction,
 ) -> Result<()> {
     let user_cfg = UserConfig::load()?;
@@ -550,6 +628,8 @@ async fn cmd_create(
         dht,
         enable_stun,
         stun_servers,
+        enable_turn,
+        turn_servers,
         None,
     );
     let handle = RiftHandle::new(config).await?;
@@ -575,6 +655,8 @@ async fn cmd_join(
     dht: bool,
     enable_stun: bool,
     stun_servers: Vec<String>,
+    enable_turn: bool,
+    turn_servers: Vec<String>,
     startup: StartupAction,
 ) -> Result<()> {
     let invite = decode_invite(&invite_str)?;
@@ -591,6 +673,8 @@ async fn cmd_join(
         dht,
         enable_stun,
         stun_servers,
+        enable_turn,
+        turn_servers,
         Some(invite_str),
     );
 
@@ -1706,6 +1790,8 @@ fn build_sdk_config(
     dht: bool,
     enable_stun: bool,
     stun_servers: Vec<String>,
+    enable_turn: bool,
+    turn_servers: Vec<String>,
     invite: Option<String>,
 ) -> RiftConfig {
     let stun_list = if enable_stun {
@@ -1713,6 +1799,16 @@ fn build_sdk_config(
             user_cfg.network.stun_servers.clone().unwrap_or_default()
         } else {
             stun_servers
+        }
+    } else {
+        Vec::new()
+    };
+    let turn_enabled = enable_turn || user_cfg.network.enable_turn.unwrap_or(false);
+    let turn_list = if turn_enabled {
+        if turn_servers.is_empty() {
+            user_cfg.network.turn_servers.clone().unwrap_or_default()
+        } else {
+            turn_servers
         }
     } else {
         Vec::new()
@@ -1770,6 +1866,10 @@ fn build_sdk_config(
             invite,
             stun_servers: stun_list,
             stun_timeout_ms: user_cfg.network.stun_timeout_ms,
+            enable_turn: turn_enabled,
+            turn_servers: turn_list,
+            turn_timeout_ms: user_cfg.network.turn_timeout_ms,
+            turn_keepalive_ms: user_cfg.network.turn_keepalive_ms,
             punch_interval_ms: user_cfg.network.punch_interval_ms,
             punch_timeout_ms: user_cfg.network.punch_timeout_ms,
             max_direct_peers: user_cfg.network.max_direct_peers,

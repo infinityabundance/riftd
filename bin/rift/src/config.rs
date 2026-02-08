@@ -24,6 +24,10 @@ use serde::Deserialize;
 // local_ports = [7777, 7778, 7779]
 // stun_servers = ["stun.l.google.com:19302", "stun1.l.google.com:19302"]
 // stun_timeout_ms = 800
+// enable_turn = false
+// turn_servers = ["turn:turn.example.com:3478?username=rift&credential=secret"]
+// turn_timeout_ms = 1200
+// turn_keepalive_ms = 12000
 // punch_interval_ms = 200
 // punch_timeout_ms = 5000
 // max_direct_peers = 8
@@ -116,6 +120,10 @@ pub struct NetworkSection {
     pub local_ports: Option<Vec<u16>>,
     pub stun_servers: Option<Vec<String>>,
     pub stun_timeout_ms: Option<u64>,
+    pub enable_turn: Option<bool>,
+    pub turn_servers: Option<Vec<String>>,
+    pub turn_timeout_ms: Option<u64>,
+    pub turn_keepalive_ms: Option<u64>,
     pub punch_interval_ms: Option<u64>,
     pub punch_timeout_ms: Option<u64>,
     pub max_direct_peers: Option<usize>,
@@ -129,6 +137,10 @@ impl Default for NetworkSection {
             local_ports: None,
             stun_servers: None,
             stun_timeout_ms: Some(800),
+            enable_turn: Some(false),
+            turn_servers: None,
+            turn_timeout_ms: Some(1200),
+            turn_keepalive_ms: Some(12000),
             punch_interval_ms: Some(200),
             punch_timeout_ms: Some(5000),
             max_direct_peers: None,
