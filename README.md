@@ -114,6 +114,7 @@ theme = "dark"
 - `CODE.md`: high-level code map.
 - `PROTOCOL.md`: protocol framing and message types.
 - `SECURITY.md`: threat model and security checklist.
+- `PHASE34_PLAN.md`: implementation plan for ICE/E2EE reliability work.
 - `ROADMAP.md`: planned next steps.
 
 ## Development

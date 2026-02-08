@@ -8,17 +8,22 @@ the direction of the project.
    - Version negotiation and downgrade.
    - Formalized error/ack messages.
 
-2. **Call UX**
+2. **Public internet reachability**
+   - STUN-based public address discovery.
+   - ICE-lite candidate exchange + connectivity checks.
+   - Keep-alives and retry logic for NAT reliability.
+
+3. **Call UX**
    - Group call management in the TUI.
    - Dedicated call list and participant indicators.
    - Muting per participant.
 
-3. **Audio quality improvements**
+4. **Audio quality improvements**
    - Adaptive jitter buffer based on measured latency.
    - Comfort noise / packet loss concealment tuning.
    - Optional echo cancellation.
 
-4. **Discovery reliability**
+5. **Discovery reliability**
    - Better LAN presence detection (timeouts, reconnection).
    - Invite-based peer refresh and endpoint revalidation.
 
