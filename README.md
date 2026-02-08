@@ -11,20 +11,21 @@ Serverless P2P voice + text chat over UDP with a mesh, NAT traversal, and option
 `riftd` is a small, pragmatic alternative to heavyweight WebRTC stacks. It is designed to work on LANs and across the internet without central servers, using mDNS discovery, UDP hole punching, and peer relays when needed. The project includes a terminal UI (TUI) client and a protocol crate that can be reused by other applications.
 
 ## Highlights
-- Pure P2P mesh: every peer talks to every peer.
-- LAN discovery via mDNS.
-- Internet invites + UDP hole punching (no STUN/TURN yet).
-- Peer relay fallback when direct P2P fails.
-- Opus voice with configurable quality.
+- Pure P2P mesh: every peer talks to every peer (with relay fallback).
+- LAN discovery via mDNS + internet discovery via invites and DHT.
+- NAT traversal: UDP hole punching + STUN candidates + optional TURN fallback.
+- End-to-end encryption for chat and voice (pairwise).
+- Opus voice with configurable quality + QoS adaptation.
 - Versioned on-the-wire protocol in `crates/rift-protocol`.
 - TUI client with chat, peer list, and voice controls.
 
 ## Current State
 The repo contains a working voice + text mesh with:
-- LAN discovery and invites.
-- NAT traversal (multi-port UDP hole punching).
+- LAN discovery, invites, and DHT discovery.
+- NAT traversal (hole punching + STUN + optional TURN relay).
 - Peer relay fallback + auto-upgrade to direct.
-- TUI client with basic call/session semantics.
+- Pairwise E2EE for chat + voice.
+- TUI client with call/session semantics.
 
 ## Quick Start
 1. Build:
@@ -114,6 +115,10 @@ theme = "dark"
 - `CODE.md`: high-level code map.
 - `PROTOCOL.md`: protocol framing and message types.
 - `SECURITY.md`: threat model and security checklist.
+- `TURN_GUIDE.md`: self-hosted TURN setup and config.
+- `CHANGELOG.md`: release history.
+- `RELEASE_CHECKLIST.md`: release steps.
+- `OPTIMIZATION_REPORT.md`: performance notes.
 - `PHASE34_PLAN.md`: implementation plan for ICE/E2EE reliability work.
 - `ROADMAP.md`: planned next steps.
 
