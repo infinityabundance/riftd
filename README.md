@@ -1,4 +1,11 @@
 # riftd
+
+<p align="center">
+  <a href="https://github.com/infinityabundance/riftd">
+    <img src="riftd-logo.svg" alt="riftd logo" width="120">
+  </a>
+</p>
+
 Serverless P2P voice + text chat over UDP with a mesh, NAT traversal, and optional relays.
 
 `riftd` is a small, pragmatic alternative to heavyweight WebRTC stacks. It is designed to work on LANs and across the internet without central servers, using mDNS discovery, UDP hole punching, and peer relays when needed. The project includes a terminal UI (TUI) client and a protocol crate that can be reused by other applications.
