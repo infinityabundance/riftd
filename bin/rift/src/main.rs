@@ -97,10 +97,12 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogMakeWriter {
 }
 
 use rift_core::{decode_invite, encode_invite, generate_invite, Identity};
+use rift_pr::{EscalationPolicy, IdentityConstraints, SearchStrategy, SemanticRendezvousToken, TimeModel};
 use rift_sdk::{
     AudioConfigSdk, NetworkConfigSdk, RiftConfig, RiftEvent, RiftHandle, RiftSessionId,
 };
 use rift_sdk::{CodecId, FeatureFlag};
+use rand::RngCore;
 
 mod config;
 use config::UserConfig;
@@ -116,6 +118,16 @@ struct Cli {
 enum Commands {
     InitIdentity,
     Stats,
+    TirInvite {
+        /// 32-byte peer fingerprint as 64 hex characters.
+        #[arg(value_name = "PEER_IDENTITY")]
+        peer_identity: String,
+    },
+    TirAccept {
+        /// SRT URI to decode.
+        #[arg(value_name = "SRT_URI")]
+        srt_uri: String,
+    },
     Security {
         #[command(subcommand)]
         action: SecurityCommand,
@@ -270,6 +282,8 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::InitIdentity => cmd_init_identity().await,
         Commands::Stats => cmd_stats().await,
+        Commands::TirInvite { peer_identity } => cmd_tir_invite(peer_identity).await,
+        Commands::TirAccept { srt_uri } => cmd_tir_accept(srt_uri).await,
         Commands::Security { action } => match action {
             SecurityCommand::RotateKey => cmd_rotate_key().await,
             SecurityCommand::ShowKnownHosts => cmd_show_known_hosts().await,
@@ -595,6 +609,79 @@ async fn cmd_init_identity() -> Result<()> {
         }
         Err(err) => Err(err.into()),
     }
+}
+
+async fn cmd_tir_invite(peer_identity: String) -> Result<()> {
+    let fingerprint = parse_fingerprint_hex(&peer_identity)
+        .context("peer identity must be 64 hex characters (32 bytes)")?;
+    let seed = random_seed();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system time before UNIX_EPOCH")?
+        .as_secs();
+    let t0 = now.saturating_add(10);
+
+    let token = SemanticRendezvousToken::new(
+        seed,
+        IdentityConstraints {
+            allowed_fingerprints: vec![fingerprint],
+        },
+        TimeModel {
+            t0,
+            window_secs: 120,
+            slot_ms: 250,
+        },
+        SearchStrategy::BasicDeterministic,
+        EscalationPolicy::None,
+    );
+
+    let uri = token.to_uri().context("failed to encode SRT URI")?;
+    println!("{uri}");
+    Ok(())
+}
+
+async fn cmd_tir_accept(srt_uri: String) -> Result<()> {
+    let token = SemanticRendezvousToken::from_uri(&srt_uri)
+        .context("failed to decode SRT URI")?;
+
+    if !token.identities.allowed_fingerprints.is_empty() {
+        match Identity::load(None) {
+            Ok(identity) => {
+                let local_fingerprint = blake3::hash(identity.keypair.public.as_bytes());
+                let local_bytes: [u8; 32] = *local_fingerprint.as_bytes();
+                let allowed = token
+                    .identities
+                    .allowed_fingerprints
+                    .iter()
+                    .any(|fp| fp == &local_bytes);
+                if !allowed {
+                    anyhow::bail!("local identity is not allowed by the SRT constraints");
+                }
+            }
+            Err(err) => {
+                eprintln!("warning: unable to load local identity: {err}");
+            }
+        }
+    }
+
+    println!("SRT decoded:");
+    println!("  seed: {}", hex::encode(token.seed));
+    println!(
+        "  time_model: t0={} window_secs={} slot_ms={}",
+        token.time_model.t0, token.time_model.window_secs, token.time_model.slot_ms
+    );
+    println!("  search_strategy: {:?}", token.search_strategy);
+    println!("  escalation: {:?}", token.escalation);
+    if token.identities.allowed_fingerprints.is_empty() {
+        println!("  identities: unrestricted");
+    } else {
+        println!("  identities:");
+        for fp in &token.identities.allowed_fingerprints {
+            println!("    - {}", hex::encode(fp));
+        }
+    }
+
+    Ok(())
 }
 
 async fn cmd_create(
@@ -1902,6 +1989,22 @@ fn fingerprint_key(public_key: &[u8]) -> String {
     let hash = blake3::hash(public_key);
     let hex = hash.to_hex().to_string();
     hex.chars().take(16).collect()
+}
+
+fn parse_fingerprint_hex(input: &str) -> Result<[u8; 32]> {
+    let bytes = hex::decode(input)?;
+    if bytes.len() != 32 {
+        anyhow::bail!("expected 32-byte fingerprint, got {} bytes", bytes.len());
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&bytes);
+    Ok(out)
+}
+
+fn random_seed() -> [u8; 32] {
+    let mut seed = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut seed);
+    seed
 }
 
 fn write_audit_log(path: Option<&str>, event: &str, message: &str) {
