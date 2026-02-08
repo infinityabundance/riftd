@@ -443,7 +443,12 @@ impl Mesh {
             *cfg = Some(nat_cfg.clone());
         }
 
-        for addr in invite.known_peers {
+        let mut targets = invite.known_peers;
+        targets.extend(invite.candidates);
+        targets.sort();
+        targets.dedup();
+
+        for addr in targets {
             let endpoint = PeerEndpoint {
                 peer_id: PeerId([0u8; 32]),
                 external_addrs: vec![addr],

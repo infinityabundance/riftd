@@ -16,6 +16,8 @@ pub struct Invite {
     pub password: Option<String>,
     pub channel_key: [u8; 32],
     pub known_peers: Vec<SocketAddr>,
+    #[serde(default)]
+    pub candidates: Vec<SocketAddr>,
     pub version: u8,
     pub created_at: u64,
 }
@@ -24,6 +26,7 @@ pub fn generate_invite(
     channel_name: &str,
     password: Option<&str>,
     known_peers: Vec<SocketAddr>,
+    candidates: Vec<SocketAddr>,
 ) -> Invite {
     let mut channel_key = [0u8; 32];
     OsRng.fill_bytes(&mut channel_key);
@@ -32,7 +35,8 @@ pub fn generate_invite(
         password: password.map(|s| s.to_string()),
         channel_key,
         known_peers,
-        version: 1,
+        candidates,
+        version: 2,
         created_at: now_timestamp(),
     }
 }
