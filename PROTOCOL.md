@@ -145,6 +145,13 @@ KeyResp {
 Peers derive a session key using X25519 ECDH + HKDF and then wrap
 chat/voice payloads as `EncryptedPayload`.
 
+Optional ready signal:
+```
+EncryptedReady { session: SessionId, alg: u8 }
+```
+When both sides send `EncryptedReady`, the session switches to encrypted
+payloads only.
+
 ## ICE-lite Candidate Exchange
 Peers exchange candidate sets using `IceCandidates`. Connectivity checks use
 `IceCheck`/`IceCheckAck` to select the best path:
@@ -154,13 +161,22 @@ These messages are optional and ignored by older peers.
 
 ## Versioning
 Supported protocol versions are listed in `supported_versions()`.
+V1:
+- No mandatory capability exchange.
+- No E2EE; payloads are plaintext inside the Noise transport.
+
+V2:
+- `Hello` is expected after session establishment.
+- Capabilities and candidates are exchanged for ICE-lite checks.
+
 Negotiation:
-- Each peer can advertise supported versions (future capability message).
+- Each peer advertises supported versions in `Hello`.
 - The highest common version is selected.
 
 Backward compatibility:
 - V1 peers ignore unknown ControlMessage variants.
-- E2EE is only enabled when both peers support key exchange.
+- E2EE is only enabled when both peers complete key exchange and signal
+  `EncryptedReady`.
 
 ## Session Semantics
 - The channel name maps to a deterministic `SessionId` (channel session).
