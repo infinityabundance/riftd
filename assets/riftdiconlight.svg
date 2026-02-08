@@ -1,0 +1,21 @@
+<!--?xml version="1.0" encoding="UTF-8"?-->
+<svg width="128" height="128" viewBox="0 0 128 128" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">riftd icon (dark)</title>
+  <desc id="desc">
+    Tray/app icon variant optimized for light backgrounds.
+  </desc>
+
+  <!-- Broken outer ring (rift) -->
+  <path d="M 58 20 A 44 44 0 0 1 58 108" fill="none" stroke="#000000" stroke-width="6" stroke-linecap="round"></path>
+  <path d="M 70 20 A 44 44 0 0 1 70 108" fill="none" stroke="#000000" stroke-width="6" stroke-linecap="round"></path>
+
+  <!-- Bridge connections -->
+  <line x1="48" y1="64" x2="80" y2="54" stroke="#000000" stroke-width="5" stroke-linecap="round"></line>
+  <line x1="48" y1="64" x2="80" y2="74" stroke="#000000" stroke-width="5" stroke-linecap="round"></line>
+  <line x1="80" y1="54" x2="80" y2="74" stroke="#000000" stroke-width="5" stroke-linecap="round"></line>
+
+  <!-- Nodes -->
+  <circle cx="48" cy="64" r="5" fill="#000000"></circle>
+  <circle cx="80" cy="54" r="5" fill="#000000"></circle>
+  <circle cx="80" cy="74" r="5" fill="#000000"></circle>
+</svg>
