@@ -6,7 +6,7 @@
   </a>
 </p>
 
-[![Prior Art](https://img.shields.io/badge/Zenodo-Prior%20Art-blue)](https://zenodo.org/records/18528430)
+[![Predictive Rendezvous: Time--Intent--Deterministic Peer Coordination Without Infrastructure](https://img.shields.io/badge/Zenodo-Prior%20Art-blue)](https://zenodo.org/records/18528430)
 
 
 Serverless P2P voice + text chat over UDP with a mesh, NAT traversal, and optional relays.
