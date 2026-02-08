@@ -1,0 +1,61 @@
+# Predictive Rendezvous in riftd
+
+## Overview
+Predictive Rendezvous (PR) is a serverless rendezvous mechanism. Two peers share the same seed, time window, and intent, then independently run a deterministic schedule that tells them when and how to probe for each other. No coordination service is required; both sides derive the same slot sequence from the same inputs.
+
+## Semantic Rendezvous Token (SRT)
+An SRT is not an IP address and not a room ID. It is an executable rendezvous plan that fully describes how two peers should derive the same schedule.
+
+Core fields (current implementation):
+- `seed`: 32-byte value that deterministically drives the schedule.
+- `time_model`: `{ t0, window_secs, slot_ms }`.
+- `identities`: allowed peer fingerprints.
+- `search_strategy`: deterministic strategy selection.
+- `escalation`: escalation policy selection.
+
+Example SRT URI:
+```
+riftd-srt://v1?seed=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&t0=1700000000&tw=120&slot=250&ss=basic&esc=none&ids=0101010101010101010101010101010101010101010101010101010101010101
+```
+
+Decoded form (conceptual):
+```
+seed = [0u8; 32]
+time_model = { t0: 1700000000, window_secs: 120, slot_ms: 250 }
+identities.allowed_fingerprints = [0x01..01 (32 bytes)]
+search_strategy = BasicDeterministic
+escalation = None
+```
+
+## Time Model and Slots
+The time model defines the rendezvous window and the slot duration:
+- `t0`: anchor time in Unix seconds.
+- `window_secs`: total rendezvous window size.
+- `slot_ms`: duration of a slot in milliseconds.
+
+Slot index is computed as:
+```
+slot_index = floor((now_ms - t0_ms) / slot_ms)
+```
+If `now_ms` is before `t0` or after the window ends, there is no active slot.
+
+## Deterministic Schedule
+The core schedule function is `compute_slot_params`. It derives per-slot parameters using a strong PRF over `seed || role_tag || slot_index`:
+- `local_port_offset`
+- `remote_port_offset`
+- `burst_pattern`
+
+Role-based asymmetry (`Caller`, `Callee`, or `Symmetric`) ensures both peers can derive either mirrored or identical sequences as required.
+
+## RendezvousRunner
+`RendezvousRunner` is the high-level state machine that uses the SRT and role to emit probes for the current slot. It is designed to be wired into riftd's networking stack later.
+
+- Time is abstracted via `Clock` (`now_unix_ms`).
+- Networking is abstracted via `UdpIo` (`send_probe`).
+
+This makes the runner testable without real sockets while keeping the interface ready for integration.
+
+## No-IP and No-Server Design
+SRTs do not encode IPs or ports. The schedule is derived only from seed, time model, and policy metadata.
+
+Peers can use prior knowledge (historical addresses, local discovery, or user-provided hints) to supply candidate remote addresses, but the SRT itself remains a pure rendezvous plan with zero infrastructure requirements.
