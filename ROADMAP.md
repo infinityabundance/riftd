@@ -42,6 +42,11 @@ the direction of the project.
    - Provide an API surface for third-party apps.
    - Stable framing + FFI support.
 
+4. **Browser client**
+   - WebAssembly text client with optional WebSocket relay.
+   - Invite-based join via URL.
+   - Incremental path to WebRTC/QUIC transport + audio.
+
 ## Long Term
 1. **Interoperability**
    - Formal protocol specification and test vectors.

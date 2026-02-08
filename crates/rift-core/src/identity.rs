@@ -1,3 +1,4 @@
+#[cfg(not(target_arch = "wasm32"))]
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -25,11 +26,18 @@ impl Identity {
         Self { keypair, peer_id }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn default_path() -> Result<PathBuf, CoreError> {
         let base = dirs::config_dir().ok_or(CoreError::ConfigDirMissing)?;
         Ok(base.join("rift").join("identity.key"))
     }
 
+    #[cfg(target_arch = "wasm32")]
+    pub fn default_path() -> Result<PathBuf, CoreError> {
+        Err(CoreError::ConfigDirMissing)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn load(path: Option<&Path>) -> Result<Self, CoreError> {
         let path = match path {
             Some(path) => path.to_path_buf(),
@@ -50,6 +58,13 @@ impl Identity {
         Ok(Self { keypair, peer_id })
     }
 
+    #[cfg(target_arch = "wasm32")]
+    pub fn load(path: Option<&Path>) -> Result<Self, CoreError> {
+        let _ = path;
+        Err(CoreError::IdentityMissing("identity storage unsupported on wasm".to_string()))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn load_or_generate(path: Option<&Path>) -> Result<(Self, bool), CoreError> {
         let path = match path {
             Some(path) => path.to_path_buf(),
@@ -66,6 +81,12 @@ impl Identity {
         }
     }
 
+    #[cfg(target_arch = "wasm32")]
+    pub fn load_or_generate(_path: Option<&Path>) -> Result<(Self, bool), CoreError> {
+        Ok((Self::generate(), true))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn save(&self, path: &Path) -> Result<(), CoreError> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
@@ -73,6 +94,14 @@ impl Identity {
         let bytes = self.keypair.to_bytes();
         fs::write(path, &bytes)?;
         Ok(())
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn save(&self, _path: &Path) -> Result<(), CoreError> {
+        Err(CoreError::Io(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "identity storage unsupported on wasm",
+        )))
     }
 }
 

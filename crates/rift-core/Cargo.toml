@@ -7,7 +7,6 @@ edition = "2021"
 base64 = "0.21"
 blake3 = "1"
 bincode = "1"
-dirs = "5"
 ed25519-dalek = { version = "1", features = ["rand"] }
 hex = "0.4"
 hkdf = "0.12"
@@ -18,3 +17,9 @@ sha2 = "0.10"
 snow = "0.9"
 thiserror = "1"
 x25519-dalek = "1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+dirs = "5"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }

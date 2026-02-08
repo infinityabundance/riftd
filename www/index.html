@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Rift Browser Prototype</title>
+    <link rel="stylesheet" href="styles.css" />
+    <link data-trunk rel="rust" href="../crates/rift-wasm/Cargo.toml" data-wasm-opt="z" />
+  </head>
+  <body>
+    <main class="page">
+      <header class="header">
+        <h1>Rift Browser Prototype</h1>
+        <p>Text-only WASM spike using a WebSocket relay.</p>
+      </header>
+
+      <section class="card">
+        <h2>Invite</h2>
+        <label class="field">
+          <span>Invite Link</span>
+          <input id="invite" placeholder="rift://join/..." />
+        </label>
+        <div class="row">
+          <button id="create-invite">Create Invite</button>
+          <button id="join-invite">Join Invite</button>
+        </div>
+        <div class="status" id="invite-status">Not joined</div>
+      </section>
+
+      <section class="card">
+        <h2>Transport</h2>
+        <label class="field">
+          <span>Relay WebSocket URL</span>
+          <input id="relay" value="ws://localhost:8787/ws" />
+        </label>
+        <div class="row">
+          <button id="connect">Connect</button>
+          <button id="disconnect">Disconnect</button>
+        </div>
+        <div class="status" id="transport-status">Disconnected</div>
+      </section>
+
+      <section class="card">
+        <h2>Chat</h2>
+        <div id="chat" class="chat"></div>
+        <div class="row">
+          <input id="message" placeholder="Type a message" />
+          <button id="send">Send</button>
+        </div>
+      </section>
+    </main>
+
+    <script type="module" src="app.js"></script>
+  </body>
+</html>
