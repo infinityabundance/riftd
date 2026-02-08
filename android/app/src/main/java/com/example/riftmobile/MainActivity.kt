@@ -10,6 +10,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
@@ -33,6 +34,11 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import android.util.Log
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
 
 class MainActivity : ComponentActivity() {
     private val viewModel: MainViewModel by viewModels()
@@ -230,22 +236,31 @@ class MainViewModel : ViewModel() {
 
 @Composable
 fun RiftApp(viewModel: MainViewModel, onRequestMic: () -> Unit) {
+    val listState = rememberLazyListState()
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
         ConnectionPanel(viewModel, onRequestMic)
         Spacer(modifier = Modifier.height(12.dp))
-        ChatList(viewModel.messages, modifier = Modifier.weight(1f))
+        ChatList(viewModel.messages, listState, modifier = Modifier.weight(1f))
         Spacer(modifier = Modifier.height(12.dp))
         ChatInput(
             value = viewModel.inputText,
             onValueChange = { viewModel.inputText = it },
-            onSend = { viewModel.sendChat() }
+            onSend = { viewModel.sendChat() },
+            enabled = viewModel.connected
         )
         Spacer(modifier = Modifier.height(12.dp))
         PttButton(
             pressed = viewModel.pttPressed,
             onDown = { viewModel.startPtt() },
-            onUp = { viewModel.stopPtt() }
+            onUp = { viewModel.stopPtt() },
+            enabled = viewModel.connected
         )
+    }
+
+    LaunchedEffect(viewModel.messages.size) {
+        if (viewModel.messages.isNotEmpty()) {
+            listState.animateScrollToItem(viewModel.messages.size - 1)
+        }
     }
 }
 
@@ -298,10 +313,10 @@ fun ConnectionPanel(viewModel: MainViewModel, onRequestMic: () -> Unit) {
                     onRequestMic()
                 }
                 viewModel.connect()
-            }) {
+            }, enabled = !viewModel.connected) {
                 Text("Connect")
             }
-            Button(onClick = { viewModel.disconnect() }) {
+            Button(onClick = { viewModel.disconnect() }, enabled = viewModel.connected) {
                 Text("Disconnect")
             }
         }
@@ -309,8 +324,11 @@ fun ConnectionPanel(viewModel: MainViewModel, onRequestMic: () -> Unit) {
 }
 
 @Composable
-fun ChatList(messages: List<ChatItem>, modifier: Modifier = Modifier) {
-    LazyColumn(modifier = modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant)) {
+fun ChatList(messages: List<ChatItem>, listState: androidx.compose.foundation.lazy.LazyListState, modifier: Modifier = Modifier) {
+    LazyColumn(
+        state = listState,
+        modifier = modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant)
+    ) {
         items(messages) { item ->
             Text("[${item.time}] ${item.from}: ${item.text}", modifier = Modifier.padding(4.dp))
         }
@@ -318,22 +336,29 @@ fun ChatList(messages: List<ChatItem>, modifier: Modifier = Modifier) {
 }
 
 @Composable
-fun ChatInput(value: String, onValueChange: (String) -> Unit, onSend: () -> Unit) {
+fun ChatInput(value: String, onValueChange: (String) -> Unit, onSend: () -> Unit, enabled: Boolean) {
+    val keyboard = LocalSoftwareKeyboardController.current
     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         OutlinedTextField(
             value = value,
             onValueChange = onValueChange,
             label = { Text("Message") },
-            modifier = Modifier.weight(1f)
+            modifier = Modifier.weight(1f),
+            enabled = enabled,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text, imeAction = ImeAction.Send),
+            keyboardActions = KeyboardActions(onSend = {
+                onSend()
+                keyboard?.hide()
+            })
         )
-        Button(onClick = onSend) {
+        Button(onClick = onSend, enabled = enabled) {
             Text("Send")
         }
     }
 }
 
 @Composable
-fun PttButton(pressed: Boolean, onDown: () -> Unit, onUp: () -> Unit) {
+fun PttButton(pressed: Boolean, onDown: () -> Unit, onUp: () -> Unit, enabled: Boolean) {
     val color = if (pressed) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondary
     Box(
         modifier = Modifier
@@ -341,16 +366,21 @@ fun PttButton(pressed: Boolean, onDown: () -> Unit, onUp: () -> Unit) {
             .height(80.dp)
             .background(color)
             .pointerInput(Unit) {
-                detectTapGestures(
-                    onPress = {
-                        onDown()
-                        tryAwaitRelease()
-                        onUp()
-                    }
-                )
+                if (enabled) {
+                    detectTapGestures(
+                        onPress = {
+                            onDown()
+                            tryAwaitRelease()
+                            onUp()
+                        }
+                    )
+                }
             },
         contentAlignment = androidx.compose.ui.Alignment.Center
     ) {
-        Text(text = if (pressed) "Talking..." else "Hold to Talk", color = MaterialTheme.colorScheme.onPrimary)
+        Text(
+            text = if (!enabled) "Connect to Talk" else if (pressed) "Talking..." else "Hold to Talk",
+            color = MaterialTheme.colorScheme.onPrimary
+        )
     }
 }
