@@ -28,14 +28,14 @@ use rift_nat::{
     attempt_hole_punch, gather_local_candidates, gather_public_addrs, parse_turn_server, NatConfig,
     PeerEndpoint,
 };
-use rift_protocol::{CallState, Capabilities, QosProfile, SessionId};
+use rift_protocol::{CallState, Capabilities, GroupMode, QosProfile, SessionId};
 use hkdf::Hkdf;
 use sha2::Sha256;
 
 pub use rift_core::PeerId as RiftPeerId;
 pub use rift_protocol::{
-    CallState as RiftCallState, ChatMessage, CodecId, FeatureFlag, QosProfile as RiftQosProfile,
-    SessionId as RiftSessionId,
+    CallState as RiftCallState, ChatMessage, CodecId, FeatureFlag, GroupMode,
+    QosProfile as RiftQosProfile, SessionId as RiftSessionId,
 };
 
 pub const SDK_VERSION: &str = "0.1.0";
@@ -239,6 +239,7 @@ pub enum RiftEvent {
     AudioBitrate { bitrate: u32 },
     StatsUpdate { peer: PeerId, stats: LinkStats, global: GlobalStats },
     RouteUpdated { peer: PeerId, route: RouteKind },
+    GroupTopology { session: SessionId, mode: GroupMode },
     PeerFingerprint { peer: PeerId, fingerprint: String },
     SecurityNotice { message: String },
     VoiceFrame { peer: PeerId, samples: Vec<i16> },
@@ -748,6 +749,9 @@ impl RiftHandle {
                             peer: peer_id,
                             route,
                         });
+                    }
+                    MeshEvent::GroupTopology { session, mode } => {
+                        let _ = event_tx.send(RiftEvent::GroupTopology { session, mode });
                     }
                     MeshEvent::PeerIdentity { peer_id, public_key } => {
                         if let Err(err) = handle_peer_identity(

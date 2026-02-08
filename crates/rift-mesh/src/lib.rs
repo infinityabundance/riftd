@@ -20,8 +20,9 @@ use rift_nat::{
 };
 use rift_protocol::{
     decode_frame, encode_frame, CallControl, CallState, Capabilities, ChatMessage, CodecId,
-    ControlMessage, EncryptedPayload, FeatureFlag, IceCandidate, CandidateType, PeerInfo,
-    ProtocolVersion, QosProfile, RiftFrameHeader, RiftPayload, SessionId, StreamKind, VoicePacket,
+    ControlMessage, EncryptedPayload, FeatureFlag, GroupControl, GroupMode, IceCandidate,
+    CandidateType, PeerInfo, ProtocolVersion, QosProfile, RiftFrameHeader, RiftPayload, SessionId,
+    StreamKind, VoicePacket,
 };
 use rift_metrics as metrics;
 use aes_gcm::{Aes256Gcm, Key, Nonce, KeyInit};
@@ -30,6 +31,7 @@ use rand::RngCore;
 use rand::rngs::OsRng;
 
 const MAX_PACKET: usize = 2048;
+const GROUP_MESH_MAX: usize = 5;
 
 #[derive(Debug, Clone)]
 pub struct MeshConfig {
@@ -85,6 +87,7 @@ pub enum MeshEvent {
         reason: Option<String>,
     },
     CallEnded { session: SessionId },
+    GroupTopology { session: SessionId, mode: GroupMode },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -152,6 +155,7 @@ struct MeshInner {
     active_session: Mutex<SessionId>,
     channel_session: SessionId,
     group_codec: Mutex<CodecId>,
+    group_topology: Mutex<HashMap<SessionId, GroupMode>>,
     candidate_attempts: Mutex<HashMap<PeerId, tokio::time::Instant>>,
     e2ee_key: Option<[u8; 32]>,
     e2ee_keys: Mutex<HashMap<(PeerId, SessionId), [u8; 32]>>,
@@ -391,7 +395,13 @@ impl Mesh {
             e2ee_pending: Mutex::new(HashMap::new()),
             rekey_interval_secs: config.rekey_interval_secs,
             max_direct_peers: config.max_direct_peers,
+            group_topology: Mutex::new(HashMap::new()),
         });
+
+        {
+            let mut topo = inner.group_topology.lock().await;
+            topo.insert(channel_session, GroupMode::Mesh);
+        }
 
         MeshInner::spawn_receiver(inner.clone(), 0, MeshSocket::Udp(socket.clone()));
         MeshInner::spawn_auto_upgrade(inner.clone());
@@ -645,6 +655,119 @@ impl MeshInner {
         addr.hash(&mut hasher);
         cand_type.hash(&mut hasher);
         hasher.finish()
+    }
+
+    async fn current_group_mode(&self, session: SessionId) -> GroupMode {
+        let topo = self.group_topology.lock().await;
+        topo.get(&session).cloned().unwrap_or(GroupMode::Mesh)
+    }
+
+    async fn set_group_mode(&self, session: SessionId, mode: GroupMode) {
+        let mut topo = self.group_topology.lock().await;
+        topo.insert(session, mode);
+    }
+
+    async fn is_topology_coordinator(&self, session: SessionId) -> bool {
+        let peers = {
+            let mgr = self.session_mgr.lock().await;
+            mgr.participants(session)
+        };
+        if peers.is_empty() {
+            return true;
+        }
+        let mut all = peers;
+        if !all.contains(&self.identity.peer_id) {
+            all.push(self.identity.peer_id);
+        }
+        all.sort_by_key(|p| p.0);
+        all.first().copied() == Some(self.identity.peer_id)
+    }
+
+    async fn select_forwarder(&self, session: SessionId) -> Option<PeerId> {
+        let participants = {
+            let mgr = self.session_mgr.lock().await;
+            mgr.participants(session)
+        };
+        if participants.is_empty() {
+            return None;
+        }
+        let relay_caps = self.peer_caps.lock().await.clone();
+        let stats = self.link_stats.lock().await.clone();
+
+        let mut candidates: Vec<PeerId> = participants
+            .into_iter()
+            .filter(|peer| relay_caps.get(peer).copied().unwrap_or(false) || *peer == self.identity.peer_id)
+            .collect();
+        if self.relay_capable && !candidates.contains(&self.identity.peer_id) {
+            candidates.push(self.identity.peer_id);
+        }
+        if candidates.is_empty() {
+            return None;
+        }
+        candidates.sort_by_key(|peer| {
+            if *peer == self.identity.peer_id {
+                0u64
+            } else if let Some(st) = stats.get(peer) {
+                (st.rtt_ms as u64).saturating_add((st.loss * 1000.0) as u64)
+            } else {
+                10_000
+            }
+        });
+        candidates.first().copied()
+    }
+
+    async fn update_group_topology(&self, session: SessionId) -> Result<()> {
+        if !self.is_topology_coordinator(session).await {
+            return Ok(());
+        }
+        let participants = {
+            let mgr = self.session_mgr.lock().await;
+            mgr.participants(session)
+        };
+        let count = participants.len().max(1);
+        let next = if count <= GROUP_MESH_MAX {
+            GroupMode::Mesh
+        } else if self.e2ee_key.is_some() {
+            if let Some(forwarder) = self.select_forwarder(session).await {
+                GroupMode::Hybrid { forwarder }
+            } else {
+                GroupMode::Mesh
+            }
+        } else {
+            GroupMode::Mesh
+        };
+
+        let current = self.current_group_mode(session).await;
+        if current == next {
+            return Ok(());
+        }
+        self.set_group_mode(session, next);
+        let msg = ControlMessage::Group(GroupControl::Topology { session, mode: next });
+        for peer in participants {
+            if peer == self.identity.peer_id {
+                continue;
+            }
+            let _ = self.send_control_to_peer(peer, msg.clone(), session).await;
+        }
+        let _ = self
+            .events_tx
+            .send(MeshEvent::GroupTopology { session, mode: next })
+            .await;
+        Ok(())
+    }
+
+    async fn should_forward_voice(&self, session: SessionId, from: PeerId) -> bool {
+        if from == self.identity.peer_id {
+            return false;
+        }
+        match self.current_group_mode(session).await {
+            GroupMode::Hybrid { forwarder } if forwarder == self.identity.peer_id => true,
+            _ => false,
+        }
+    }
+
+    async fn should_use_group_key(&self, session: SessionId) -> bool {
+        matches!(self.current_group_mode(session).await, GroupMode::Hybrid { .. }) && self.e2ee_key.is_some()
     }
     async fn broadcast_chat(&self, text: String) -> Result<()> {
         let timestamp = now_timestamp();
@@ -1832,12 +1955,17 @@ impl MeshInner {
         match payload {
             RiftPayload::Relay { target, inner } => {
                 if should_encrypt(&inner) {
-                    let key = {
+                    let use_group = self.should_use_group_key(session).await
+                        && matches!(*inner, RiftPayload::Voice(_));
+                    let key = if use_group {
+                        self.e2ee_key.ok_or_else(|| anyhow!("missing e2ee key"))?
+                    } else {
                         let keys = self.e2ee_keys.lock().await;
-                        peer_id.and_then(|peer| keys.get(&(peer, session)).copied())
-                    }
-                    .or(self.e2ee_key)
-                    .ok_or_else(|| anyhow!("missing e2ee key"))?;
+                        peer_id
+                            .and_then(|peer| keys.get(&(peer, session)).copied())
+                            .or(self.e2ee_key)
+                            .ok_or_else(|| anyhow!("missing e2ee key"))?
+                    };
                     let encrypted = RiftPayload::Encrypted(
                         encrypt_payload_with_key(&key, header, &inner)?
                     );
@@ -1853,12 +1981,17 @@ impl MeshInner {
                 if !should_encrypt(&other) {
                     return Ok(other);
                 }
-                let key = {
+                let use_group = self.should_use_group_key(session).await
+                    && matches!(other, RiftPayload::Voice(_));
+                let key = if use_group {
+                    self.e2ee_key.ok_or_else(|| anyhow!("missing e2ee key"))?
+                } else {
                     let keys = self.e2ee_keys.lock().await;
-                    peer_id.and_then(|peer| keys.get(&(peer, session)).copied())
-                }
-                .or(self.e2ee_key)
-                .ok_or_else(|| anyhow!("missing e2ee key"))?;
+                    peer_id
+                        .and_then(|peer| keys.get(&(peer, session)).copied())
+                        .or(self.e2ee_key)
+                        .ok_or_else(|| anyhow!("missing e2ee key"))?
+                };
                 let encrypted = encrypt_payload_with_key(&key, header, &other)?;
                 Ok(RiftPayload::Encrypted(encrypted))
             }
@@ -2131,6 +2264,70 @@ impl MeshInner {
         Ok(())
     }
 
+    async fn send_frame(
+        &self,
+        addr: SocketAddr,
+        header: &RiftFrameHeader,
+        payload: &RiftPayload,
+    ) -> Result<()> {
+        let plaintext = encode_frame(header, payload);
+        let (ciphertext, socket_idx) = {
+            let mut connections = self.connections.lock().await;
+            let Some(conn) = connections.get_mut(&addr) else {
+                return Err(anyhow!("missing connection"));
+            };
+            let mut out = vec![0u8; plaintext.len() + 128];
+            let len = conn.session.encrypt(&plaintext, &mut out)?;
+            out.truncate(len);
+            (out, conn.socket_idx)
+        };
+        self.send_raw(socket_idx, addr, &ciphertext).await?;
+        self.record_send(addr, ciphertext.len()).await;
+        Ok(())
+    }
+
+    async fn forward_group_voice(
+        &self,
+        header: &RiftFrameHeader,
+        payload: &RiftPayload,
+    ) -> Result<()> {
+        let session = header.session;
+        let from = header.source;
+        let participants = {
+            let mgr = self.session_mgr.lock().await;
+            mgr.participants(session)
+        };
+        let routes = self.routes_snapshot().await;
+        for peer_id in participants {
+            if peer_id == self.identity.peer_id || peer_id == from {
+                continue;
+            }
+            let Some(route) = routes.get(&peer_id).cloned() else {
+                continue;
+            };
+            match route {
+                PeerRoute::Direct { addr } => {
+                    let _ = self.send_frame(addr, header, payload).await;
+                }
+                PeerRoute::Relayed { via } => {
+                    let relay_addr = {
+                        let peers = self.peers_by_id.lock().await;
+                        peers.get(&via).copied()
+                    };
+                    let Some(relay_addr) = relay_addr else {
+                        continue;
+                    };
+                    let envelope = RiftPayload::Relay {
+                        target: peer_id,
+                        inner: Box::new(payload.clone()),
+                    };
+                    let _ = self.send_frame(relay_addr, header, &envelope).await;
+                }
+            }
+        }
+        Ok(())
+    }
+
     async fn handle_frame(
         self: Arc<Self>,
         addr: SocketAddr,
@@ -2193,6 +2390,7 @@ impl MeshInner {
                 let mut sessions = self.session_mgr.lock().await;
                 sessions.add_participant(self.channel_session, peer_id);
                 drop(sessions);
+                let _ = self.update_group_topology(self.channel_session).await;
 
                 let mut caps = self.peer_capabilities.lock().await;
                 caps.entry(peer_id).or_insert_with(default_peer_capabilities);
@@ -2365,6 +2563,11 @@ impl MeshInner {
                 let mut sessions = self.session_mgr.lock().await;
                 sessions.remove_participant_all(peer_id);
                 drop(sessions);
+                let _ = self.update_group_topology(self.channel_session).await;
+                let active = *self.active_session.lock().await;
+                if active != SessionId::NONE && active != self.channel_session {
+                    let _ = self.update_group_topology(active).await;
+                }
                 let _ = self.events_tx.send(MeshEvent::PeerLeft(peer_id)).await;
                 self.emit_global_metrics().await;
             }
@@ -2405,6 +2608,30 @@ impl MeshInner {
             RiftPayload::Control(ControlMessage::PeerList { peers }) => {
                 self.handle_peer_list(addr, peers).await?;
             }
+            RiftPayload::Control(ControlMessage::Group(group)) => {
+                match group {
+                    GroupControl::Join { session, peer_id, .. } => {
+                        let mut sessions = self.session_mgr.lock().await;
+                        sessions.add_participant(session, peer_id);
+                        drop(sessions);
+                        let _ = self.update_group_topology(session).await;
+                    }
+                    GroupControl::Leave { session, peer_id } => {
+                        let mut sessions = self.session_mgr.lock().await;
+                        sessions.remove_participant(session, peer_id);
+                        drop(sessions);
+                        let _ = self.update_group_topology(session).await;
+                    }
+                    GroupControl::Topology { session, mode } => {
+                        self.set_group_mode(session, mode).await;
+                        let _ = self
+                            .events_tx
+                            .send(MeshEvent::GroupTopology { session, mode })
+                            .await;
+                    }
+                    GroupControl::StreamPublish { .. } | GroupControl::StreamSubscribe { .. } => {}
+                }
+            }
             RiftPayload::Control(ControlMessage::Call(call)) => {
                 self.handle_call(call).await?;
             }
@@ -2442,6 +2669,13 @@ impl MeshInner {
                 }
                 seqs.insert(from, seq);
                 drop(seqs);
+                if self.should_forward_voice(session, from).await {
+                    let payload = RiftPayload::Voice(VoicePacket {
+                        codec_id: codec,
+                        payload: payload.clone(),
+                    });
+                    let _ = self.forward_group_voice(&header, &payload).await;
+                }
 
                 let _ = self
                     .events_tx
@@ -2458,6 +2692,12 @@ impl MeshInner {
             RiftPayload::Encrypted(encrypted) => {
                 let from = header.source;
                 let session = header.session;
+                if header.stream == StreamKind::Voice
+                    && self.should_forward_voice(session, from).await
+                {
+                    let payload = RiftPayload::Encrypted(encrypted.clone());
+                    let _ = self.forward_group_voice(&header, &payload).await;
+                }
                 if let Ok(inner) = self.decrypt_payload(&header, encrypted, from, session).await {
                     Box::pin(self.handle_frame(addr, header, inner)).await?;
                 } else {
@@ -2715,6 +2955,7 @@ impl MeshInner {
                     sessions.add_participant(session, from);
                     sessions.add_participant(session, to);
                 }
+                let _ = self.update_group_topology(session).await;
                 let _ = self
                     .events_tx
                     .send(MeshEvent::IncomingCall { session, from })
@@ -2727,6 +2968,7 @@ impl MeshInner {
                     sessions.add_participant(session, from);
                     sessions.add_participant(session, self.identity.peer_id);
                 }
+                let _ = self.update_group_topology(session).await;
                 let mut active = self.active_session.lock().await;
                 *active = session;
                 let _ = self.start_e2ee(from, session).await;
@@ -2769,6 +3011,8 @@ impl MeshInner {
                 for peer in participants {
                     sessions.add_participant(session, peer);
                 }
+                drop(sessions);
+                let _ = self.update_group_topology(session).await;
             }
         }
         Ok(())
@@ -2835,6 +3079,19 @@ impl MeshInner {
         let codec = *self.group_codec.lock().await;
         let msg = RiftPayload::Voice(VoicePacket { codec_id: codec, payload });
         let session = *self.active_session.lock().await;
+        let mode = self.current_group_mode(session).await;
+        if let GroupMode::Hybrid { forwarder } = mode {
+            if forwarder != self.identity.peer_id {
+                let routes = self.routes_snapshot().await;
+                if let Some(route) = routes.get(&forwarder).cloned() {
+                    let _ = self
+                        .send_to_peer(forwarder, route, msg, seq, timestamp, session)
+                        .await;
+                }
+                return Ok(());
+            }
+        }
+
         let routes = self.routes_snapshot().await;
         for (peer_id, route) in routes {
             if peer_id == self.identity.peer_id {

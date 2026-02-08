@@ -816,6 +816,7 @@ struct UiState {
     user_name: String,
     audio_quality: String,
     current_codec: String,
+    group_topology: String,
     audio_bitrate: u32,
     theme: String,
     prefer_p2p: bool,
@@ -870,6 +871,7 @@ impl UiState {
             user_name,
             audio_quality,
             current_codec: "opus".to_string(),
+            group_topology: "mesh".to_string(),
             audio_bitrate: 0,
             theme,
             prefer_p2p,
@@ -1082,6 +1084,16 @@ async fn run_tui_inner(
                             }
                             RiftEvent::AudioBitrate { bitrate } => {
                                 state.audio_bitrate = bitrate;
+                            }
+                            RiftEvent::GroupTopology { session, mode } => {
+                                if session == state.active_session || session == state.channel_session {
+                                    state.group_topology = match mode {
+                                        rift_sdk::GroupMode::Mesh => "mesh".to_string(),
+                                        rift_sdk::GroupMode::Hybrid { forwarder } => {
+                                            format!("hybrid via {}", short_peer(&forwarder))
+                                        }
+                                    };
+                                }
                             }
                             RiftEvent::StatsUpdate { peer, stats, global } => {
                                 let entry = state.peers.entry(peer).or_insert(PeerEntry {
@@ -1638,6 +1650,9 @@ fn draw_status(f: &mut Frame, area: Rect, state: &UiState) {
         Span::raw(" | "),
         Span::styled("codec: ", Style::default().fg(Color::Cyan)),
         Span::styled(state.current_codec.clone(), Style::default().fg(Color::White)),
+        Span::raw(" | "),
+        Span::styled("topo: ", Style::default().fg(Color::Cyan)),
+        Span::styled(state.group_topology.clone(), Style::default().fg(Color::White)),
         Span::raw(" | "),
         Span::styled("bitrate: ", Style::default().fg(Color::Cyan)),
         Span::styled(

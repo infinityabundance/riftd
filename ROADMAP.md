@@ -32,6 +32,7 @@ the direction of the project.
 1. **Mesh scalability**
    - Smarter relay selection.
    - Partial-mesh topologies.
+   - Hybrid group-call topology with selective forwarders.
 
 2. **Security**
    - Noise pattern selection + rotation.
