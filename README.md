@@ -123,6 +123,10 @@ theme = "dark"
 - `docs/future-directions.md`: cross-domain synthesis and future directions.
 - `docs/hybrid-coordination.md`: optional hybrid coordination patterns.
 - `docs/pr-security.md`: security and abuse considerations for Predictive Rendezvous.
+- `docs/formalization.md`: minimal formal model for Predictive Rendezvous.
+- `docs/cross-protocol.md`: protocol-agnostic mapping across domains.
+- `docs/design-rationale.md`: why PR exists and what it does not solve.
+- `docs/index.md`: documentation index and phase status.
 - `SECURITY.md`: threat model and security checklist.
 - `TURN_GUIDE.md`: self-hosted TURN setup and config.
 - `CHANGELOG.md`: release history.
