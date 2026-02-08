@@ -11,5 +11,7 @@ members = [
   "crates/rift-metrics",
   "crates/rift-e2e",
   "bin/rift",
+  "crates/rift-wasm",
+  "bin/rift-ws-relay",
 ]
 resolver = "2"

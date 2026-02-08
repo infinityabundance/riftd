@@ -27,6 +27,10 @@ The repo contains a working voice + text mesh with:
 - Pairwise E2EE for chat + voice.
 - TUI client with call/session semantics.
 
+## Browser Prototype
+There is an early WebAssembly browser spike for text-only chat over a WebSocket relay.
+See `README.browser.md` for build and run instructions.
+
 ## Quick Start
 1. Build:
 ```bash
