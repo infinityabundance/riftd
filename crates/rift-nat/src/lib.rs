@@ -16,6 +16,15 @@ pub struct NatConfig {
     pub local_ports: Vec<u16>,
     pub stun_servers: Vec<SocketAddr>,
     pub stun_timeout_ms: u64,
+    pub punch_interval_ms: u64,
+    pub punch_timeout_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NatType {
+    Unknown,
+    OpenInternet,
+    Natted,
 }
 
 #[derive(Debug, Clone)]
@@ -88,6 +97,7 @@ pub async fn attempt_hole_punch(
         return Err(HolePunchError::NoRemoteAddrs);
     }
 
+    let punch_interval_ms = nat_cfg.punch_interval_ms;
     let done = Arc::new(AtomicBool::new(false));
     let (tx, mut rx) = mpsc::channel::<(UdpSocket, SocketAddr)>(1);
 
@@ -99,7 +109,7 @@ pub async fn attempt_hole_punch(
             if done.load(Ordering::Relaxed) {
                 return;
             }
-            let mut tick = interval(Duration::from_millis(200));
+            let mut tick = interval(Duration::from_millis(punch_interval_ms.max(50)));
             let mut buf = [0u8; 1024];
 
             loop {
@@ -135,7 +145,8 @@ pub async fn attempt_hole_punch(
         });
     }
 
-    let result = timeout(Duration::from_secs(5), rx.recv()).await;
+    let timeout_ms = nat_cfg.punch_timeout_ms.max(500);
+    let result = timeout(Duration::from_millis(timeout_ms), rx.recv()).await;
     match result {
         Ok(Some((socket, addr))) => {
             debug!(%addr, "hole punch success");
@@ -148,6 +159,18 @@ pub async fn attempt_hole_punch(
             Err(HolePunchError::Timeout)
         }
     }
+}
+
+pub fn detect_nat_type(local_addrs: &[SocketAddr], public_addrs: &[SocketAddr]) -> NatType {
+    if public_addrs.is_empty() {
+        return NatType::Unknown;
+    }
+    for public in public_addrs {
+        if local_addrs.iter().any(|local| local == public) {
+            return NatType::OpenInternet;
+        }
+    }
+    NatType::Natted
 }
 
 pub async fn gather_public_addrs(nat_cfg: &NatConfig) -> Result<Vec<SocketAddr>, StunError> {
