@@ -1208,7 +1208,9 @@ impl MeshInner {
         match payload {
             RiftPayload::Relay { target, inner } => {
                 if should_encrypt(&inner) {
-                    let encrypted = self.encrypt_inner(*inner, header, &key)?;
+                    let encrypted = RiftPayload::Encrypted(
+                        encrypt_payload_with_key(&key, header, &inner)?
+                    );
                     Ok(RiftPayload::Relay {
                         target,
                         inner: Box::new(encrypted),
@@ -1221,8 +1223,8 @@ impl MeshInner {
                 if !should_encrypt(&other) {
                     return Ok(other);
                 }
-                let encrypted = self.encrypt_inner(other, header, &key)?;
-                Ok(encrypted)
+                let encrypted = encrypt_payload_with_key(&key, header, &other)?;
+                Ok(RiftPayload::Encrypted(encrypted))
             }
         }
     }
@@ -1235,30 +1237,7 @@ impl MeshInner {
         let Some(key) = self.e2ee_key else {
             return Err(anyhow!("missing e2ee key"));
         };
-        let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
-        let aad = bincode::serialize(header)?;
-        let plaintext = cipher
-            .decrypt(Nonce::from_slice(&encrypted.nonce), Payload { msg: &encrypted.ciphertext, aad: &aad })
-            .map_err(|_| anyhow!("e2ee decrypt failed"))?;
-        let payload: RiftPayload = bincode::deserialize(&plaintext)?;
-        Ok(payload)
-    }
-
-    fn encrypt_inner(
-        &self,
-        payload: RiftPayload,
-        header: &RiftFrameHeader,
-        key: &[u8; 32],
-    ) -> Result<RiftPayload> {
-        let plaintext = bincode::serialize(&payload)?;
-        let mut nonce = [0u8; 12];
-        rand::rngs::OsRng.fill_bytes(&mut nonce);
-        let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
-        let aad = bincode::serialize(header)?;
-        let ciphertext = cipher
-            .encrypt(Nonce::from_slice(&nonce), Payload { msg: &plaintext, aad: &aad })
-            .map_err(|_| anyhow!("e2ee encrypt failed"))?;
-        Ok(RiftPayload::Encrypted(EncryptedPayload { nonce, ciphertext }))
+        decrypt_payload_with_key(&key, header, encrypted)
     }
 
     async fn update_link_stats(&self, peer_id: PeerId, seq: u32, sent_ms: u64) {
@@ -2277,6 +2256,90 @@ fn should_encrypt(payload: &RiftPayload) -> bool {
         RiftPayload::Relay { .. } => false,
         RiftPayload::Encrypted(_) => false,
         RiftPayload::Control(_) => false,
+    }
+}
+
+fn encrypt_payload_with_key(
+    key: &[u8; 32],
+    header: &RiftFrameHeader,
+    payload: &RiftPayload,
+) -> Result<EncryptedPayload> {
+    let plaintext = bincode::serialize(payload)?;
+    let mut nonce = [0u8; 12];
+    rand::rngs::OsRng.fill_bytes(&mut nonce);
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
+    let aad = bincode::serialize(header)?;
+    let ciphertext = cipher
+        .encrypt(Nonce::from_slice(&nonce), Payload { msg: &plaintext, aad: &aad })
+        .map_err(|_| anyhow!("e2ee encrypt failed"))?;
+    Ok(EncryptedPayload { nonce, ciphertext })
+}
+
+fn decrypt_payload_with_key(
+    key: &[u8; 32],
+    header: &RiftFrameHeader,
+    encrypted: EncryptedPayload,
+) -> Result<RiftPayload> {
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
+    let aad = bincode::serialize(header)?;
+    let plaintext = cipher
+        .decrypt(Nonce::from_slice(&encrypted.nonce), Payload { msg: &encrypted.ciphertext, aad: &aad })
+        .map_err(|_| anyhow!("e2ee decrypt failed"))?;
+    let payload: RiftPayload = bincode::deserialize(&plaintext)?;
+    Ok(payload)
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+
+    #[test]
+    fn e2ee_encrypt_decrypt_roundtrip() {
+        let key = [7u8; 32];
+        let header = RiftFrameHeader {
+            version: ProtocolVersion::V1,
+            stream: StreamKind::Voice,
+            flags: 0,
+            seq: 1,
+            timestamp: 123,
+            source: PeerId([1u8; 32]),
+            session: SessionId::NONE,
+        };
+        let payload = RiftPayload::Voice(VoicePacket {
+            codec_id: CodecId::Opus,
+            payload: vec![1, 2, 3, 4],
+        });
+
+        let encrypted = encrypt_payload_with_key(&key, &header, &payload).unwrap();
+        let decoded = decrypt_payload_with_key(&key, &header, encrypted).unwrap();
+        match decoded {
+            RiftPayload::Voice(pkt) => assert_eq!(pkt.payload, vec![1, 2, 3, 4]),
+            other => panic!("unexpected payload: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn e2ee_aad_mismatch_fails() {
+        let key = [9u8; 32];
+        let mut header = RiftFrameHeader {
+            version: ProtocolVersion::V1,
+            stream: StreamKind::Text,
+            flags: 0,
+            seq: 5,
+            timestamp: 999,
+            source: PeerId([2u8; 32]),
+            session: SessionId::NONE,
+        };
+        let payload = RiftPayload::Text(ChatMessage::new(
+            PeerId([3u8; 32]),
+            999,
+            "hi".to_string(),
+        ));
+
+        let encrypted = encrypt_payload_with_key(&key, &header, &payload).unwrap();
+        header.seq = 6;
+        let res = decrypt_payload_with_key(&key, &header, encrypted);
+        assert!(res.is_err());
     }
 }
 
