@@ -10,3 +10,10 @@ opus = "0.3"
 tokio = { version = "1", features = ["sync", "time"] }
 tracing = "0.1"
 rift-protocol = { path = "../rift-protocol" }
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "media_opus"
+harness = false
