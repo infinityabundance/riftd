@@ -6,8 +6,9 @@ edition = "2021"
 [dependencies]
 anyhow = "1"
 thiserror = "1"
-tokio = { version = "1", features = ["net", "sync", "time", "macros"] }
+tokio = { version = "1", features = ["net", "sync", "time", "macros", "rt"] }
 rift-core = { path = "../rift-core" }
 rift-metrics = { path = "../rift-metrics" }
 tracing = "0.1"
 rand = "0.8"
+get_if_addrs = "0.5"

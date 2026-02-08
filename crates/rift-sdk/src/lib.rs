@@ -24,7 +24,9 @@ use rift_media::{
     OpusEncoder,
 };
 use rift_mesh::{Mesh, MeshConfig, MeshEvent, MeshHandle};
-use rift_nat::{attempt_hole_punch, gather_public_addrs, NatConfig, PeerEndpoint};
+use rift_nat::{
+    attempt_hole_punch, gather_local_candidates, gather_public_addrs, NatConfig, PeerEndpoint,
+};
 use rift_protocol::{CallState, Capabilities, QosProfile, SessionId};
 use hkdf::Hkdf;
 use sha2::Sha256;
@@ -391,9 +393,11 @@ impl RiftHandle {
         let mut known_peers = cfg.network.known_peers.clone();
         if internet && known_peers.is_empty() {
             if let Some(nat_cfg) = nat_cfg.as_ref() {
-                if let Ok(public_addrs) = gather_public_addrs(nat_cfg).await {
-                    if !public_addrs.is_empty() {
-                        known_peers = public_addrs;
+                if !nat_cfg.stun_servers.is_empty() {
+                    if let Ok(public_addrs) = gather_public_addrs(nat_cfg).await {
+                        if !public_addrs.is_empty() {
+                            known_peers = public_addrs;
+                        }
                     }
                 }
             }
@@ -401,7 +405,22 @@ impl RiftHandle {
         let invite_for_key = if let Some(invite_str) = &cfg.network.invite {
             Some(decode_invite(invite_str).map_err(|e| RiftError::Other(format!("{e}")))?)
         } else if internet {
-            Some(generate_invite(name, password, known_peers.clone()))
+            let mut candidates = gather_local_candidates(cfg.listen_port);
+            if let Some(nat_cfg) = nat_cfg.as_ref() {
+                if !nat_cfg.stun_servers.is_empty() {
+                    if let Ok(public_addrs) = gather_public_addrs(nat_cfg).await {
+                        candidates.extend(public_addrs);
+                    }
+                }
+            }
+            candidates.sort();
+            candidates.dedup();
+            Some(generate_invite(
+                name,
+                password,
+                known_peers.clone(),
+                candidates,
+            ))
         } else {
             None
         };
