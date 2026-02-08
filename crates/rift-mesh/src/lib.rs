@@ -367,6 +367,7 @@ impl Mesh {
         MeshInner::spawn_rekey(inner.clone());
         MeshInner::spawn_scaling(inner.clone());
         MeshInner::spawn_pinger(inner.clone());
+        MeshInner::spawn_nat_refresh(inner.clone());
 
         let mesh = Self {
             inner,
@@ -796,6 +797,56 @@ impl MeshInner {
                     let _ = inner
                         .send_control_to_peer(peer_id, ping, SessionId::NONE)
                         .await;
+                }
+            }
+        });
+    }
+
+    fn spawn_nat_refresh(inner: Arc<Self>) {
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(30));
+            loop {
+                tick.tick().await;
+                let nat_cfg = { inner.nat_cfg.lock().await.clone() };
+                let Some(nat_cfg) = nat_cfg else {
+                    continue;
+                };
+                let local_addr = {
+                    let sockets = inner.sockets.lock().await;
+                    sockets.first().and_then(|sock| sock.local_addr().ok())
+                };
+                let Ok(addrs) = gather_public_addrs(&nat_cfg).await else {
+                    continue;
+                };
+                let mut combined = addrs.clone();
+                if let Some(local) = local_addr {
+                    combined.push(local);
+                }
+                combined.sort();
+                combined.dedup();
+                {
+                    let mut self_candidates = inner.self_candidates.lock().await;
+                    *self_candidates = combined;
+                }
+                let ice_candidates = MeshInner::build_ice_candidates(local_addr, &addrs);
+                {
+                    let mut self_ice = inner.self_ice_candidates.lock().await;
+                    *self_ice = ice_candidates.clone();
+                }
+                let peers: Vec<PeerId> = {
+                    let peers_by_id = inner.peers_by_id.lock().await;
+                    peers_by_id.keys().copied().collect()
+                };
+                for peer_id in peers {
+                    if peer_id == inner.identity.peer_id {
+                        continue;
+                    }
+                    let msg = ControlMessage::IceCandidates {
+                        peer_id: inner.identity.peer_id,
+                        session: SessionId::NONE,
+                        candidates: ice_candidates.clone(),
+                    };
+                    let _ = inner.send_control_to_peer(peer_id, msg, SessionId::NONE).await;
                 }
             }
         });
