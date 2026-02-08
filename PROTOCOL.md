@@ -108,6 +108,22 @@ Call/session state over the mesh:
 - `Mute { session, from, muted }`
 - `SessionInfo { session, participants }`
 
+### GroupControl
+Group call coordination (topology + streams):
+- `Join { session, peer_id }`
+- `Leave { session, peer_id }`
+- `StreamPublish { session, stream_id, from, codec }`
+- `StreamSubscribe { session, stream_id, from }`
+- `Topology { session, mode }`
+
+### GroupMode
+```
+GroupMode {
+  Mesh,                 // full mesh
+  Hybrid { forwarder }  // send voice to forwarder; forwarder fans out
+}
+```
+
 ### Relay
 Relayed messages:
 - `Relay { target, inner }`

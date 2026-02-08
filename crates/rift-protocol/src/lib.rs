@@ -145,6 +145,35 @@ pub enum CallState {
     Ended,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GroupMode {
+    Mesh,
+    Hybrid { forwarder: PeerId },
+}
+
+pub type StreamId = u64;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum GroupControl {
+    Join { session: SessionId, peer_id: PeerId },
+    Leave { session: SessionId, peer_id: PeerId },
+    StreamPublish {
+        session: SessionId,
+        stream_id: StreamId,
+        from: PeerId,
+        codec: CodecId,
+    },
+    StreamSubscribe {
+        session: SessionId,
+        stream_id: StreamId,
+        from: PeerId,
+    },
+    Topology {
+        session: SessionId,
+        mode: GroupMode,
+    },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CallControl {
     Invite {
@@ -235,6 +264,7 @@ pub enum ControlMessage {
     CapabilitiesUpdate(Capabilities),
     PeerList { peers: Vec<PeerInfo> },
     Call(CallControl),
+    Group(GroupControl),
     E2eeInit {
         session: SessionId,
         from: PeerId,
@@ -298,6 +328,31 @@ pub enum RiftPayload {
     Text(ChatMessage),
     Relay { target: PeerId, inner: Box<RiftPayload> },
     Encrypted(EncryptedPayload),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn group_control_roundtrip() {
+        let session = SessionId::random();
+        let msg = ControlMessage::Group(GroupControl::Topology {
+            session,
+            mode: GroupMode::Hybrid {
+                forwarder: PeerId([7u8; 32]),
+            },
+        });
+        let bytes = bincode::serialize(&msg).expect("serialize");
+        let decoded: ControlMessage = bincode::deserialize(&bytes).expect("deserialize");
+        match decoded {
+            ControlMessage::Group(GroupControl::Topology { session: s, mode }) => {
+                assert_eq!(s, session);
+                assert!(matches!(mode, GroupMode::Hybrid { .. }));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
 }
 
 #[derive(Debug, Error)]
