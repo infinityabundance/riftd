@@ -1248,7 +1248,7 @@ impl MeshInner {
             }
         };
         Capabilities {
-            supported_versions: vec![ProtocolVersion::V1],
+            supported_versions: vec![ProtocolVersion::V2, ProtocolVersion::V1],
             audio_codecs: codecs,
             features,
             max_bitrate: Some(96_000),
