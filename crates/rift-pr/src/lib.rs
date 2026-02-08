@@ -5,6 +5,7 @@ pub mod metrics;
 pub mod probe;
 pub mod runner;
 pub mod schedule;
+pub mod sim;
 pub mod strategy;
 pub mod time;
 
