@@ -46,6 +46,7 @@ Streams are used for multiplexing and future extensions.
 ### ControlMessage
 Core control messages:
 - `Join { peer_id, display_name }`
+- `Hello { peer_id, public_key, capabilities, candidates }`
 - `Leave { peer_id }`
 - `PeerState { peer_id, relay_capable }`
 - `PeerList { peers }`
@@ -53,6 +54,16 @@ Core control messages:
 - `RouteInfo { from, to, relayed }`
 - `Capabilities(Capabilities)`
 - `Call(CallControl)`
+
+### PeerInfo
+```
+PeerInfo {
+  peer_id: PeerId,
+  addr: SocketAddr,
+  addrs: Vec<SocketAddr>, // candidate endpoints (public + local)
+  relay_capable: bool
+}
+```
 
 ### ChatMessage
 ```

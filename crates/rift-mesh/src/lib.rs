@@ -10,7 +10,7 @@ use tokio_stream::StreamExt;
 
 use rift_core::{Identity, Invite, PeerId, MessageId};
 use rift_discovery::{discover_peers, start_mdns_advertisement, DiscoveryConfig, MdnsHandle};
-use rift_nat::{attempt_hole_punch, NatConfig, PeerEndpoint};
+use rift_nat::{attempt_hole_punch, gather_public_addrs, NatConfig, PeerEndpoint};
 use rift_protocol::{
     decode_frame, encode_frame, CallControl, CallState, Capabilities, ChatMessage, CodecId,
     ControlMessage, FeatureFlag, PeerInfo, ProtocolVersion, QosProfile, RiftFrameHeader,
@@ -108,6 +108,8 @@ struct MeshInner {
     preferred_features: Mutex<Vec<FeatureFlag>>,
     routes: Mutex<HashMap<PeerId, PeerRoute>>,
     peer_addrs: Mutex<HashMap<PeerId, SocketAddr>>,
+    peer_candidates: Mutex<HashMap<PeerId, Vec<SocketAddr>>>,
+    self_candidates: Mutex<Vec<SocketAddr>>,
     relay_candidates: Mutex<HashMap<PeerId, PeerId>>,
     connections: Mutex<HashMap<SocketAddr, PeerConnection>>,
     pending: Mutex<HashMap<PendingKey, PendingHandshake>>,
@@ -319,6 +321,8 @@ impl Mesh {
             routes: Mutex::new(HashMap::new()),
             group_codec: Mutex::new(CodecId::Opus),
             peer_addrs: Mutex::new(HashMap::new()),
+            peer_candidates: Mutex::new(HashMap::new()),
+            self_candidates: Mutex::new(Vec::new()),
             relay_candidates: Mutex::new(HashMap::new()),
             connections: Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
@@ -377,6 +381,14 @@ impl Mesh {
     pub async fn enable_nat(&mut self, nat_cfg: NatConfig) {
         let mut cfg = self.inner.nat_cfg.lock().await;
         *cfg = Some(nat_cfg);
+        drop(cfg);
+        let nat_cfg = { self.inner.nat_cfg.lock().await.clone() };
+        if let Some(nat_cfg) = nat_cfg {
+            if let Ok(addrs) = gather_public_addrs(&nat_cfg).await {
+                let mut self_candidates = self.inner.self_candidates.lock().await;
+                *self_candidates = addrs;
+            }
+        }
     }
 
     pub async fn join_invite(&mut self, invite: Invite, nat_cfg: NatConfig) -> Result<()> {
@@ -562,26 +574,33 @@ impl MeshInner {
                 let Some(nat_cfg) = nat_cfg else {
                     continue;
                 };
-                let relayed: Vec<(PeerId, SocketAddr)> = {
+                let relayed: Vec<(PeerId, Vec<SocketAddr>)> = {
                     let routes = inner.routes.lock().await;
                     let addrs = inner.peer_addrs.lock().await;
+                    let candidates = inner.peer_candidates.lock().await;
                     routes
                         .iter()
                         .filter_map(|(peer_id, route)| match route {
-                            PeerRoute::Relayed { .. } => addrs
-                                .get(peer_id)
-                                .copied()
-                                .map(|addr| (*peer_id, addr)),
+                            PeerRoute::Relayed { .. } => {
+                                if let Some(cands) = candidates.get(peer_id) {
+                                    Some((*peer_id, cands.clone()))
+                                } else {
+                                    addrs
+                                        .get(peer_id)
+                                        .copied()
+                                        .map(|addr| (*peer_id, vec![addr]))
+                                }
+                            }
                             _ => None,
                         })
                         .collect()
                 };
 
-                for (peer_id, addr) in relayed {
+                for (peer_id, addrs) in relayed {
                     let endpoint = PeerEndpoint {
                         peer_id,
-                        external_addrs: vec![addr],
-                        punch_ports: vec![addr.port()],
+                        external_addrs: addrs.clone(),
+                        punch_ports: addrs.iter().map(|addr| addr.port()).collect(),
                     };
                     if let Ok((socket, remote)) = attempt_hole_punch(&nat_cfg, &endpoint).await {
                         if let Ok(socket_idx) = inner.add_socket(socket).await {
@@ -805,12 +824,25 @@ impl MeshInner {
         let peers: Vec<PeerInfo> = {
             let peers_by_id = self.peers_by_id.lock().await;
             let peer_caps = self.peer_caps.lock().await;
+            let peer_candidates = self.peer_candidates.lock().await;
             peers_by_id
                 .iter()
-                .map(|(peer_id, addr)| PeerInfo {
-                    peer_id: *peer_id,
-                    addr: *addr,
-                    relay_capable: *peer_caps.get(peer_id).unwrap_or(&false),
+                .map(|(peer_id, addr)| {
+                    let mut addrs = peer_candidates
+                        .get(peer_id)
+                        .cloned()
+                        .unwrap_or_else(|| vec![*addr]);
+                    if addrs.is_empty() {
+                        addrs.push(*addr);
+                    }
+                    addrs.sort();
+                    addrs.dedup();
+                    PeerInfo {
+                        peer_id: *peer_id,
+                        addr: *addr,
+                        addrs,
+                        relay_capable: *peer_caps.get(peer_id).unwrap_or(&false),
+                    }
                 })
                 .collect()
         };
@@ -905,10 +937,15 @@ impl MeshInner {
     async fn send_hello(&self, addr: SocketAddr) -> Result<()> {
         let caps = self.default_capabilities().await;
         let public_key = self.identity.keypair.public.to_bytes().to_vec();
+        let candidates = {
+            let self_candidates = self.self_candidates.lock().await;
+            self_candidates.clone()
+        };
         let msg = RiftPayload::Control(ControlMessage::Hello {
             peer_id: self.identity.peer_id,
             public_key,
             capabilities: caps,
+            candidates,
         });
         let seq = self.next_control_seq().await;
         self.send_payload(addr, msg, seq, now_timestamp(), SessionId::NONE)
@@ -1262,6 +1299,11 @@ impl MeshInner {
                 let mut peer_addrs = self.peer_addrs.lock().await;
                 peer_addrs.insert(peer_id, addr);
                 drop(peer_addrs);
+                let mut peer_candidates = self.peer_candidates.lock().await;
+                peer_candidates
+                    .entry(peer_id)
+                    .or_insert_with(|| vec![addr]);
+                drop(peer_candidates);
 
                 let mut routes = self.routes.lock().await;
                 let upgraded = matches!(routes.get(&peer_id), Some(PeerRoute::Relayed { .. }));
@@ -1301,10 +1343,14 @@ impl MeshInner {
                 peer_caps.insert(peer_id, relay_capable);
                 drop(peer_caps);
             }
-            RiftPayload::Control(ControlMessage::Hello { peer_id, public_key, capabilities }) => {
+            RiftPayload::Control(ControlMessage::Hello { peer_id, public_key, capabilities, candidates }) => {
                 {
                     let mut keys = self.peer_public_keys.lock().await;
                     keys.insert(peer_id, public_key.clone());
+                }
+                if !candidates.is_empty() {
+                    let mut peer_candidates = self.peer_candidates.lock().await;
+                    peer_candidates.insert(peer_id, candidates);
                 }
                 let _ = self
                     .events_tx
@@ -1345,6 +1391,9 @@ impl MeshInner {
                 let mut peer_addrs = self.peer_addrs.lock().await;
                 peer_addrs.remove(&peer_id);
                 drop(peer_addrs);
+                let mut peer_candidates = self.peer_candidates.lock().await;
+                peer_candidates.remove(&peer_id);
+                drop(peer_candidates);
                 let mut relay_candidates = self.relay_candidates.lock().await;
                 relay_candidates.remove(&peer_id);
                 drop(relay_candidates);
@@ -1481,24 +1530,35 @@ impl MeshInner {
             let mut peer_caps = self.peer_caps.lock().await;
             peer_caps.insert(peer.peer_id, peer.relay_capable);
             drop(peer_caps);
+            let mut addrs = if peer.addrs.is_empty() {
+                vec![peer.addr]
+            } else {
+                peer.addrs.clone()
+            };
+            addrs.sort();
+            addrs.dedup();
+            let primary_addr = addrs[0];
             let mut peer_addrs = self.peer_addrs.lock().await;
-            peer_addrs.insert(peer.peer_id, peer.addr);
+            peer_addrs.insert(peer.peer_id, primary_addr);
             drop(peer_addrs);
+            let mut peer_candidates = self.peer_candidates.lock().await;
+            peer_candidates.insert(peer.peer_id, addrs.clone());
+            drop(peer_candidates);
 
             if already {
                 continue;
             }
             let already = {
                 let connections = self.connections.lock().await;
-                connections.contains_key(&peer.addr)
+                connections.contains_key(&primary_addr)
             };
             if already {
                 continue;
             }
             let endpoint = PeerEndpoint {
                 peer_id: PeerId([0u8; 32]),
-                external_addrs: vec![peer.addr],
-                punch_ports: vec![peer.addr.port()],
+                external_addrs: addrs.clone(),
+                punch_ports: addrs.iter().map(|addr| addr.port()).collect(),
             };
             if let Ok((socket, remote)) = attempt_hole_punch(&nat_cfg, &endpoint).await {
                 if let Ok(socket_idx) = self.add_socket(socket).await {
@@ -1742,6 +1802,9 @@ impl MeshInner {
         let mut peer_addrs = self.peer_addrs.lock().await;
         peer_addrs.remove(&peer_id);
         drop(peer_addrs);
+        let mut peer_candidates = self.peer_candidates.lock().await;
+        peer_candidates.remove(&peer_id);
+        drop(peer_candidates);
         let _ = self.events_tx.send(MeshEvent::PeerLeft(peer_id)).await;
     }
 

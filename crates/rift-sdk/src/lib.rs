@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::net::SocketAddr;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex as StdMutex,
@@ -24,7 +24,7 @@ use rift_media::{
     OpusEncoder,
 };
 use rift_mesh::{Mesh, MeshConfig, MeshEvent, MeshHandle};
-use rift_nat::{attempt_hole_punch, NatConfig, PeerEndpoint};
+use rift_nat::{attempt_hole_punch, gather_public_addrs, NatConfig, PeerEndpoint};
 use rift_protocol::{CallState, Capabilities, QosProfile, SessionId};
 use hkdf::Hkdf;
 use sha2::Sha256;
@@ -73,6 +73,10 @@ pub struct NetworkConfigSdk {
     pub local_ports: Option<Vec<u16>>,
     pub known_peers: Vec<std::net::SocketAddr>,
     pub invite: Option<String>,
+    #[serde(default)]
+    pub stun_servers: Vec<String>,
+    #[serde(default)]
+    pub stun_timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -146,6 +150,11 @@ impl Default for NetworkConfigSdk {
             local_ports: None,
             known_peers: Vec::new(),
             invite: None,
+            stun_servers: vec![
+                "stun.l.google.com:19302".to_string(),
+                "stun1.l.google.com:19302".to_string(),
+            ],
+            stun_timeout_ms: Some(800),
         }
     }
 }
@@ -371,12 +380,25 @@ impl RiftHandle {
         let security_handle = handle.clone();
 
         if internet {
-            let nat_cfg = default_nat_config(cfg.listen_port, cfg.network.local_ports.clone());
+            let nat_cfg = default_nat_config(
+                cfg.listen_port,
+                cfg.network.local_ports.clone(),
+                cfg.network.stun_servers.clone(),
+                cfg.network.stun_timeout_ms,
+            );
             mesh.enable_nat(nat_cfg.clone()).await;
+            let mut known_peers = cfg.network.known_peers.clone();
+            if known_peers.is_empty() {
+                if let Ok(public_addrs) = gather_public_addrs(&nat_cfg).await {
+                    if !public_addrs.is_empty() {
+                        known_peers = public_addrs;
+                    }
+                }
+            }
             let invite = if let Some(invite_str) = &cfg.network.invite {
                 decode_invite(invite_str).map_err(|e| RiftError::Other(format!("{e}")))?
-            } else if !cfg.network.known_peers.is_empty() {
-                generate_invite(name, password, cfg.network.known_peers.clone())
+            } else if !known_peers.is_empty() {
+                generate_invite(name, password, known_peers)
             } else {
                 Invite {
                     channel_name: name.to_string(),
@@ -441,11 +463,20 @@ impl RiftHandle {
                 .map_err(|e| RiftError::Other(format!("{e}")))?;
 
             let channel_id = rift_core::ChannelId::from_channel(&channel, password);
-            let addrs = local_ipv4_addrs()
-                .map_err(|e| RiftError::Other(format!("{e}")))?
-                .into_iter()
-                .map(|ip| SocketAddr::new(ip, cfg.listen_port))
-                .collect::<Vec<_>>();
+            let nat_cfg = default_nat_config(
+                cfg.listen_port,
+                cfg.network.local_ports.clone(),
+                cfg.network.stun_servers.clone(),
+                cfg.network.stun_timeout_ms,
+            );
+            let addrs = match gather_public_addrs(&nat_cfg).await {
+                Ok(public_addrs) if !public_addrs.is_empty() => public_addrs,
+                _ => local_ipv4_addrs()
+                    .map_err(|e| RiftError::Other(format!("{e}")))?
+                    .into_iter()
+                    .map(|ip| SocketAddr::new(ip, cfg.listen_port))
+                    .collect::<Vec<_>>(),
+            };
             let info = PeerEndpointInfo {
                 peer_id: self.local_peer_id,
                 addrs,
@@ -466,7 +497,12 @@ impl RiftHandle {
 
             let lookup_handle = handle_dht.clone();
             let mesh_handle = handle.clone();
-            let nat_cfg = default_nat_config(self.config.listen_port, self.config.network.local_ports.clone());
+            let nat_cfg = default_nat_config(
+                self.config.listen_port,
+                self.config.network.local_ports.clone(),
+                self.config.network.stun_servers.clone(),
+                self.config.network.stun_timeout_ms,
+            );
             tokio::spawn(async move {
                 let mut tick = tokio::time::interval(Duration::from_secs(12));
                 loop {
@@ -977,14 +1013,23 @@ fn peer_to_stream_id(peer: &PeerId) -> u64 {
     u64::from_le_bytes(bytes)
 }
 
-fn default_nat_config(port: u16, ports: Option<Vec<u16>>) -> NatConfig {
+fn default_nat_config(
+    port: u16,
+    ports: Option<Vec<u16>>,
+    stun_servers: Vec<String>,
+    stun_timeout_ms: Option<u64>,
+) -> NatConfig {
     let mut local_ports = ports.unwrap_or_default();
     if local_ports.is_empty() {
         local_ports.push(port);
         local_ports.push(port.saturating_add(1));
         local_ports.push(port.saturating_add(2));
     }
-    NatConfig { local_ports }
+    NatConfig {
+        local_ports,
+        stun_servers: parse_socket_addrs(&stun_servers),
+        stun_timeout_ms: stun_timeout_ms.unwrap_or(800),
+    }
 }
 
 fn derive_auth_token(secret: &str, channel: &str) -> Vec<u8> {
@@ -1159,7 +1204,19 @@ fn parse_socket_addr(input: &str) -> Option<SocketAddr> {
 }
 
 fn parse_socket_addrs(inputs: &[String]) -> Vec<SocketAddr> {
-    inputs.iter().filter_map(|s| parse_socket_addr(s)).collect()
+    let mut out = Vec::new();
+    for input in inputs {
+        if let Ok(addr) = input.parse::<SocketAddr>() {
+            out.push(addr);
+            continue;
+        }
+        if let Ok(mut iter) = input.to_socket_addrs() {
+            if let Some(addr) = iter.next() {
+                out.push(addr);
+            }
+        }
+    }
+    out
 }
 
 #[cfg(feature = "ffi")]

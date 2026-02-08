@@ -22,6 +22,8 @@ use serde::Deserialize;
 // prefer_p2p = true
 // relay = false
 // local_ports = [7777, 7778, 7779]
+// stun_servers = ["stun.l.google.com:19302", "stun1.l.google.com:19302"]
+// stun_timeout_ms = 800
 //
 // [ui]
 // theme = "dark"
@@ -108,6 +110,8 @@ pub struct NetworkSection {
     pub prefer_p2p: Option<bool>,
     pub relay: Option<bool>,
     pub local_ports: Option<Vec<u16>>,
+    pub stun_servers: Option<Vec<String>>,
+    pub stun_timeout_ms: Option<u64>,
 }
 
 impl Default for NetworkSection {
@@ -116,6 +120,8 @@ impl Default for NetworkSection {
             prefer_p2p: Some(true),
             relay: Some(false),
             local_ports: None,
+            stun_servers: None,
+            stun_timeout_ms: Some(800),
         }
     }
 }
