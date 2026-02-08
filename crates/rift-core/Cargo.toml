@@ -10,7 +10,11 @@ bincode = "1"
 dirs = "5"
 ed25519-dalek = { version = "1", features = ["rand"] }
 hex = "0.4"
+hkdf = "0.12"
 rand = "0.7"
+rand_core = "0.6"
 serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
 snow = "0.9"
 thiserror = "1"
+x25519-dalek = "1"

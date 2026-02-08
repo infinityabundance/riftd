@@ -220,6 +220,18 @@ pub enum ControlMessage {
     CapabilitiesUpdate(Capabilities),
     PeerList { peers: Vec<PeerInfo> },
     Call(CallControl),
+    E2eeInit {
+        session: SessionId,
+        from: PeerId,
+        public_key: [u8; 32],
+        signature: Vec<u8>,
+    },
+    E2eeResp {
+        session: SessionId,
+        from: PeerId,
+        public_key: [u8; 32],
+        signature: Vec<u8>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

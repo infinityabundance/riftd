@@ -20,7 +20,12 @@ It is intended to guide audits and prevent regressions as the protocol evolves.
 ### Trust Assumptions
 - No central authority; TOFU + optional shared secret for access.
 - Noise provides transport-level authenticated encryption.
-- Optional E2EE provides end-to-end confidentiality for chat/voice.
+- Pairwise E2EE provides end-to-end confidentiality for chat/voice.
+
+### Limitations (Current)
+- No post-compromise security (PCS). Compromise of a live endpoint can reveal session keys.
+- No deniability or metadata protection beyond transport encryption.
+- Group calls still rely on pairwise keys per peer (no MLS yet).
 
 ### Out of Scope (for now)
 - Full PKI or federated identity.
@@ -43,7 +48,8 @@ It is intended to guide audits and prevent regressions as the protocol evolves.
 
 ### End-to-End Encryption
 - [ ] E2EE wraps chat and voice payloads (not control/relay headers).
-- [ ] E2EE key derived from shared secret / invite / password.
+- [ ] Pairwise E2EE uses per-session X25519 with Ed25519-signed keys.
+- [ ] Payloads are encrypted with AES-256-GCM and authenticated AAD.
 - [ ] AAD binds ciphertext to header (seq/timestamp/source/session).
 - [ ] Decrypt failures are logged and do not crash the node.
 

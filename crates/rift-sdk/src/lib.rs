@@ -221,6 +221,7 @@ pub enum RiftEvent {
     AudioBitrate { bitrate: u32 },
     StatsUpdate { peer: PeerId, stats: LinkStats, global: GlobalStats },
     RouteUpdated { peer: PeerId, route: RouteKind },
+    PeerFingerprint { peer: PeerId, fingerprint: String },
     SecurityNotice { message: String },
     VoiceFrame { peer: PeerId, samples: Vec<i16> },
 }
@@ -1209,6 +1210,10 @@ async fn handle_peer_identity(
     let computed = rift_core::peer_id_from_public_key_bytes(public_key)
         .map_err(|e| RiftError::Other(format!("{e}")))?;
     let fingerprint = fingerprint_key(public_key);
+    let _ = event_tx.send(RiftEvent::PeerFingerprint {
+        peer: peer_id,
+        fingerprint: fingerprint.clone(),
+    });
     let known_hosts = resolve_known_hosts_path(cfg)?;
     let mut known = load_known_hosts(&known_hosts);
 

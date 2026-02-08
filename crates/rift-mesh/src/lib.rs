@@ -9,6 +9,10 @@ use tokio::sync::{mpsc, Mutex};
 use tokio_stream::StreamExt;
 
 use rift_core::{Identity, Invite, PeerId, MessageId};
+use rift_core::e2ee::{
+    derive_e2ee_shared_key, ed25519_public_from_bytes, generate_e2ee_keypair,
+    public_key_from_bytes, sign_e2ee_public, verify_e2ee_public,
+};
 use rift_discovery::{discover_peers, start_mdns_advertisement, DiscoveryConfig, MdnsHandle};
 use rift_nat::{attempt_hole_punch, gather_public_addrs, NatConfig, PeerEndpoint};
 use rift_protocol::{
@@ -17,8 +21,8 @@ use rift_protocol::{
     ProtocolVersion, QosProfile, RiftFrameHeader, RiftPayload, SessionId, StreamKind, VoicePacket,
 };
 use rift_metrics as metrics;
-use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce, KeyInit};
-use chacha20poly1305::aead::{Aead, Payload};
+use aes_gcm::{Aes256Gcm, Key, Nonce, KeyInit};
+use aes_gcm::aead::{Aead, Payload};
 use rand::RngCore;
 
 const MAX_PACKET: usize = 2048;
@@ -139,6 +143,8 @@ struct MeshInner {
     group_codec: Mutex<CodecId>,
     candidate_attempts: Mutex<HashMap<PeerId, tokio::time::Instant>>,
     e2ee_key: Option<[u8; 32]>,
+    e2ee_keys: Mutex<HashMap<(PeerId, SessionId), [u8; 32]>>,
+    e2ee_pending: Mutex<HashMap<(PeerId, SessionId), rift_core::e2ee::E2eeKeypair>>,
     rekey_interval_secs: Option<u64>,
     max_direct_peers: Option<usize>,
 }
@@ -357,6 +363,8 @@ impl Mesh {
             channel_session,
             candidate_attempts: Mutex::new(HashMap::new()),
             e2ee_key: config.e2ee_key,
+            e2ee_keys: Mutex::new(HashMap::new()),
+            e2ee_pending: Mutex::new(HashMap::new()),
             rekey_interval_secs: config.rekey_interval_secs,
             max_direct_peers: config.max_direct_peers,
         });
@@ -1052,7 +1060,14 @@ impl MeshInner {
             let auth = ControlMessage::Auth { token };
             let seq = self.next_control_seq().await;
             let _ = self
-                .send_payload(addr, RiftPayload::Control(auth), seq, now_timestamp(), SessionId::NONE)
+                .send_payload(
+                    addr,
+                    RiftPayload::Control(auth),
+                    seq,
+                    now_timestamp(),
+                    SessionId::NONE,
+                    None,
+                )
                 .await;
         }
 
@@ -1067,6 +1082,7 @@ impl MeshInner {
             seq,
             now_timestamp(),
             SessionId::NONE,
+            None,
         )
         .await?;
 
@@ -1081,6 +1097,7 @@ impl MeshInner {
             seq,
             now_timestamp(),
             SessionId::NONE,
+            None,
         )
         .await?;
 
@@ -1117,7 +1134,7 @@ impl MeshInner {
         };
         let msg = RiftPayload::Control(ControlMessage::PeerList { peers });
         let seq = self.next_control_seq().await;
-        self.send_payload(addr, msg, seq, now_timestamp(), SessionId::NONE)
+        self.send_payload(addr, msg, seq, now_timestamp(), SessionId::NONE, None)
             .await
     }
 
@@ -1217,7 +1234,7 @@ impl MeshInner {
             candidates,
         });
         let seq = self.next_control_seq().await;
-        self.send_payload(addr, msg, seq, now_timestamp(), SessionId::NONE)
+        self.send_payload(addr, msg, seq, now_timestamp(), SessionId::NONE, None)
             .await
     }
 
@@ -1298,17 +1315,143 @@ impl MeshInner {
             .await
     }
 
-    fn maybe_encrypt_payload(
+    async fn start_e2ee(&self, peer_id: PeerId, session: SessionId) -> Result<()> {
+        if peer_id == self.identity.peer_id {
+            return Ok(());
+        }
+        {
+            let keys = self.e2ee_keys.lock().await;
+            if keys.contains_key(&(peer_id, session)) {
+                return Ok(());
+            }
+        }
+        {
+            let pending = self.e2ee_pending.lock().await;
+            if pending.contains_key(&(peer_id, session)) {
+                return Ok(());
+            }
+        }
+        let peer_public = {
+            let keys = self.peer_public_keys.lock().await;
+            keys.get(&peer_id).cloned()
+        };
+        let Some(peer_public) = peer_public else {
+            return Ok(());
+        };
+        let Some(_peer_public) = ed25519_public_from_bytes(&peer_public) else {
+            return Ok(());
+        };
+        let keypair = generate_e2ee_keypair();
+        let signature = sign_e2ee_public(&self.identity, &session.0, &keypair.public);
+        let public_key = keypair.public.to_bytes();
+        {
+            let mut pending = self.e2ee_pending.lock().await;
+            pending.insert((peer_id, session), keypair);
+        }
+        let msg = ControlMessage::E2eeInit {
+            session,
+            from: self.identity.peer_id,
+            public_key,
+            signature,
+        };
+        self.send_control_to_peer(peer_id, msg, session).await?;
+        tracing::info!(peer = %peer_id, session = ?session, "e2ee init sent");
+        Ok(())
+    }
+
+    async fn handle_e2ee_init(
+        &self,
+        peer_id: PeerId,
+        session: SessionId,
+        public_key: [u8; 32],
+        signature: Vec<u8>,
+    ) -> Result<()> {
+        let peer_public = {
+            let keys = self.peer_public_keys.lock().await;
+            keys.get(&peer_id).cloned()
+        };
+        let Some(peer_public) = peer_public else {
+            return Ok(());
+        };
+        let Some(peer_public) = ed25519_public_from_bytes(&peer_public) else {
+            return Ok(());
+        };
+        let remote_public = public_key_from_bytes(public_key);
+        if !verify_e2ee_public(&peer_public, &session.0, &remote_public, &signature) {
+            tracing::warn!(peer = %peer_id, "e2ee init signature invalid");
+            return Ok(());
+        }
+        let keypair = generate_e2ee_keypair();
+        let shared = derive_e2ee_shared_key(&keypair.secret, &remote_public, &session.0);
+        {
+            let mut keys = self.e2ee_keys.lock().await;
+            keys.insert((peer_id, session), shared);
+        }
+        let response = ControlMessage::E2eeResp {
+            session,
+            from: self.identity.peer_id,
+            public_key: keypair.public.to_bytes(),
+            signature: sign_e2ee_public(&self.identity, &session.0, &keypair.public),
+        };
+        self.send_control_to_peer(peer_id, response, session).await?;
+        tracing::info!(peer = %peer_id, session = ?session, "e2ee response sent");
+        Ok(())
+    }
+
+    async fn handle_e2ee_resp(
+        &self,
+        peer_id: PeerId,
+        session: SessionId,
+        public_key: [u8; 32],
+        signature: Vec<u8>,
+    ) -> Result<()> {
+        let pending = {
+            let mut pending = self.e2ee_pending.lock().await;
+            pending.remove(&(peer_id, session))
+        };
+        let Some(pending) = pending else {
+            return Ok(());
+        };
+        let peer_public = {
+            let keys = self.peer_public_keys.lock().await;
+            keys.get(&peer_id).cloned()
+        };
+        let Some(peer_public) = peer_public else {
+            return Ok(());
+        };
+        let Some(peer_public) = ed25519_public_from_bytes(&peer_public) else {
+            return Ok(());
+        };
+        let remote_public = public_key_from_bytes(public_key);
+        if !verify_e2ee_public(&peer_public, &session.0, &remote_public, &signature) {
+            tracing::warn!(peer = %peer_id, "e2ee response signature invalid");
+            return Ok(());
+        }
+        let shared = derive_e2ee_shared_key(&pending.secret, &remote_public, &session.0);
+        {
+            let mut keys = self.e2ee_keys.lock().await;
+            keys.insert((peer_id, session), shared);
+        }
+        tracing::info!(peer = %peer_id, session = ?session, "e2ee key established");
+        Ok(())
+    }
+
+    async fn maybe_encrypt_payload(
         &self,
         payload: RiftPayload,
         header: &RiftFrameHeader,
+        peer_id: Option<PeerId>,
+        session: SessionId,
     ) -> Result<RiftPayload> {
-        let Some(key) = self.e2ee_key else {
-            return Ok(payload);
-        };
         match payload {
             RiftPayload::Relay { target, inner } => {
                 if should_encrypt(&inner) {
+                    let key = {
+                        let keys = self.e2ee_keys.lock().await;
+                        peer_id.and_then(|peer| keys.get(&(peer, session)).copied())
+                    }
+                    .or(self.e2ee_key)
+                    .ok_or_else(|| anyhow!("missing e2ee key"))?;
                     let encrypted = RiftPayload::Encrypted(
                         encrypt_payload_with_key(&key, header, &inner)?
                     );
@@ -1324,20 +1467,31 @@ impl MeshInner {
                 if !should_encrypt(&other) {
                     return Ok(other);
                 }
+                let key = {
+                    let keys = self.e2ee_keys.lock().await;
+                    peer_id.and_then(|peer| keys.get(&(peer, session)).copied())
+                }
+                .or(self.e2ee_key)
+                .ok_or_else(|| anyhow!("missing e2ee key"))?;
                 let encrypted = encrypt_payload_with_key(&key, header, &other)?;
                 Ok(RiftPayload::Encrypted(encrypted))
             }
         }
     }
 
-    fn decrypt_payload(
+    async fn decrypt_payload(
         &self,
         header: &RiftFrameHeader,
         encrypted: EncryptedPayload,
+        peer_id: PeerId,
+        session: SessionId,
     ) -> Result<RiftPayload> {
-        let Some(key) = self.e2ee_key else {
-            return Err(anyhow!("missing e2ee key"));
-        };
+        let key = {
+            let keys = self.e2ee_keys.lock().await;
+            keys.get(&(peer_id, session)).copied()
+        }
+        .or(self.e2ee_key)
+        .ok_or_else(|| anyhow!("missing e2ee key"))?;
         decrypt_payload_with_key(&key, header, encrypted)
     }
 
@@ -1538,6 +1692,7 @@ impl MeshInner {
         seq: u32,
         timestamp: u64,
         session: SessionId,
+        peer_id: Option<PeerId>,
     ) -> Result<()> {
         self.send_payload_with_source(
             addr,
@@ -1546,6 +1701,7 @@ impl MeshInner {
             timestamp,
             self.identity.peer_id,
             session,
+            peer_id,
         )
         .await
     }
@@ -1558,6 +1714,7 @@ impl MeshInner {
         timestamp: u64,
         source: PeerId,
         session: SessionId,
+        peer_id: Option<PeerId>,
     ) -> Result<()> {
         let stream = stream_for_payload(&payload);
         let header = RiftFrameHeader {
@@ -1569,7 +1726,9 @@ impl MeshInner {
             source,
             session,
         };
-        let payload = self.maybe_encrypt_payload(payload, &header)?;
+        let payload = self
+            .maybe_encrypt_payload(payload, &header, peer_id, session)
+            .await?;
         let plaintext = encode_frame(&header, &payload);
         let (ciphertext, socket_idx) = {
             let mut connections = self.connections.lock().await;
@@ -1693,6 +1852,16 @@ impl MeshInner {
                     })
                     .await;
                 self.handle_capabilities(peer_id, capabilities).await?;
+                let authenticated = {
+                    let connections = self.connections.lock().await;
+                    connections
+                        .get(&addr)
+                        .map(|conn| conn.authenticated)
+                        .unwrap_or(false)
+                };
+                if !self.auth_required || authenticated {
+                    let _ = self.start_e2ee(peer_id, self.channel_session).await;
+                }
                 let _ = self.send_ice_candidates(peer_id, SessionId::NONE).await;
             }
             RiftPayload::Control(ControlMessage::IceCandidates { peer_id, candidates, .. }) => {
@@ -1799,6 +1968,22 @@ impl MeshInner {
             RiftPayload::Control(ControlMessage::Call(call)) => {
                 self.handle_call(call).await?;
             }
+            RiftPayload::Control(ControlMessage::E2eeInit {
+                session,
+                from,
+                public_key,
+                signature,
+            }) => {
+                self.handle_e2ee_init(from, session, public_key, signature).await?;
+            }
+            RiftPayload::Control(ControlMessage::E2eeResp {
+                session,
+                from,
+                public_key,
+                signature,
+            }) => {
+                self.handle_e2ee_resp(from, session, public_key, signature).await?;
+            }
             RiftPayload::Voice(VoicePacket { codec_id, payload }) => {
                 let from = header.source;
                 let seq = header.seq;
@@ -1831,7 +2016,9 @@ impl MeshInner {
                     .await;
             }
             RiftPayload::Encrypted(encrypted) => {
-                if let Ok(inner) = self.decrypt_payload(&header, encrypted) {
+                let from = header.source;
+                let session = header.session;
+                if let Ok(inner) = self.decrypt_payload(&header, encrypted, from, session).await {
                     Box::pin(self.handle_frame(addr, header, inner)).await?;
                 } else {
                     tracing::warn!(%addr, "e2ee decrypt failed");
@@ -1991,6 +2178,7 @@ impl MeshInner {
             if peer_id == self.identity.peer_id {
                 continue;
             }
+            let _ = self.start_e2ee(peer_id, session).await;
             let call = CallControl::Accept {
                 session,
                 from: self.identity.peer_id,
@@ -2101,6 +2289,7 @@ impl MeshInner {
                 }
                 let mut active = self.active_session.lock().await;
                 *active = session;
+                let _ = self.start_e2ee(from, session).await;
                 let _ = self
                     .events_tx
                     .send(MeshEvent::CallAccepted { session, from })
@@ -2165,6 +2354,12 @@ impl MeshInner {
         let mut peer_candidates = self.peer_candidates.lock().await;
         peer_candidates.remove(&peer_id);
         drop(peer_candidates);
+        let mut e2ee_keys = self.e2ee_keys.lock().await;
+        e2ee_keys.retain(|(peer, _), _| *peer != peer_id);
+        drop(e2ee_keys);
+        let mut pending = self.e2ee_pending.lock().await;
+        pending.retain(|(peer, _), _| *peer != peer_id);
+        drop(pending);
         let _ = self.events_tx.send(MeshEvent::PeerLeft(peer_id)).await;
     }
 
@@ -2216,7 +2411,7 @@ impl MeshInner {
     ) -> Result<()> {
         match route {
             PeerRoute::Direct { addr } => self
-                .send_payload(addr, payload, seq, timestamp, session)
+                .send_payload(addr, payload, seq, timestamp, session, Some(peer_id))
                 .await,
             PeerRoute::Relayed { via } => {
                 let relay_addr = {
@@ -2230,7 +2425,7 @@ impl MeshInner {
                     target: peer_id,
                     inner: Box::new(payload),
                 };
-                self.send_payload(relay_addr, envelope, seq, timestamp, session)
+                self.send_payload(relay_addr, envelope, seq, timestamp, session, Some(peer_id))
                     .await
             }
         }
@@ -2262,6 +2457,7 @@ impl MeshInner {
                     header.timestamp,
                     header.source,
                     header.session,
+                    Some(target),
                 )
                 .await?;
             }
@@ -2282,6 +2478,7 @@ impl MeshInner {
                         header.timestamp,
                         header.source,
                         header.session,
+                        Some(target),
                     )
                     .await?;
                 }
@@ -2391,10 +2588,10 @@ fn encrypt_payload_with_key(
     let plaintext = bincode::serialize(payload)?;
     let mut nonce = [0u8; 12];
     rand::rngs::OsRng.fill_bytes(&mut nonce);
-    let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
     let aad = bincode::serialize(header)?;
     let ciphertext = cipher
-        .encrypt(Nonce::from_slice(&nonce), Payload { msg: &plaintext, aad: &aad })
+        .encrypt(Nonce::<Aes256Gcm>::from_slice(&nonce), Payload { msg: &plaintext, aad: &aad })
         .map_err(|_| anyhow!("e2ee encrypt failed"))?;
     Ok(EncryptedPayload { nonce, ciphertext })
 }
@@ -2404,10 +2601,10 @@ fn decrypt_payload_with_key(
     header: &RiftFrameHeader,
     encrypted: EncryptedPayload,
 ) -> Result<RiftPayload> {
-    let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
     let aad = bincode::serialize(header)?;
     let plaintext = cipher
-        .decrypt(Nonce::from_slice(&encrypted.nonce), Payload { msg: &encrypted.ciphertext, aad: &aad })
+        .decrypt(Nonce::<Aes256Gcm>::from_slice(&encrypted.nonce), Payload { msg: &encrypted.ciphertext, aad: &aad })
         .map_err(|_| anyhow!("e2ee decrypt failed"))?;
     let payload: RiftPayload = bincode::deserialize(&plaintext)?;
     Ok(payload)
