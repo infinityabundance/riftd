@@ -39,6 +39,14 @@ use aes_gcm::aead::{Aead, Payload};
 use rand::RngCore;
 use rand::rngs::OsRng;
 
+#[cfg(feature = "predictive-rendezvous")]
+use rift_pr::{
+    build_probe_payload, compute_slot_params, parse_probe_payload, rendezvous_id_from_seed,
+    ParsedProbe, ProbePayload, RendezvousOutcome, RendezvousState, Role, SemanticRendezvousToken,
+};
+#[cfg(feature = "predictive-rendezvous")]
+use tokio::time::Instant as TokioInstant;
+
 /// Maximum UDP payload size we attempt to parse.
 const MAX_PACKET: usize = 2048;
 /// Window used for per-peer rate limiting.
@@ -217,6 +225,13 @@ struct MeshInner {
     e2ee_pending: Mutex<HashMap<(PeerId, SessionId), rift_core::e2ee::E2eeKeypair>>,
     rekey_interval_secs: Option<u64>,
     max_direct_peers: Option<usize>,
+    #[cfg(feature = "predictive-rendezvous")]
+    pr_sessions: Mutex<HashMap<u64, PrSession>>,
+}
+
+#[cfg(feature = "predictive-rendezvous")]
+struct PrSession {
+    tx: mpsc::Sender<(SocketAddr, ParsedProbe)>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -487,6 +502,8 @@ impl Mesh {
             rekey_interval_secs: config.rekey_interval_secs,
             max_direct_peers: config.max_direct_peers,
             group_topology: Mutex::new(HashMap::new()),
+            #[cfg(feature = "predictive-rendezvous")]
+            pr_sessions: Mutex::new(HashMap::new()),
         });
 
         {
@@ -1337,6 +1354,10 @@ impl MeshInner {
 
     async fn handle_packet(self: Arc<Self>, socket_idx: usize, addr: SocketAddr, data: &[u8]) -> Result<()> {
         if !self.allow_packet(addr).await {
+            return Ok(());
+        }
+        #[cfg(feature = "predictive-rendezvous")]
+        if self.try_handle_pr_probe(addr, data).await? {
             return Ok(());
         }
         if self.try_handle_pending(socket_idx, addr, data).await? {
@@ -2203,6 +2224,60 @@ impl MeshInner {
             metrics::inc_counter("rift_packets_dropped", &[("reason", "rate_limit")]);
         }
         allowed
+    }
+
+    #[cfg(feature = "predictive-rendezvous")]
+    async fn try_handle_pr_probe(&self, addr: SocketAddr, data: &[u8]) -> Result<bool> {
+        let parsed = match parse_probe_payload(data) {
+            Ok(parsed) => parsed,
+            Err(_) => return Ok(false),
+        };
+
+        let tx = {
+            let sessions = self.pr_sessions.lock().await;
+            sessions.get(&parsed.rendezvous_id).map(|session| session.tx.clone())
+        };
+
+        let Some(tx) = tx else {
+            return Ok(false);
+        };
+
+        if tx.send((addr, parsed)).await.is_err() {
+            let mut sessions = self.pr_sessions.lock().await;
+            sessions.remove(&parsed.rendezvous_id);
+        }
+
+        Ok(true)
+    }
+
+    #[cfg(feature = "predictive-rendezvous")]
+    async fn register_pr_session(
+        &self,
+        rendezvous_id: u64,
+        tx: mpsc::Sender<(SocketAddr, ParsedProbe)>,
+    ) -> Result<()> {
+        let mut sessions = self.pr_sessions.lock().await;
+        if sessions.contains_key(&rendezvous_id) {
+            return Err(anyhow!("predictive rendezvous session already exists"));
+        }
+        sessions.insert(rendezvous_id, PrSession { tx });
+        Ok(())
+    }
+
+    #[cfg(feature = "predictive-rendezvous")]
+    async fn unregister_pr_session(&self, rendezvous_id: u64) {
+        let mut sessions = self.pr_sessions.lock().await;
+        sessions.remove(&rendezvous_id);
+    }
+
+    #[cfg(feature = "predictive-rendezvous")]
+    async fn primary_local_port(&self) -> Result<u16> {
+        let sockets = self.sockets.lock().await;
+        match sockets.first() {
+            Some(MeshSocket::Udp(sock)) => Ok(sock.local_addr()?.port()),
+            Some(MeshSocket::Turn(relay)) => Ok(relay.relay_addr().port()),
+            None => Err(anyhow!("missing socket")),
+        }
     }
 
     async fn record_send(&self, addr: SocketAddr, bytes: usize) {
@@ -3397,7 +3472,175 @@ impl MeshHandle {
             self.inner.disconnect_addr(addr).await;
         }
     }
+
+    #[cfg(feature = "predictive-rendezvous")]
+    /// Run Predictive Rendezvous over the mesh UDP socket.
+    ///
+    /// This drives slot emission and listens for matching probes. See
+    /// `docs/predictive-rendezvous.md` for the conceptual model.
+    pub async fn run_rendezvous(
+        &self,
+        cfg: RendezvousConfig,
+    ) -> Result<RendezvousResult, RendezvousError> {
+        let rendezvous_id = rendezvous_id_from_seed(&cfg.token.seed);
+        let (tx, mut rx) = mpsc::channel::<(SocketAddr, ParsedProbe)>(64);
+        self.inner
+            .register_pr_session(rendezvous_id, tx)
+            .await
+            .map_err(RendezvousError::Mesh)?;
+
+        struct PrGuard {
+            inner: Arc<MeshInner>,
+            rendezvous_id: u64,
+        }
+
+        impl Drop for PrGuard {
+            fn drop(&mut self) {
+                let inner = self.inner.clone();
+                let rendezvous_id = self.rendezvous_id;
+                tokio::spawn(async move {
+                    inner.unregister_pr_session(rendezvous_id).await;
+                });
+            }
+        }
+
+        let _guard = PrGuard {
+            inner: self.inner.clone(),
+            rendezvous_id,
+        };
+
+        let mut state = RendezvousState::new(cfg.token.clone(), cfg.role);
+        let mut last_sent_slot: Option<u64> = None;
+        let mut last_local_offset: Option<u16> = None;
+        let deadline = TokioInstant::now() + cfg.max_duration;
+
+        loop {
+            if TokioInstant::now() >= deadline {
+                return Err(RendezvousError::Timeout);
+            }
+
+            let now_ms = now_timestamp();
+            let t0_ms = cfg.token.time_model.t0.saturating_mul(1_000);
+            let window_ms = cfg.token.time_model.window_secs.saturating_mul(1_000);
+            let end_ms = t0_ms.saturating_add(window_ms);
+
+            if cfg.token.time_model.slot_ms == 0 {
+                return Err(RendezvousError::InvalidConfig("slot_ms must be > 0"));
+            }
+            if now_ms >= end_ms {
+                return Err(RendezvousError::WindowClosed);
+            }
+
+            if let Some(slot) = compute_slot_params(
+                &cfg.token.seed,
+                &cfg.token.time_model,
+                cfg.role,
+                now_ms,
+            ) {
+                if last_sent_slot != Some(slot.slot_index) {
+                    last_sent_slot = Some(slot.slot_index);
+                    last_local_offset = Some(slot.local_port_offset);
+                    state.record_sent_slot(&slot);
+
+                    let payload = build_probe_payload(ProbePayload {
+                        rendezvous_id,
+                        slot_index: slot.slot_index,
+                        sender_fingerprint: cfg.sender_fingerprint,
+                    });
+
+                    for addr in &cfg.potential_remote_addrs {
+                        self.inner
+                            .send_raw(0, *addr, &payload)
+                            .await
+                            .map_err(RendezvousError::Mesh)?;
+                    }
+                }
+            }
+
+            let next_wake_ms = if now_ms < t0_ms {
+                t0_ms
+            } else {
+                let slot_index = (now_ms - t0_ms) / cfg.token.time_model.slot_ms;
+                t0_ms + (slot_index + 1) * cfg.token.time_model.slot_ms
+            };
+
+            let sleep_ms = next_wake_ms.saturating_sub(now_ms).max(1);
+            let wake_at = TokioInstant::now() + Duration::from_millis(sleep_ms);
+
+            tokio::select! {
+                _ = tokio::time::sleep_until(deadline) => {
+                    return Err(RendezvousError::Timeout);
+                }
+                _ = tokio::time::sleep_until(wake_at) => {
+                    continue;
+                }
+                recv = rx.recv() => {
+                    let Some((addr, probe)) = recv else {
+                        return Err(RendezvousError::ChannelClosed);
+                    };
+                    let outcome = state.record_received_probe(addr, &probe);
+                    if let RendezvousOutcome::Succeeded { remote_addr, slot_index } = outcome {
+                        let base_port = self.inner.primary_local_port().await.map_err(RendezvousError::Mesh)?;
+                        let local_port = last_local_offset
+                            .map(|offset| base_port.wrapping_add(offset))
+                            .unwrap_or(base_port);
+                        return Ok(RendezvousResult {
+                            remote_addr,
+                            local_port,
+                            slot_index,
+                        });
+                    }
+                }
+            }
+        }
+    }
 }
+
+#[cfg(feature = "predictive-rendezvous")]
+/// Async rendezvous configuration for Predictive Rendezvous sessions.
+#[derive(Debug, Clone)]
+pub struct RendezvousConfig {
+    pub token: SemanticRendezvousToken,
+    pub role: Role,
+    pub potential_remote_addrs: Vec<SocketAddr>,
+    pub max_duration: Duration,
+    pub sender_fingerprint: [u8; 16],
+}
+
+#[cfg(feature = "predictive-rendezvous")]
+/// Result of a successful rendezvous attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RendezvousResult {
+    pub remote_addr: SocketAddr,
+    pub local_port: u16,
+    pub slot_index: u64,
+}
+
+#[cfg(feature = "predictive-rendezvous")]
+#[derive(Debug)]
+pub enum RendezvousError {
+    Timeout,
+    WindowClosed,
+    ChannelClosed,
+    InvalidConfig(&'static str),
+    Mesh(anyhow::Error),
+}
+
+#[cfg(feature = "predictive-rendezvous")]
+impl std::fmt::Display for RendezvousError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RendezvousError::Timeout => write!(f, "rendezvous timed out"),
+            RendezvousError::WindowClosed => write!(f, "rendezvous window closed"),
+            RendezvousError::ChannelClosed => write!(f, "rendezvous channel closed"),
+            RendezvousError::InvalidConfig(msg) => write!(f, "invalid rendezvous config: {msg}"),
+            RendezvousError::Mesh(err) => write!(f, "mesh error: {err}"),
+        }
+    }
+}
+
+#[cfg(feature = "predictive-rendezvous")]
+impl std::error::Error for RendezvousError {}
 
 fn now_timestamp() -> u64 {
     SystemTime::now()
@@ -3441,6 +3684,80 @@ fn encrypt_payload_with_key(
         .encrypt(Nonce::<Aes256Gcm>::from_slice(&nonce), Payload { msg: &plaintext, aad: &aad })
         .map_err(|_| anyhow!("e2ee encrypt failed"))?;
     Ok(EncryptedPayload { nonce, ciphertext })
+}
+
+#[cfg(all(test, feature = "predictive-rendezvous"))]
+mod pr_tests {
+    use super::*;
+    use rift_pr::{EscalationPolicy, IdentityConstraints, SearchStrategy, SemanticRendezvousToken, TimeModel};
+
+    #[tokio::test]
+    async fn predictive_rendezvous_succeeds_loopback() {
+        let cfg = MeshConfig {
+            channel_name: "pr-test".to_string(),
+            password: None,
+            listen_port: 0,
+            relay_capable: false,
+            qos: QosProfile::default(),
+            auth_token: None,
+            require_auth: false,
+            e2ee_key: None,
+            rekey_interval_secs: None,
+            max_direct_peers: None,
+        };
+
+        let mesh_a = Mesh::new(Identity::generate(), cfg.clone()).await.unwrap();
+        let mesh_b = Mesh::new(Identity::generate(), cfg.clone()).await.unwrap();
+
+        let addr_a = mesh_a.local_addr().unwrap();
+        let addr_b = mesh_b.local_addr().unwrap();
+
+        let now_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let token = SemanticRendezvousToken::new(
+            [7u8; 32],
+            IdentityConstraints {
+                allowed_fingerprints: Vec::new(),
+            },
+            TimeModel {
+                t0: now_secs + 1,
+                window_secs: 3,
+                slot_ms: 200,
+            },
+            SearchStrategy::BasicDeterministic,
+            EscalationPolicy::None,
+        );
+
+        let cfg_a = RendezvousConfig {
+            token: token.clone(),
+            role: Role::Caller,
+            potential_remote_addrs: vec![addr_b],
+            max_duration: Duration::from_secs(3),
+            sender_fingerprint: [1u8; 16],
+        };
+
+        let cfg_b = RendezvousConfig {
+            token,
+            role: Role::Callee,
+            potential_remote_addrs: vec![addr_a],
+            max_duration: Duration::from_secs(3),
+            sender_fingerprint: [2u8; 16],
+        };
+
+        let handle_a = mesh_a.handle();
+        let handle_b = mesh_b.handle();
+
+        let (res_a, res_b) = tokio::join!(
+            handle_a.run_rendezvous(cfg_a),
+            handle_b.run_rendezvous(cfg_b),
+        );
+
+        assert!(res_a.is_ok(), "caller rendezvous failed: {:?}", res_a);
+        assert!(res_b.is_ok(), "callee rendezvous failed: {:?}", res_b);
+    }
 }
 
 fn decrypt_payload_with_key(

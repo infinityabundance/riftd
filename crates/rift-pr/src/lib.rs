@@ -9,8 +9,8 @@ pub mod time;
 
 pub use identity::IdentityConstraints;
 pub use probe::{
-    parse_probe_payload, validate_probe_for_token, ParsedProbe, ProbeError, RendezvousOutcome,
-    RendezvousState,
+    parse_probe_payload, rendezvous_id_from_seed, validate_probe_for_token, ParsedProbe, ProbeError,
+    RendezvousOutcome, RendezvousState,
 };
 pub use runner::{build_probe_payload, Clock, ProbePayload, RendezvousError, RendezvousRunner, UdpIo};
 pub use schedule::{compute_slot_params, Role, SlotParams};

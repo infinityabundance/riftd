@@ -1,6 +1,6 @@
 //! Rendezvous runner skeleton and probe emission.
 
-use crate::{compute_slot_params, Role, SemanticRendezvousToken, SlotParams};
+use crate::{compute_slot_params, rendezvous_id_from_seed, Role, SemanticRendezvousToken, SlotParams};
 use std::fmt;
 use std::net::SocketAddr;
 
@@ -111,20 +111,6 @@ impl<C: Clock, U: UdpIo> RendezvousRunner<C, U> {
 
         Ok(Some(slot_params))
     }
-}
-
-fn rendezvous_id_from_seed(seed: &[u8; 32]) -> u64 {
-    let digest = blake3::hash(seed);
-    u64::from_le_bytes([
-        digest.as_bytes()[0],
-        digest.as_bytes()[1],
-        digest.as_bytes()[2],
-        digest.as_bytes()[3],
-        digest.as_bytes()[4],
-        digest.as_bytes()[5],
-        digest.as_bytes()[6],
-        digest.as_bytes()[7],
-    ])
 }
 
 #[cfg(test)]

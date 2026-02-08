@@ -81,7 +81,8 @@ fn identity_allows(identities: &IdentityConstraints, sender: &[u8; 16]) -> bool 
         .any(|fp| fp[..16] == sender[..])
 }
 
-fn rendezvous_id_from_seed(seed: &[u8; 32]) -> u64 {
+/// Derive the rendezvous identifier from a seed.
+pub fn rendezvous_id_from_seed(seed: &[u8; 32]) -> u64 {
     let digest = blake3::hash(seed);
     u64::from_le_bytes([
         digest.as_bytes()[0],
