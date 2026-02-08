@@ -1,5 +1,17 @@
 # Predictive Rendezvous: Time–Intent–Deterministic P2P Connection Establishment Without Infrastructure
 
+## Contents
+- Abstract
+- Introduction
+- Model
+- Deterministic Schedule Function (Formalization)
+- Protocol Sketch
+- Diagrams
+- Proof-of-Concept and Observations
+- Properties
+- Limitations
+- Notes
+
 ## Abstract
 Predictive Rendezvous is a method for establishing peer-to-peer connections using shared seeds, time windows, and deterministic schedules. Instead of relying on signaling servers, STUN/TURN, or negotiated rendezvous services, both peers independently compute the same sequence of probing slots from a Semantic Rendezvous Token (SRT). This document records the core idea, model, and properties as prior-art documentation aligned with an implemented reference design.
 
@@ -22,12 +34,23 @@ slot_index = floor((now_ms - t0_ms) / slot_ms)
 ```
 Slots outside the `[t0, t0 + window]` interval are inactive.
 
-### Deterministic Schedule Function
+## Deterministic Schedule Function (Formalization)
 For each slot, both peers derive parameters from a strong PRF over:
 ```
 seed || role_tag || slot_index
 ```
-Derived values include local/remote port offsets and a burst pattern. Role tags (`Caller`, `Callee`, or `Symmetric`) enable asymmetric or mirrored schedules when desired.
+
+Inputs:
+- `seed`: 32-byte seed from the SRT.
+- `role_tag`: one of `Caller`, `Callee`, or `Symmetric`.
+- `slot_index`: computed as `floor((now_ms - t0_ms) / slot_ms)`.
+
+Outputs (per slot):
+- `local_port_offset`: 16-bit offset.
+- `remote_port_offset`: 16-bit offset.
+- `burst_pattern`: 4 bytes describing the probe burst pattern.
+
+Role tags enable asymmetric or mirrored schedules when desired.
 
 ## Protocol Sketch
 1. **SRT creation**: a peer generates a seed, chooses a time window, and encodes identity constraints.
@@ -35,6 +58,36 @@ Derived values include local/remote port offsets and a burst pattern. Role tags 
 3. **Independent execution**: both peers compute slot parameters from the same SRT and current time.
 4. **Probe emission**: each peer emits probes for each active slot using the derived schedule.
 5. **Success detection**: a received probe is validated against the SRT (matching rendezvous ID and identity constraints). On success, higher layers establish the session.
+
+## Diagrams
+### Predictive Rendezvous slot-based coordination
+```mermaid
+sequenceDiagram
+    participant A as Peer A
+    participant B as Peer B
+    Note over A,B: Shared SRT (seed, t0, window, slot)
+    A->>A: Compute slot 0 params
+    B->>B: Compute slot 0 params
+    A-->>B: Probe burst (slot 0)
+    B-->>A: Probe burst (slot 0)
+    A->>A: Compute slot 1 params
+    B->>B: Compute slot 1 params
+    A-->>B: Probe burst (slot 1)
+    B-->>A: Probe burst (slot 1)
+    Note over A,B: Convergence on matching slot
+```
+
+### Layering (PR as coordination layer)
+```mermaid
+flowchart TD
+    App[Application] --> PR[Predictive Rendezvous (Coordination)]
+    PR --> Transport[UDP / Transport]
+    Transport --> Network[Network]
+    Infra[Infrastructure (optional)] -.-> PR
+```
+
+## Proof-of-Concept and Observations
+A minimal proof-of-concept uses two nodes (A and B) with a shared SRT and a small window (e.g., 3–10 seconds). Each node independently computes slots and emits probes derived from the same schedule. In LAN and simple NAT scenarios, convergence is observed within a small number of slots when both nodes have candidate remote addresses. The behavior remains deterministic across repeated runs with the same inputs, and failures are primarily attributable to missing address knowledge or strict network isolation rather than schedule divergence.
 
 ## Properties
 - **No servers required by design**: SRTs do not encode IPs or ports; no discovery server is required for schedule agreement.

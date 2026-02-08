@@ -85,3 +85,6 @@ The async runner also collects a `RendezvousMetrics` snapshot, including:
 - `nat_behavior_notes` (e.g. `port_preserving`, `high_variance`)
 
 Use `rift pr-test <peer-addr> --show-metrics` to print a summarized metrics table for manual inspection.
+
+## Prior-Art Paper
+See `docs/papers/predictive_rendezvous_prior_art.md` for the prior-art draft. A v2 revision adds diagrams and a proof-of-concept section; PDF generation and external publication are pending.
