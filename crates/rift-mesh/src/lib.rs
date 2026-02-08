@@ -42,7 +42,8 @@ use rand::rngs::OsRng;
 #[cfg(feature = "predictive-rendezvous")]
 use rift_pr::{
     build_probe_payload, compute_slot_params, parse_probe_payload, rendezvous_id_from_seed,
-    ParsedProbe, ProbePayload, RendezvousOutcome, RendezvousState, Role, SemanticRendezvousToken,
+    ParsedProbe, ProbePayload, RendezvousMetrics, RendezvousOutcome, RendezvousState, Role,
+    SemanticRendezvousToken,
 };
 #[cfg(feature = "predictive-rendezvous")]
 use tokio::time::Instant as TokioInstant;
@@ -3512,10 +3513,23 @@ impl MeshHandle {
         let mut state = RendezvousState::new(cfg.token.clone(), cfg.role);
         let mut last_sent_slot: Option<u64> = None;
         let mut last_local_offset: Option<u16> = None;
+        let mut local_offsets = Vec::new();
+        let mut metrics = RendezvousMetrics::new();
+        let start_instant = TokioInstant::now();
         let deadline = TokioInstant::now() + cfg.max_duration;
 
         loop {
             if TokioInstant::now() >= deadline {
+                metrics.total_duration_ms = start_instant.elapsed().as_millis() as u64;
+                metrics.nat_behavior_notes = derive_nat_notes(&local_offsets);
+                tracing::debug!(
+                    target = "predictive_rendezvous",
+                    rendezvous_id,
+                    slots_attempted = metrics.slots_attempted,
+                    probes_sent = metrics.probes_sent,
+                    probes_received = metrics.probes_received,
+                    "rendezvous timeout"
+                );
                 return Err(RendezvousError::Timeout);
             }
 
@@ -3528,6 +3542,14 @@ impl MeshHandle {
                 return Err(RendezvousError::InvalidConfig("slot_ms must be > 0"));
             }
             if now_ms >= end_ms {
+                metrics.total_duration_ms = start_instant.elapsed().as_millis() as u64;
+                metrics.nat_behavior_notes = derive_nat_notes(&local_offsets);
+                tracing::debug!(
+                    target = "predictive_rendezvous",
+                    rendezvous_id,
+                    slots_attempted = metrics.slots_attempted,
+                    "rendezvous window closed"
+                );
                 return Err(RendezvousError::WindowClosed);
             }
 
@@ -3540,7 +3562,18 @@ impl MeshHandle {
                 if last_sent_slot != Some(slot.slot_index) {
                     last_sent_slot = Some(slot.slot_index);
                     last_local_offset = Some(slot.local_port_offset);
+                    local_offsets.push(slot.local_port_offset);
+                    metrics.slots_attempted = metrics.slots_attempted.saturating_add(1);
                     state.record_sent_slot(&slot);
+
+                    tracing::debug!(
+                        target = "predictive_rendezvous",
+                        rendezvous_id,
+                        slot_index = slot.slot_index,
+                        local_port_offset = slot.local_port_offset,
+                        remote_port_offset = slot.remote_port_offset,
+                        "rendezvous slot emit"
+                    );
 
                     let payload = build_probe_payload(ProbePayload {
                         rendezvous_id,
@@ -3553,6 +3586,7 @@ impl MeshHandle {
                             .send_raw(0, *addr, &payload)
                             .await
                             .map_err(RendezvousError::Mesh)?;
+                        metrics.probes_sent = metrics.probes_sent.saturating_add(1);
                     }
                 }
             }
@@ -3576,18 +3610,35 @@ impl MeshHandle {
                 }
                 recv = rx.recv() => {
                     let Some((addr, probe)) = recv else {
+                        metrics.total_duration_ms = start_instant.elapsed().as_millis() as u64;
+                        metrics.nat_behavior_notes = derive_nat_notes(&local_offsets);
                         return Err(RendezvousError::ChannelClosed);
                     };
+                    metrics.probes_received = metrics.probes_received.saturating_add(1);
+                    if metrics.time_to_first_packet_ms.is_none() {
+                        metrics.time_to_first_packet_ms = Some(start_instant.elapsed().as_millis() as u64);
+                    }
                     let outcome = state.record_received_probe(addr, &probe);
                     if let RendezvousOutcome::Succeeded { remote_addr, slot_index } = outcome {
                         let base_port = self.inner.primary_local_port().await.map_err(RendezvousError::Mesh)?;
                         let local_port = last_local_offset
                             .map(|offset| base_port.wrapping_add(offset))
                             .unwrap_or(base_port);
+                        metrics.slots_succeeded = Some(slot_index);
+                        metrics.total_duration_ms = start_instant.elapsed().as_millis() as u64;
+                        metrics.nat_behavior_notes = derive_nat_notes(&local_offsets);
+                        tracing::debug!(
+                            target = "predictive_rendezvous",
+                            rendezvous_id,
+                            slot_index,
+                            local_port,
+                            "rendezvous succeeded"
+                        );
                         return Ok(RendezvousResult {
                             remote_addr,
                             local_port,
                             slot_index,
+                            metrics,
                         });
                     }
                 }
@@ -3614,6 +3665,7 @@ pub struct RendezvousResult {
     pub remote_addr: SocketAddr,
     pub local_port: u16,
     pub slot_index: u64,
+    pub metrics: RendezvousMetrics,
 }
 
 #[cfg(feature = "predictive-rendezvous")]
@@ -3641,6 +3693,22 @@ impl std::fmt::Display for RendezvousError {
 
 #[cfg(feature = "predictive-rendezvous")]
 impl std::error::Error for RendezvousError {}
+
+#[cfg(feature = "predictive-rendezvous")]
+fn derive_nat_notes(offsets: &[u16]) -> Vec<String> {
+    if offsets.len() < 2 {
+        return Vec::new();
+    }
+    let mut unique = std::collections::HashSet::new();
+    for offset in offsets {
+        unique.insert(*offset);
+    }
+    if unique.len() == 1 {
+        vec!["port_preserving".to_string()]
+    } else {
+        vec!["high_variance".to_string()]
+    }
+}
 
 fn now_timestamp() -> u64 {
     SystemTime::now()
