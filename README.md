@@ -106,6 +106,7 @@ theme = "dark"
 ## Docs
 - `CODE.md`: high-level code map.
 - `PROTOCOL.md`: protocol framing and message types.
+- `SECURITY.md`: threat model and security checklist.
 - `ROADMAP.md`: planned next steps.
 
 ## Development
