@@ -59,3 +59,18 @@ This makes the runner testable without real sockets while keeping the interface 
 SRTs do not encode IPs or ports. The schedule is derived only from seed, time model, and policy metadata.
 
 Peers can use prior knowledge (historical addresses, local discovery, or user-provided hints) to supply candidate remote addresses, but the SRT itself remains a pure rendezvous plan with zero infrastructure requirements.
+
+## Using PR from the CLI
+The `rift` CLI provides helper commands for generating and inspecting SRTs. These commands do not perform any networking; they only create or decode tokens.
+
+Generate an invite targeted at a peer fingerprint (32-byte hex):
+```
+rift tir-invite <64-hex-chars>
+```
+
+Decode and validate an invite:
+```
+rift tir-accept <riftd-srt://...>
+```
+
+When `tir-accept` runs, it checks the SRT's identity constraints against the local identity if available and prints a decoded summary.
