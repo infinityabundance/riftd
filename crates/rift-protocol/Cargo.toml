@@ -11,3 +11,10 @@ rand = "0.7"
 serde = { version = "1", features = ["derive"] }
 thiserror = "1"
 rift-core = { path = "../rift-core" }
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "mesh_encode_decode"
+harness = false
