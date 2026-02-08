@@ -363,6 +363,41 @@ impl RiftHandle {
             .channel_shared_secret
             .as_deref()
             .map(|secret| derive_auth_token(secret, name));
+        let nat_cfg = if internet {
+            Some(default_nat_config(
+                cfg.listen_port,
+                cfg.network.local_ports.clone(),
+                cfg.network.stun_servers.clone(),
+                cfg.network.stun_timeout_ms,
+                cfg.network.punch_interval_ms,
+                cfg.network.punch_timeout_ms,
+            ))
+        } else {
+            None
+        };
+        let mut known_peers = cfg.network.known_peers.clone();
+        if internet && known_peers.is_empty() {
+            if let Some(nat_cfg) = nat_cfg.as_ref() {
+                if let Ok(public_addrs) = gather_public_addrs(nat_cfg).await {
+                    if !public_addrs.is_empty() {
+                        known_peers = public_addrs;
+                    }
+                }
+            }
+        }
+        let invite_for_key = if let Some(invite_str) = &cfg.network.invite {
+            Some(decode_invite(invite_str).map_err(|e| RiftError::Other(format!("{e}")))?)
+        } else if internet {
+            Some(generate_invite(name, password, known_peers.clone()))
+        } else {
+            None
+        };
+        let e2ee_key = derive_e2ee_key(
+            name,
+            password,
+            invite_for_key.as_ref(),
+            cfg.security.channel_shared_secret.as_deref(),
+        );
         let config = MeshConfig {
             channel_name: name.to_string(),
             password: password.map(|v| v.to_string()),
@@ -371,6 +406,7 @@ impl RiftHandle {
             qos: cfg.qos.clone(),
             auth_token,
             require_auth: cfg.security.channel_shared_secret.is_some(),
+            e2ee_key,
         };
         let mut mesh = Mesh::new(identity, config)
             .await
@@ -386,37 +422,16 @@ impl RiftHandle {
         let security_handle = handle.clone();
 
         if internet {
-            let nat_cfg = default_nat_config(
-                cfg.listen_port,
-                cfg.network.local_ports.clone(),
-                cfg.network.stun_servers.clone(),
-                cfg.network.stun_timeout_ms,
-                cfg.network.punch_interval_ms,
-                cfg.network.punch_timeout_ms,
-            );
+            let nat_cfg = nat_cfg.clone().expect("nat cfg");
             mesh.enable_nat(nat_cfg.clone()).await;
-            let mut known_peers = cfg.network.known_peers.clone();
-            if known_peers.is_empty() {
-                if let Ok(public_addrs) = gather_public_addrs(&nat_cfg).await {
-                    if !public_addrs.is_empty() {
-                        known_peers = public_addrs;
-                    }
-                }
-            }
-            let invite = if let Some(invite_str) = &cfg.network.invite {
-                decode_invite(invite_str).map_err(|e| RiftError::Other(format!("{e}")))?
-            } else if !known_peers.is_empty() {
-                generate_invite(name, password, known_peers)
-            } else {
-                Invite {
-                    channel_name: name.to_string(),
-                    password: password.map(|v| v.to_string()),
-                    channel_key: [0u8; 32],
-                    known_peers: Vec::new(),
-                    version: 1,
-                    created_at: now_timestamp(),
-                }
-            };
+            let invite = invite_for_key.clone().unwrap_or_else(|| Invite {
+                channel_name: name.to_string(),
+                password: password.map(|v| v.to_string()),
+                channel_key: [0u8; 32],
+                known_peers: Vec::new(),
+                version: 1,
+                created_at: now_timestamp(),
+            });
             mesh.join_invite(invite, nat_cfg)
                 .await
                 .map_err(|e| RiftError::Mesh(format!("{e}")))?;
@@ -471,14 +486,14 @@ impl RiftHandle {
                 .map_err(|e| RiftError::Other(format!("{e}")))?;
 
             let channel_id = rift_core::ChannelId::from_channel(&channel, password);
-            let nat_cfg = default_nat_config(
+            let nat_cfg = nat_cfg.clone().unwrap_or_else(|| default_nat_config(
                 cfg.listen_port,
                 cfg.network.local_ports.clone(),
                 cfg.network.stun_servers.clone(),
                 cfg.network.stun_timeout_ms,
                 cfg.network.punch_interval_ms,
                 cfg.network.punch_timeout_ms,
-            );
+            ));
             let addrs = match gather_public_addrs(&nat_cfg).await {
                 Ok(public_addrs) if !public_addrs.is_empty() => public_addrs,
                 _ => local_ipv4_addrs()
@@ -1054,6 +1069,37 @@ fn derive_auth_token(secret: &str, channel: &str) -> Vec<u8> {
     hk.expand(b"rift-auth", &mut out)
         .expect("hkdf expand");
     out.to_vec()
+}
+
+fn derive_e2ee_key(
+    channel: &str,
+    password: Option<&str>,
+    invite: Option<&Invite>,
+    shared_secret: Option<&str>,
+) -> Option<[u8; 32]> {
+    if let Some(secret) = shared_secret {
+        let hk = Hkdf::<Sha256>::new(Some(channel.as_bytes()), secret.as_bytes());
+        let mut out = [0u8; 32];
+        hk.expand(b"rift-e2ee", &mut out)
+            .expect("hkdf expand");
+        return Some(out);
+    }
+    if let Some(invite) = invite {
+        if invite.channel_key.iter().any(|b| *b != 0) {
+            return Some(invite.channel_key);
+        }
+    }
+    if let Some(password) = password {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"rift-e2ee:");
+        hasher.update(channel.as_bytes());
+        hasher.update(b":");
+        hasher.update(password.as_bytes());
+        let mut out = [0u8; 32];
+        out.copy_from_slice(hasher.finalize().as_bytes());
+        return Some(out);
+    }
+    None
 }
 
 fn short_peer(peer_id: &PeerId) -> String {

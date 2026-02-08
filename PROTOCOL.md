@@ -42,6 +42,7 @@ Streams are used for multiplexing and future extensions.
 - `Text(ChatMessage)`
 - `Voice(VoicePacket)`
 - `Relay { target, inner }`
+- `Encrypted(EncryptedPayload)`
 
 ### ControlMessage
 Core control messages:
@@ -96,6 +97,16 @@ Call/session state over the mesh:
 Relayed messages:
 - `Relay { target, inner }`
 - A relay peer forwards `inner` to the final `target`.
+
+### EncryptedPayload
+When end-to-end encryption is enabled, chat and voice payloads may be wrapped:
+```
+EncryptedPayload {
+  nonce: [u8; 12],
+  ciphertext: Vec<u8>
+}
+```
+The ciphertext is an AEAD-encrypted `RiftPayload` using a channel/session key.
 
 ## Versioning
 Supported protocol versions are listed in `supported_versions()`.

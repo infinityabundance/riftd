@@ -192,6 +192,12 @@ pub enum ControlMessage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EncryptedPayload {
+    pub nonce: [u8; 12],
+    pub ciphertext: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerInfo {
     pub peer_id: PeerId,
     pub addr: std::net::SocketAddr,
@@ -233,6 +239,7 @@ pub enum RiftPayload {
     Voice(VoicePacket),
     Text(ChatMessage),
     Relay { target: PeerId, inner: Box<RiftPayload> },
+    Encrypted(EncryptedPayload),
 }
 
 #[derive(Debug, Error)]
