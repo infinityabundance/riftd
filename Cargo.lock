@@ -3287,16 +3287,20 @@ dependencies = [
  "bincode",
  "chacha20poly1305",
  "criterion",
+ "ed25519-dalek 1.0.1",
+ "hkdf",
  "rand 0.8.5",
  "rift-core",
  "rift-discovery",
  "rift-metrics",
  "rift-nat",
  "rift-protocol",
+ "sha2 0.10.9",
  "snow",
  "tokio",
  "tokio-stream",
  "tracing",
+ "x25519-dalek",
 ]
 
 [[package]]
