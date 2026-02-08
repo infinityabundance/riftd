@@ -1705,7 +1705,31 @@ impl MeshInner {
                 let from = header.source;
                 let _ = self.send_control_to_peer(from, ack, session).await;
             }
-            RiftPayload::Control(ControlMessage::IceCheckAck { .. }) => {}
+            RiftPayload::Control(ControlMessage::IceCheckAck { candidate, .. }) => {
+                let peer_id = header.source;
+                let addr = candidate.addr;
+                let mut peer_addrs = self.peer_addrs.lock().await;
+                peer_addrs.insert(peer_id, addr);
+                drop(peer_addrs);
+
+                let mut routes = self.routes.lock().await;
+                let upgraded = matches!(routes.get(&peer_id), Some(PeerRoute::Relayed { .. }));
+                if !matches!(routes.get(&peer_id), Some(PeerRoute::Direct { .. })) {
+                    routes.insert(peer_id, PeerRoute::Direct { addr });
+                }
+                drop(routes);
+
+                let _ = self
+                    .events_tx
+                    .send(MeshEvent::RouteUpdated {
+                        peer_id,
+                        route: PeerRoute::Direct { addr },
+                    })
+                    .await;
+                if upgraded {
+                    let _ = self.events_tx.send(MeshEvent::RouteUpgraded(peer_id)).await;
+                }
+            }
             RiftPayload::Control(ControlMessage::CapabilitiesUpdate(capabilities)) => {
                 let peer_id = header.source;
                 self.handle_capabilities(peer_id, capabilities).await?;
