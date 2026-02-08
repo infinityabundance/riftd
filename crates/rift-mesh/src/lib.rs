@@ -34,6 +34,7 @@ pub struct MeshConfig {
     pub require_auth: bool,
     pub e2ee_key: Option<[u8; 32]>,
     pub rekey_interval_secs: Option<u64>,
+    pub max_direct_peers: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -137,6 +138,7 @@ struct MeshInner {
     candidate_attempts: Mutex<HashMap<PeerId, tokio::time::Instant>>,
     e2ee_key: Option<[u8; 32]>,
     rekey_interval_secs: Option<u64>,
+    max_direct_peers: Option<usize>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -352,12 +354,14 @@ impl Mesh {
             candidate_attempts: Mutex::new(HashMap::new()),
             e2ee_key: config.e2ee_key,
             rekey_interval_secs: config.rekey_interval_secs,
+            max_direct_peers: config.max_direct_peers,
         });
 
         MeshInner::spawn_receiver(inner.clone(), 0, socket.clone());
         MeshInner::spawn_auto_upgrade(inner.clone());
         MeshInner::spawn_candidate_checks(inner.clone());
         MeshInner::spawn_rekey(inner.clone());
+        MeshInner::spawn_scaling(inner.clone());
         MeshInner::spawn_pinger(inner.clone());
 
         let mesh = Self {
@@ -735,6 +739,88 @@ impl MeshInner {
                     if let Some(addr) = peers.get(&peer_id).copied() {
                         if let Err(err) = inner.initiate_handshake(addr, 0).await {
                             tracing::debug!(peer = %peer_id, "rekey handshake failed: {err}");
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    fn spawn_scaling(inner: Arc<Self>) {
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(10));
+            loop {
+                tick.tick().await;
+                let Some(max_direct) = inner.max_direct_peers else {
+                    continue;
+                };
+                let routes = inner.routes.lock().await.clone();
+                let relay_candidates = inner.relay_candidates.lock().await.clone();
+                let peer_addrs = inner.peer_addrs.lock().await.clone();
+                let mut direct_peers: Vec<PeerId> = routes
+                    .iter()
+                    .filter_map(|(peer_id, route)| match route {
+                        PeerRoute::Direct { .. } => Some(*peer_id),
+                        _ => None,
+                    })
+                    .collect();
+
+                if direct_peers.len() <= max_direct {
+                    continue;
+                }
+
+                direct_peers.sort_by_key(|peer| peer.to_hex());
+                let mut routes_guard = inner.routes.lock().await;
+                let mut direct_count = direct_peers.len();
+                for peer_id in direct_peers {
+                    if direct_count <= max_direct {
+                        break;
+                    }
+                    let Some(relay) = relay_candidates.get(&peer_id).copied() else {
+                        continue;
+                    };
+                    if matches!(routes_guard.get(&peer_id), Some(PeerRoute::Relayed { .. })) {
+                        continue;
+                    }
+                    routes_guard.insert(peer_id, PeerRoute::Relayed { via: relay });
+                    direct_count = direct_count.saturating_sub(1);
+                    drop(routes_guard);
+                    let _ = inner
+                        .events_tx
+                        .send(MeshEvent::RouteUpdated {
+                            peer_id,
+                            route: PeerRoute::Relayed { via: relay },
+                        })
+                        .await;
+                    tracing::info!(peer = %peer_id, relay = %relay, "scaled route to relay");
+                    routes_guard = inner.routes.lock().await;
+                }
+
+                if direct_count <= max_direct {
+                    continue;
+                }
+
+                // If we still exceed max_direct and have direct routes without relay candidates,
+                // keep them as-is until a relay candidate becomes available.
+                drop(routes_guard);
+
+                // If we are under the limit, attempt to restore relayed routes to direct.
+                if direct_count < max_direct {
+                    let mut routes_guard = inner.routes.lock().await;
+                    for (peer_id, route) in routes.iter() {
+                        if !matches!(route, PeerRoute::Relayed { .. }) {
+                            continue;
+                        }
+                        if let Some(addr) = peer_addrs.get(peer_id).copied() {
+                            routes_guard.insert(*peer_id, PeerRoute::Direct { addr });
+                            let _ = inner
+                                .events_tx
+                                .send(MeshEvent::RouteUpdated {
+                                    peer_id: *peer_id,
+                                    route: PeerRoute::Direct { addr },
+                                })
+                                .await;
+                            tracing::info!(peer = %peer_id, "scaled route back to direct");
                         }
                     }
                 }

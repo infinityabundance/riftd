@@ -81,6 +81,8 @@ pub struct NetworkConfigSdk {
     pub punch_interval_ms: Option<u64>,
     #[serde(default)]
     pub punch_timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub max_direct_peers: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -163,6 +165,7 @@ impl Default for NetworkConfigSdk {
             stun_timeout_ms: Some(800),
             punch_interval_ms: Some(200),
             punch_timeout_ms: Some(5000),
+            max_direct_peers: None,
         }
     }
 }
@@ -410,6 +413,7 @@ impl RiftHandle {
             require_auth: cfg.security.channel_shared_secret.is_some(),
             e2ee_key,
             rekey_interval_secs: cfg.security.rekey_interval_secs,
+            max_direct_peers: cfg.network.max_direct_peers,
         };
         let mut mesh = Mesh::new(identity, config)
             .await
