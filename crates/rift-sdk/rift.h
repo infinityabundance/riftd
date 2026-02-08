@@ -49,6 +49,9 @@ void rift_free(RiftHandle* handle);
 int rift_join_channel(RiftHandle* handle, const char* name, const char* password, int internet);
 int rift_leave_channel(RiftHandle* handle, const char* name);
 int rift_send_chat(RiftHandle* handle, const char* text);
+int rift_start_ptt(RiftHandle* handle);
+int rift_stop_ptt(RiftHandle* handle);
+int rift_set_mute(RiftHandle* handle, int muted);
 
 SessionId rift_start_call(RiftHandle* handle, const PeerId* peer);
 int rift_accept_call(RiftHandle* handle, SessionId session);

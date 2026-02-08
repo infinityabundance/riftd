@@ -205,6 +205,36 @@ pub extern "C" fn rift_send_chat(handle: *mut RiftHandleC, text: *const c_char) 
 }
 
 #[no_mangle]
+pub extern "C" fn rift_start_ptt(handle: *mut RiftHandleC) -> c_int {
+    if handle.is_null() {
+        return -1;
+    }
+    let handle = unsafe { &mut *handle };
+    handle.handle.set_ptt_active(true);
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn rift_stop_ptt(handle: *mut RiftHandleC) -> c_int {
+    if handle.is_null() {
+        return -1;
+    }
+    let handle = unsafe { &mut *handle };
+    handle.handle.set_ptt_active(false);
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn rift_set_mute(handle: *mut RiftHandleC, muted: c_int) -> c_int {
+    if handle.is_null() {
+        return -1;
+    }
+    let handle = unsafe { &mut *handle };
+    handle.handle.set_mute(muted != 0);
+    0
+}
+
+#[no_mangle]
 pub extern "C" fn rift_start_call(handle: *mut RiftHandleC, peer: *const PeerIdC) -> SessionIdC {
     if handle.is_null() || peer.is_null() {
         return SessionIdC { bytes: [0u8; 32] };
