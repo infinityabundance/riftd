@@ -104,7 +104,9 @@ use rift_sdk::{
     AudioConfigSdk, NetworkConfigSdk, RiftConfig, RiftEvent, RiftHandle, RiftSessionId,
 };
 use rift_sdk::{CodecId, FeatureFlag};
+use hkdf::Hkdf;
 use rand::RngCore;
+use sha2::Sha256;
 
 mod config;
 use config::UserConfig;
@@ -139,6 +141,29 @@ enum Commands {
         window_secs: u64,
         /// Slot duration in milliseconds.
         #[arg(long, default_value_t = 200)]
+        slot_ms: u64,
+        /// Local UDP listen port (0 = OS assigned).
+        #[arg(long, default_value_t = 0)]
+        port: u16,
+        /// Print metrics summary.
+        #[arg(long)]
+        show_metrics: bool,
+    },
+    PtrTest {
+        /// Target peer socket address, e.g. 192.0.2.10:9999
+        #[arg(value_name = "PEER_ADDR")]
+        peer_addr: String,
+        /// Content identifier (infohash) in hex.
+        #[arg(long)]
+        infohash: String,
+        /// Optional salt (hex) for seed derivation.
+        #[arg(long)]
+        salt: Option<String>,
+        /// Rendezvous window in seconds.
+        #[arg(long, default_value_t = 60)]
+        window_secs: u64,
+        /// Slot duration in milliseconds.
+        #[arg(long, default_value_t = 500)]
         slot_ms: u64,
         /// Local UDP listen port (0 = OS assigned).
         #[arg(long, default_value_t = 0)]
@@ -310,6 +335,15 @@ async fn main() -> Result<()> {
             port,
             show_metrics,
         } => cmd_pr_test(peer_addr, window_secs, slot_ms, port, show_metrics).await,
+        Commands::PtrTest {
+            peer_addr,
+            infohash,
+            salt,
+            window_secs,
+            slot_ms,
+            port,
+            show_metrics,
+        } => cmd_ptr_test(peer_addr, infohash, salt, window_secs, slot_ms, port, show_metrics).await,
         Commands::Security { action } => match action {
             SecurityCommand::RotateKey => cmd_rotate_key().await,
             SecurityCommand::ShowKnownHosts => cmd_show_known_hosts().await,
@@ -784,6 +818,89 @@ async fn cmd_pr_test(
         }
         Err(err) => {
             println!("rendezvous failed: {err}");
+        }
+    }
+
+    Ok(())
+}
+
+async fn cmd_ptr_test(
+    peer_addr: String,
+    infohash: String,
+    salt: Option<String>,
+    window_secs: u64,
+    slot_ms: u64,
+    port: u16,
+    show_metrics: bool,
+) -> Result<()> {
+    let peer_addr: std::net::SocketAddr = peer_addr.parse().context("invalid peer address")?;
+    let (identity, _) = Identity::load_or_generate(None)?;
+    let seed = derive_seed_from_infohash(&infohash, salt.as_deref())?;
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system time before UNIX_EPOCH")?
+        .as_secs();
+    let t0 = now.saturating_add(1);
+
+    let token = SemanticRendezvousToken::new(
+        seed,
+        IdentityConstraints {
+            allowed_fingerprints: Vec::new(),
+        },
+        TimeModel {
+            t0,
+            window_secs,
+            slot_ms,
+        },
+        SearchStrategy::BasicDeterministic,
+        EscalationPolicy::None,
+    );
+
+    let fingerprint_hash = blake3::hash(identity.keypair.public.as_bytes());
+    let mut sender_fingerprint = [0u8; 16];
+    sender_fingerprint.copy_from_slice(&fingerprint_hash.as_bytes()[..16]);
+
+    let mesh = Mesh::new(
+        identity,
+        MeshConfig {
+            channel_name: "ptr-test".to_string(),
+            password: None,
+            listen_port: port,
+            relay_capable: false,
+            qos: QosProfile::default(),
+            auth_token: None,
+            require_auth: false,
+            e2ee_key: None,
+            rekey_interval_secs: None,
+            max_direct_peers: None,
+        },
+    )
+    .await?;
+
+    let cfg = RendezvousConfig {
+        token,
+        role: Role::Caller,
+        potential_remote_addrs: vec![peer_addr],
+        max_duration: Duration::from_secs(window_secs),
+        sender_fingerprint,
+    };
+
+    let handle = mesh.handle();
+    let result = handle.run_rendezvous(cfg).await;
+
+    match result {
+        Ok(res) => {
+            println!(
+                "ptr rendezvous succeeded: remote={} local_port={} slot={}",
+                res.remote_addr, res.local_port, res.slot_index
+            );
+            if show_metrics {
+                print_metrics(&res.metrics);
+            }
+        }
+        Err(err) => {
+            println!("ptr rendezvous failed: {err}");
         }
     }
 
@@ -2111,6 +2228,22 @@ fn random_seed() -> [u8; 32] {
     let mut seed = [0u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut seed);
     seed
+}
+
+fn derive_seed_from_infohash(infohash_hex: &str, salt_hex: Option<&str>) -> Result<[u8; 32]> {
+    let ikm = hex::decode(infohash_hex).context("infohash must be hex")?;
+    let salt = match salt_hex {
+        Some(s) => Some(hex::decode(s).context("salt must be hex")?),
+        None => None,
+    };
+    let hk = match salt {
+        Some(ref s) => Hkdf::<Sha256>::new(Some(s), &ikm),
+        None => Hkdf::<Sha256>::new(None, &ikm),
+    };
+    let mut okm = [0u8; 32];
+    hk.expand(b"rift-ptr-seed", &mut okm)
+        .map_err(|_| anyhow::anyhow!("hkdf expand failed"))?;
+    Ok(okm)
 }
 
 fn print_metrics(metrics: &rift_pr::RendezvousMetrics) {
