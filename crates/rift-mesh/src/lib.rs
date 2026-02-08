@@ -13,8 +13,8 @@ use rift_discovery::{discover_peers, start_mdns_advertisement, DiscoveryConfig, 
 use rift_nat::{attempt_hole_punch, gather_public_addrs, NatConfig, PeerEndpoint};
 use rift_protocol::{
     decode_frame, encode_frame, CallControl, CallState, Capabilities, ChatMessage, CodecId,
-    ControlMessage, EncryptedPayload, FeatureFlag, PeerInfo, ProtocolVersion, QosProfile,
-    RiftFrameHeader, RiftPayload, SessionId, StreamKind, VoicePacket,
+    ControlMessage, EncryptedPayload, FeatureFlag, IceCandidate, CandidateType, PeerInfo,
+    ProtocolVersion, QosProfile, RiftFrameHeader, RiftPayload, SessionId, StreamKind, VoicePacket,
 };
 use rift_metrics as metrics;
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce, KeyInit};
@@ -115,7 +115,9 @@ struct MeshInner {
     routes: Mutex<HashMap<PeerId, PeerRoute>>,
     peer_addrs: Mutex<HashMap<PeerId, SocketAddr>>,
     peer_candidates: Mutex<HashMap<PeerId, Vec<SocketAddr>>>,
+    peer_ice_candidates: Mutex<HashMap<PeerId, Vec<IceCandidate>>>,
     self_candidates: Mutex<Vec<SocketAddr>>,
+    self_ice_candidates: Mutex<Vec<IceCandidate>>,
     relay_candidates: Mutex<HashMap<PeerId, PeerId>>,
     connections: Mutex<HashMap<SocketAddr, PeerConnection>>,
     pending: Mutex<HashMap<PendingKey, PendingHandshake>>,
@@ -332,7 +334,9 @@ impl Mesh {
             group_codec: Mutex::new(CodecId::Opus),
             peer_addrs: Mutex::new(HashMap::new()),
             peer_candidates: Mutex::new(HashMap::new()),
+            peer_ice_candidates: Mutex::new(HashMap::new()),
             self_candidates: Mutex::new(Vec::new()),
+            self_ice_candidates: Mutex::new(Vec::new()),
             relay_candidates: Mutex::new(HashMap::new()),
             connections: Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
@@ -401,9 +405,34 @@ impl Mesh {
         drop(cfg);
         let nat_cfg = { self.inner.nat_cfg.lock().await.clone() };
         if let Some(nat_cfg) = nat_cfg {
+            let local_addr = {
+                let sockets = self.inner.sockets.lock().await;
+                sockets.first().and_then(|sock| sock.local_addr().ok())
+            };
             if let Ok(addrs) = gather_public_addrs(&nat_cfg).await {
+                let local_addr = {
+                    let sockets = self.inner.sockets.lock().await;
+                    sockets.first().and_then(|sock| sock.local_addr().ok())
+                };
+                let mut combined = addrs.clone();
+                if let Some(local) = local_addr {
+                    combined.push(local);
+                }
+                combined.sort();
+                combined.dedup();
                 let mut self_candidates = self.inner.self_candidates.lock().await;
-                *self_candidates = addrs;
+                *self_candidates = combined;
+                drop(self_candidates);
+                let ice_candidates = MeshInner::build_ice_candidates(local_addr, &addrs);
+                let mut self_ice = self.inner.self_ice_candidates.lock().await;
+                *self_ice = ice_candidates;
+            } else if let Some(local) = local_addr {
+                let mut self_candidates = self.inner.self_candidates.lock().await;
+                *self_candidates = vec![local];
+                drop(self_candidates);
+                let ice_candidates = MeshInner::build_ice_candidates(Some(local), &[]);
+                let mut self_ice = self.inner.self_ice_candidates.lock().await;
+                *self_ice = ice_candidates;
             }
         }
     }
@@ -472,6 +501,39 @@ impl Mesh {
 }
 
 impl MeshInner {
+    fn build_ice_candidates(
+        local_addr: Option<SocketAddr>,
+        public_addrs: &[SocketAddr],
+    ) -> Vec<IceCandidate> {
+        let mut out = Vec::new();
+        if let Some(addr) = local_addr {
+            out.push(IceCandidate {
+                addr,
+                cand_type: CandidateType::Host,
+                priority: 100,
+                foundation: Self::candidate_foundation(addr, CandidateType::Host),
+            });
+        }
+        for addr in public_addrs {
+            out.push(IceCandidate {
+                addr: *addr,
+                cand_type: CandidateType::Srflx,
+                priority: 90,
+                foundation: Self::candidate_foundation(*addr, CandidateType::Srflx),
+            });
+        }
+        out.sort_by(|a, b| b.priority.cmp(&a.priority));
+        out.dedup_by(|a, b| a.addr == b.addr && a.cand_type == b.cand_type);
+        out
+    }
+
+    fn candidate_foundation(addr: SocketAddr, cand_type: CandidateType) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        addr.hash(&mut hasher);
+        cand_type.hash(&mut hasher);
+        hasher.finish()
+    }
     async fn broadcast_chat(&self, text: String) -> Result<()> {
         let timestamp = now_timestamp();
         let seq = self.next_control_seq().await;
@@ -643,6 +705,7 @@ impl MeshInner {
                 let Some(nat_cfg) = nat_cfg else {
                     continue;
                 };
+                let ice_map = { inner.peer_ice_candidates.lock().await.clone() };
                 let candidates_map = { inner.peer_candidates.lock().await.clone() };
                 let routes = { inner.routes.lock().await.clone() };
                 let addrs = { inner.peer_addrs.lock().await.clone() };
@@ -653,11 +716,17 @@ impl MeshInner {
                     if matches!(route, PeerRoute::Direct { .. }) {
                         continue;
                     }
-                    let candidates = candidates_map
-                        .get(peer_id)
-                        .cloned()
-                        .or_else(|| addrs.get(peer_id).copied().map(|addr| vec![addr]))
-                        .unwrap_or_default();
+                    let candidates = if let Some(ice) = ice_map.get(peer_id) {
+                        let mut sorted = ice.clone();
+                        sorted.sort_by(|a, b| b.priority.cmp(&a.priority));
+                        sorted.into_iter().map(|cand| cand.addr).collect()
+                    } else {
+                        candidates_map
+                            .get(peer_id)
+                            .cloned()
+                            .or_else(|| addrs.get(peer_id).copied().map(|addr| vec![addr]))
+                            .unwrap_or_default()
+                    };
                     if candidates.is_empty() {
                         continue;
                     }
@@ -686,6 +755,17 @@ impl MeshInner {
                                     peer = %peer_id,
                                     "candidate check handshake failed: {err}"
                                 );
+                            } else {
+                                if let Some(ice) = ice_map.get(&peer_id) {
+                                    if let Some(candidate) = ice.iter().find(|cand| cand.addr == remote) {
+                                        let msg = ControlMessage::IceCheck {
+                                            session: SessionId::NONE,
+                                            tie_breaker: rand::random::<u64>(),
+                                            candidate: candidate.clone(),
+                                        };
+                                        let _ = inner.send_control_to_peer(peer_id, msg, SessionId::NONE).await;
+                                    }
+                                }
                             }
                         }
                     }
@@ -1136,6 +1216,22 @@ impl MeshInner {
             .await
     }
 
+    async fn send_ice_candidates(&self, peer_id: PeerId, session: SessionId) -> Result<()> {
+        let candidates = {
+            let self_ice = self.self_ice_candidates.lock().await;
+            self_ice.clone()
+        };
+        if candidates.is_empty() {
+            return Ok(());
+        }
+        let msg = ControlMessage::IceCandidates {
+            peer_id: self.identity.peer_id,
+            session,
+            candidates,
+        };
+        self.send_control_to_peer(peer_id, msg, session).await
+    }
+
     async fn default_capabilities(&self) -> Capabilities {
         let preferred = self.preferred_codecs().await;
         let codecs = if preferred.is_empty() {
@@ -1498,6 +1594,9 @@ impl MeshInner {
                 RiftPayload::Control(ControlMessage::Auth { .. })
                     | RiftPayload::Control(ControlMessage::Join { .. })
                     | RiftPayload::Control(ControlMessage::Hello { .. })
+                    | RiftPayload::Control(ControlMessage::IceCandidates { .. })
+                    | RiftPayload::Control(ControlMessage::IceCheck { .. })
+                    | RiftPayload::Control(ControlMessage::IceCheckAck { .. })
                     | RiftPayload::Control(ControlMessage::PeerState { .. })
             )
         {
@@ -1589,7 +1688,24 @@ impl MeshInner {
                     })
                     .await;
                 self.handle_capabilities(peer_id, capabilities).await?;
+                let _ = self.send_ice_candidates(peer_id, SessionId::NONE).await;
             }
+            RiftPayload::Control(ControlMessage::IceCandidates { peer_id, candidates, .. }) => {
+                if !candidates.is_empty() {
+                    let mut peer_ice = self.peer_ice_candidates.lock().await;
+                    peer_ice.insert(peer_id, candidates.clone());
+                    drop(peer_ice);
+                    let mut peer_candidates = self.peer_candidates.lock().await;
+                    let addrs: Vec<SocketAddr> = candidates.into_iter().map(|cand| cand.addr).collect();
+                    peer_candidates.insert(peer_id, addrs);
+                }
+            }
+            RiftPayload::Control(ControlMessage::IceCheck { session, candidate, .. }) => {
+                let ack = ControlMessage::IceCheckAck { session, candidate };
+                let from = header.source;
+                let _ = self.send_control_to_peer(from, ack, session).await;
+            }
+            RiftPayload::Control(ControlMessage::IceCheckAck { .. }) => {}
             RiftPayload::Control(ControlMessage::CapabilitiesUpdate(capabilities)) => {
                 let peer_id = header.source;
                 self.handle_capabilities(peer_id, capabilities).await?;
@@ -1623,6 +1739,9 @@ impl MeshInner {
                 let mut peer_candidates = self.peer_candidates.lock().await;
                 peer_candidates.remove(&peer_id);
                 drop(peer_candidates);
+                let mut peer_ice = self.peer_ice_candidates.lock().await;
+                peer_ice.remove(&peer_id);
+                drop(peer_ice);
                 let mut relay_candidates = self.relay_candidates.lock().await;
                 relay_candidates.remove(&peer_id);
                 drop(relay_candidates);

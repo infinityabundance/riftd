@@ -168,6 +168,21 @@ pub enum CallControl {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CandidateType {
+    Host,
+    Srflx,
+    Relay,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IceCandidate {
+    pub addr: std::net::SocketAddr,
+    pub cand_type: CandidateType,
+    pub priority: u32,
+    pub foundation: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ControlMessage {
     Join { peer_id: PeerId, display_name: Option<String> },
@@ -177,6 +192,20 @@ pub enum ControlMessage {
         capabilities: Capabilities,
         #[serde(default)]
         candidates: Vec<std::net::SocketAddr>,
+    },
+    IceCandidates {
+        peer_id: PeerId,
+        session: SessionId,
+        candidates: Vec<IceCandidate>,
+    },
+    IceCheck {
+        session: SessionId,
+        tie_breaker: u64,
+        candidate: IceCandidate,
+    },
+    IceCheckAck {
+        session: SessionId,
+        candidate: IceCandidate,
     },
     Leave { peer_id: PeerId },
     PeerState { peer_id: PeerId, relay_capable: bool },
