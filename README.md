@@ -130,6 +130,7 @@ theme = "dark"
 - `docs/srt-tooling.md`: SRT generation and inspection tooling.
 - `docs/predictive-rendezvous.md`: Predictive Rendezvous architecture and SRT format.
 - `docs/future-directions.md`: cross-domain synthesis and future directions.
+- `docs/hybrid-coordination.md`: optional hybrid coordination patterns.
 - `SECURITY.md`: threat model and security checklist.
 - `TURN_GUIDE.md`: self-hosted TURN setup and config.
 - `CHANGELOG.md`: release history.
