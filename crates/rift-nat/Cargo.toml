@@ -10,3 +10,4 @@ tokio = { version = "1", features = ["net", "sync", "time", "macros"] }
 rift-core = { path = "../rift-core" }
 rift-metrics = { path = "../rift-metrics" }
 tracing = "0.1"
+rand = "0.8"

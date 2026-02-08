@@ -1617,6 +1617,8 @@ fn build_sdk_config(
             local_ports: user_cfg.network.local_ports.clone(),
             known_peers: Vec::new(),
             invite,
+            stun_servers: user_cfg.network.stun_servers.clone().unwrap_or_default(),
+            stun_timeout_ms: user_cfg.network.stun_timeout_ms,
         },
     }
 }

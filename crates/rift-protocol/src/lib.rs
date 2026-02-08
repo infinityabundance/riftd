@@ -171,7 +171,13 @@ pub enum CallControl {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ControlMessage {
     Join { peer_id: PeerId, display_name: Option<String> },
-    Hello { peer_id: PeerId, public_key: Vec<u8>, capabilities: Capabilities },
+    Hello {
+        peer_id: PeerId,
+        public_key: Vec<u8>,
+        capabilities: Capabilities,
+        #[serde(default)]
+        candidates: Vec<std::net::SocketAddr>,
+    },
     Leave { peer_id: PeerId },
     PeerState { peer_id: PeerId, relay_capable: bool },
     Chat(ChatMessage),
@@ -189,6 +195,8 @@ pub enum ControlMessage {
 pub struct PeerInfo {
     pub peer_id: PeerId,
     pub addr: std::net::SocketAddr,
+    #[serde(default)]
+    pub addrs: Vec<std::net::SocketAddr>,
     pub relay_capable: bool,
 }
 

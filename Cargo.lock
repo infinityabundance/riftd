@@ -3129,6 +3129,7 @@ name = "rift-nat"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "rand 0.8.5",
  "rift-core",
  "rift-metrics",
  "thiserror 1.0.69",
