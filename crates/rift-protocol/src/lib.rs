@@ -25,6 +25,7 @@ const MAGIC: &[u8; 4] = b"RFT1";
 #[repr(u8)]
 pub enum ProtocolVersion {
     V1 = 1,
+    V2 = 2,
 }
 
 impl ProtocolVersion {
@@ -35,6 +36,7 @@ impl ProtocolVersion {
     pub fn from_u8(value: u8) -> Option<Self> {
         match value {
             1 => Some(ProtocolVersion::V1),
+            2 => Some(ProtocolVersion::V2),
             _ => None,
         }
     }
@@ -284,7 +286,7 @@ pub enum FrameError {
 }
 
 pub fn supported_versions() -> &'static [ProtocolVersion] {
-    &[ProtocolVersion::V1]
+    &[ProtocolVersion::V2, ProtocolVersion::V1]
 }
 
 pub fn select_version(theirs: &[ProtocolVersion]) -> Option<ProtocolVersion> {
