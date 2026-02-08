@@ -122,6 +122,10 @@ struct Cli {
 enum Commands {
     InitIdentity,
     Stats,
+    Srt {
+        #[command(subcommand)]
+        action: SrtCommand,
+    },
     TirInvite {
         /// 32-byte peer fingerprint as 64 hex characters.
         #[arg(value_name = "PEER_IDENTITY")]
@@ -318,6 +322,32 @@ enum SecurityCommand {
     ShowKnownHosts,
 }
 
+#[derive(Subcommand, Debug)]
+enum SrtCommand {
+    Generate {
+        /// Seconds from now for t0.
+        #[arg(long, default_value_t = 10)]
+        start_in: u64,
+        /// Rendezvous window in seconds.
+        #[arg(long, default_value_t = 120)]
+        window_secs: u64,
+        /// Slot duration in milliseconds.
+        #[arg(long, default_value_t = 250)]
+        slot_ms: u64,
+        /// Optional role hint for the human reader (caller|callee|symmetric).
+        #[arg(long)]
+        role_hint: Option<String>,
+        /// Optional allowed peer fingerprints (comma-separated 64-hex strings).
+        #[arg(long, value_delimiter = ',', num_args = 1..)]
+        peer_identity: Vec<String>,
+    },
+    Inspect {
+        /// SRT URI to decode.
+        #[arg(value_name = "SRT_URI")]
+        uri: String,
+    },
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     init_logging();
@@ -326,6 +356,16 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::InitIdentity => cmd_init_identity().await,
         Commands::Stats => cmd_stats().await,
+        Commands::Srt { action } => match action {
+            SrtCommand::Generate {
+                start_in,
+                window_secs,
+                slot_ms,
+                role_hint,
+                peer_identity,
+            } => cmd_srt_generate(start_in, window_secs, slot_ms, role_hint, peer_identity).await,
+            SrtCommand::Inspect { uri } => cmd_srt_inspect(uri).await,
+        },
         Commands::TirInvite { peer_identity } => cmd_tir_invite(peer_identity).await,
         Commands::TirAccept { srt_uri } => cmd_tir_accept(srt_uri).await,
         Commands::PrTest {
@@ -697,6 +737,97 @@ async fn cmd_tir_invite(peer_identity: String) -> Result<()> {
 
     let uri = token.to_uri().context("failed to encode SRT URI")?;
     println!("{uri}");
+    Ok(())
+}
+
+async fn cmd_srt_generate(
+    start_in: u64,
+    window_secs: u64,
+    slot_ms: u64,
+    role_hint: Option<String>,
+    peer_identity: Vec<String>,
+) -> Result<()> {
+    let mut allowed = Vec::new();
+    for item in peer_identity {
+        allowed.push(parse_fingerprint_hex(&item)?);
+    }
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system time before UNIX_EPOCH")?
+        .as_secs();
+    let t0 = now.saturating_add(start_in);
+
+    let token = SemanticRendezvousToken::new(
+        random_seed(),
+        IdentityConstraints {
+            allowed_fingerprints: allowed,
+        },
+        TimeModel {
+            t0,
+            window_secs,
+            slot_ms,
+        },
+        SearchStrategy::BasicDeterministic,
+        EscalationPolicy::None,
+    );
+
+    let uri = token.to_uri().context("failed to encode SRT URI")?;
+    println!("SRT generated:");
+    println!("  t0: {t0}");
+    println!("  window_secs: {window_secs}");
+    println!("  slot_ms: {slot_ms}");
+    if let Some(role) = role_hint {
+        println!("  role_hint: {role}");
+    }
+    println!(
+        "  identities: {}",
+        if token.identities.allowed_fingerprints.is_empty() {
+            "unrestricted".to_string()
+        } else {
+            format!("{}", token.identities.allowed_fingerprints.len())
+        }
+    );
+    println!("  uri: {uri}");
+    Ok(())
+}
+
+async fn cmd_srt_inspect(uri: String) -> Result<()> {
+    let token = SemanticRendezvousToken::from_uri(&uri)
+        .context("failed to decode SRT URI")?;
+
+    println!("SRT inspection:");
+    println!("  seed: {}", hex::encode(token.seed));
+    println!(
+        "  time_model: t0={} window_secs={} slot_ms={}",
+        token.time_model.t0, token.time_model.window_secs, token.time_model.slot_ms
+    );
+    println!("  search_strategy: {:?}", token.search_strategy);
+    println!("  escalation: {:?}", token.escalation);
+    if token.identities.allowed_fingerprints.is_empty() {
+        println!("  identities: unrestricted");
+    } else {
+        println!("  identities:");
+        for fp in &token.identities.allowed_fingerprints {
+            println!("    - {}", hex::encode(fp));
+        }
+    }
+
+    if token.time_model.slot_ms == 0 || token.time_model.window_secs == 0 {
+        println!("warning: time model has zero duration values");
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system time before UNIX_EPOCH")?
+        .as_secs();
+    let end = token
+        .time_model
+        .t0
+        .saturating_add(token.time_model.window_secs);
+    if now > end {
+        println!("warning: rendezvous window appears to be closed");
+    }
+
     Ok(())
 }
 
