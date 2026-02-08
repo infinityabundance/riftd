@@ -17,6 +17,10 @@ impl Identity {
     pub fn generate() -> Self {
         let mut rng = OsRng;
         let keypair = Keypair::generate(&mut rng);
+        Self::generate_from_keypair(keypair)
+    }
+
+    pub fn generate_from_keypair(keypair: Keypair) -> Self {
         let peer_id = peer_id_from_keypair(&keypair);
         Self { keypair, peer_id }
     }
@@ -77,4 +81,14 @@ fn peer_id_from_keypair(keypair: &Keypair) -> PeerId {
     hasher.update(keypair.public.as_bytes());
     let hash = hasher.finalize();
     PeerId(*hash.as_bytes())
+}
+
+pub fn peer_id_from_public_key_bytes(bytes: &[u8]) -> Result<PeerId, CoreError> {
+    if bytes.len() != 32 {
+        return Err(CoreError::InvalidKeyLength);
+    }
+    let mut hasher = Hasher::new();
+    hasher.update(bytes);
+    let hash = hasher.finalize();
+    Ok(PeerId(*hash.as_bytes()))
 }

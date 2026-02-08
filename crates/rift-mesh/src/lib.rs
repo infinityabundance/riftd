@@ -27,6 +27,8 @@ pub struct MeshConfig {
     pub listen_port: u16,
     pub relay_capable: bool,
     pub qos: QosProfile,
+    pub auth_token: Option<Vec<u8>>,
+    pub require_auth: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -54,6 +56,7 @@ pub enum MeshEvent {
     PeerSessionConfig { peer_id: PeerId, codec: CodecId, frame_ms: u16 },
     GroupCodec(CodecId),
     StatsUpdate { peer: PeerId, stats: LinkStats, global: GlobalStats },
+    PeerIdentity { peer_id: PeerId, public_key: Vec<u8> },
     IncomingCall { session: SessionId, from: PeerId },
     CallAccepted { session: SessionId, from: PeerId },
     CallDeclined {
@@ -99,6 +102,7 @@ struct MeshInner {
     peers_by_id: Mutex<HashMap<PeerId, SocketAddr>>,
     peer_caps: Mutex<HashMap<PeerId, bool>>,
     peer_capabilities: Mutex<HashMap<PeerId, Capabilities>>,
+    peer_public_keys: Mutex<HashMap<PeerId, Vec<u8>>>,
     peer_session: Mutex<HashMap<PeerId, SessionConfig>>,
     preferred_codecs: Mutex<Vec<CodecId>>,
     preferred_features: Mutex<Vec<FeatureFlag>>,
@@ -115,6 +119,8 @@ struct MeshInner {
     link_stats: Mutex<HashMap<PeerId, LinkStatsState>>,
     peer_traffic: Mutex<HashMap<PeerId, TrafficStats>>,
     global_traffic: Mutex<TrafficStats>,
+    auth_required: bool,
+    auth_token: Option<Vec<u8>>,
     events_tx: mpsc::Sender<MeshEvent>,
     relay_capable: bool,
     session_mgr: Mutex<SessionManager>,
@@ -141,6 +147,7 @@ struct PeerConnection {
     peer_id: Option<PeerId>,
     session: rift_core::noise::NoiseSession,
     socket_idx: usize,
+    authenticated: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -305,6 +312,7 @@ impl Mesh {
             peers_by_id: Mutex::new(HashMap::new()),
             peer_caps: Mutex::new(HashMap::new()),
             peer_capabilities: Mutex::new(HashMap::new()),
+            peer_public_keys: Mutex::new(HashMap::new()),
             peer_session: Mutex::new(HashMap::new()),
             preferred_codecs: Mutex::new(Vec::new()),
             preferred_features: Mutex::new(Vec::new()),
@@ -322,6 +330,8 @@ impl Mesh {
             link_stats: Mutex::new(HashMap::new()),
             peer_traffic: Mutex::new(HashMap::new()),
             global_traffic: Mutex::new(TrafficStats::default()),
+            auth_required: config.require_auth,
+            auth_token: config.auth_token,
             events_tx,
             relay_capable: config.relay_capable,
             session_mgr: Mutex::new(session_mgr),
@@ -694,9 +704,9 @@ impl MeshInner {
                 let len = hs.write_message(&[], &mut out)?;
                 let socket = self.socket_by_idx(socket_idx).await?;
                 socket.send_to(&out[..len], addr).await?;
-                let transport = hs.into_transport_mode()?;
-                self.install_connection(addr, transport, socket_idx).await?;
-            }
+        let transport = hs.into_transport_mode()?;
+        self.install_connection(addr, transport, socket_idx).await?;
+    }
             PendingHandshake::ResponderAwait3(mut hs) => {
                 let mut out = [0u8; MAX_PACKET];
                 hs.read_message(data, &mut out)?;
@@ -744,10 +754,19 @@ impl MeshInner {
             peer_id: None,
             session: rift_core::noise::NoiseSession::new(transport),
             socket_idx,
+            authenticated: !self.auth_required,
         };
         let mut connections = self.connections.lock().await;
         connections.insert(addr, conn);
         drop(connections);
+
+        if let Some(token) = self.auth_token.clone() {
+            let auth = ControlMessage::Auth { token };
+            let seq = self.next_control_seq().await;
+            let _ = self
+                .send_payload(addr, RiftPayload::Control(auth), seq, now_timestamp(), SessionId::NONE)
+                .await;
+        }
 
         let join = ControlMessage::Join {
             peer_id: self.identity.peer_id,
@@ -885,8 +904,10 @@ impl MeshInner {
 
     async fn send_hello(&self, addr: SocketAddr) -> Result<()> {
         let caps = self.default_capabilities().await;
+        let public_key = self.identity.keypair.public.to_bytes().to_vec();
         let msg = RiftPayload::Control(ControlMessage::Hello {
             peer_id: self.identity.peer_id,
+            public_key,
             capabilities: caps,
         });
         let seq = self.next_control_seq().await;
@@ -1205,6 +1226,19 @@ impl MeshInner {
         header: RiftFrameHeader,
         payload: RiftPayload,
     ) -> Result<()> {
+        if self.auth_required && !matches!(payload, RiftPayload::Control(ControlMessage::Auth { .. })) {
+            let authenticated = {
+                let connections = self.connections.lock().await;
+                connections
+                    .get(&addr)
+                    .map(|conn| conn.authenticated)
+                    .unwrap_or(false)
+            };
+            if !authenticated {
+                tracing::warn!(%addr, "unauthenticated peer message rejected");
+                return Ok(());
+            }
+        }
         match payload {
             RiftPayload::Control(ControlMessage::Join { peer_id, .. }) => {
                 let mut connections = self.connections.lock().await;
@@ -1259,7 +1293,18 @@ impl MeshInner {
                 peer_caps.insert(peer_id, relay_capable);
                 drop(peer_caps);
             }
-            RiftPayload::Control(ControlMessage::Hello { peer_id, capabilities }) => {
+            RiftPayload::Control(ControlMessage::Hello { peer_id, public_key, capabilities }) => {
+                {
+                    let mut keys = self.peer_public_keys.lock().await;
+                    keys.insert(peer_id, public_key.clone());
+                }
+                let _ = self
+                    .events_tx
+                    .send(MeshEvent::PeerIdentity {
+                        peer_id,
+                        public_key: public_key.clone(),
+                    })
+                    .await;
                 self.handle_capabilities(peer_id, capabilities).await?;
             }
             RiftPayload::Control(ControlMessage::CapabilitiesUpdate(capabilities)) => {
@@ -1273,6 +1318,9 @@ impl MeshInner {
                 let mut peer_caps = self.peer_caps.lock().await;
                 peer_caps.remove(&peer_id);
                 drop(peer_caps);
+                let mut peer_keys = self.peer_public_keys.lock().await;
+                peer_keys.remove(&peer_id);
+                drop(peer_keys);
                 let mut routes = self.routes.lock().await;
                 routes.remove(&peer_id);
                 let removed: Vec<PeerId> = routes
@@ -1322,6 +1370,18 @@ impl MeshInner {
             RiftPayload::Control(ControlMessage::Pong { sent_at_ms, .. }) => {
                 let from = header.source;
                 self.update_rtt(from, sent_at_ms).await;
+            }
+            RiftPayload::Control(ControlMessage::Auth { token }) => {
+                let expected = self.auth_token.clone().unwrap_or_default();
+                if self.auth_required && token != expected {
+                    tracing::warn!(%addr, "auth token mismatch");
+                    self.disconnect_addr(addr).await;
+                    return Ok(());
+                }
+                let mut connections = self.connections.lock().await;
+                if let Some(conn) = connections.get_mut(&addr) {
+                    conn.authenticated = true;
+                }
             }
             RiftPayload::Control(ControlMessage::PeerList { peers }) => {
                 self.handle_peer_list(addr, peers).await?;
@@ -1657,6 +1717,26 @@ impl MeshInner {
         Ok(())
     }
 
+    async fn disconnect_addr(&self, addr: SocketAddr) {
+        let peer_id = {
+            let mut connections = self.connections.lock().await;
+            connections.remove(&addr).and_then(|conn| conn.peer_id)
+        };
+        let Some(peer_id) = peer_id else {
+            return;
+        };
+        let mut peers = self.peers_by_id.lock().await;
+        peers.remove(&peer_id);
+        drop(peers);
+        let mut routes = self.routes.lock().await;
+        routes.remove(&peer_id);
+        drop(routes);
+        let mut peer_addrs = self.peer_addrs.lock().await;
+        peer_addrs.remove(&peer_id);
+        drop(peer_addrs);
+        let _ = self.events_tx.send(MeshEvent::PeerLeft(peer_id)).await;
+    }
+
     async fn socket_by_idx(&self, socket_idx: usize) -> Result<Arc<UdpSocket>> {
         let sockets = self.sockets.lock().await;
         sockets
@@ -1831,6 +1911,16 @@ impl MeshHandle {
     pub async fn connect_with_socket(&self, socket: UdpSocket, addr: SocketAddr) -> Result<()> {
         let socket_idx = self.inner.add_socket(socket).await?;
         self.inner.initiate_handshake(addr, socket_idx).await
+    }
+
+    pub async fn disconnect_peer(&self, peer_id: PeerId) {
+        let addr = {
+            let peers = self.inner.peers_by_id.lock().await;
+            peers.get(&peer_id).copied()
+        };
+        if let Some(addr) = addr {
+            self.inner.disconnect_addr(addr).await;
+        }
     }
 }
 

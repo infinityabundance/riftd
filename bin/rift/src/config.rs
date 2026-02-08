@@ -43,6 +43,13 @@ use serde::Deserialize;
 //
 // [metrics]
 // enabled = true
+//
+// [security]
+// trust_on_first_use = true
+// known_hosts_path = "~/.config/rift/known_hosts"
+// reject_on_mismatch = false
+// channel_shared_secret = ""
+// audit_log_path = "~/.config/rift/audit.log"
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct UserConfig {
@@ -60,6 +67,8 @@ pub struct UserConfig {
     pub logging: LoggingSection,
     #[serde(default)]
     pub metrics: MetricsSection,
+    #[serde(default)]
+    pub security: SecuritySection,
     #[serde(default)]
     pub ui: UiSection,
 }
@@ -149,6 +158,27 @@ impl Default for MetricsSection {
     fn default() -> Self {
         Self {
             enabled: Some(true),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SecuritySection {
+    pub trust_on_first_use: Option<bool>,
+    pub known_hosts_path: Option<String>,
+    pub reject_on_mismatch: Option<bool>,
+    pub channel_shared_secret: Option<String>,
+    pub audit_log_path: Option<String>,
+}
+
+impl Default for SecuritySection {
+    fn default() -> Self {
+        Self {
+            trust_on_first_use: Some(true),
+            known_hosts_path: None,
+            reject_on_mismatch: Some(false),
+            channel_shared_secret: None,
+            audit_log_path: None,
         }
     }
 }
