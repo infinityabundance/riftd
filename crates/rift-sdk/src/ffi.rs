@@ -2,7 +2,7 @@ use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int};
 use std::ptr;
 
-use crate::{RiftConfig, RiftEvent, RiftHandle, RiftError};
+use crate::{RiftConfig, RiftEvent, RiftHandle, RiftError, SDK_VERSION, SDK_ABI_VERSION};
 use rift_protocol::SessionId;
 use rift_core::PeerId;
 
@@ -135,6 +135,16 @@ pub extern "C" fn rift_init(config_path: *const c_char, out_error: *mut RiftErro
 
     let boxed = Box::new(RiftHandleC { runtime, handle });
     Box::into_raw(boxed)
+}
+
+#[no_mangle]
+pub extern "C" fn rift_sdk_version() -> *const c_char {
+    concat!(env!("CARGO_PKG_VERSION"), "\0").as_ptr() as *const c_char
+}
+
+#[no_mangle]
+pub extern "C" fn rift_sdk_abi_version() -> c_int {
+    SDK_ABI_VERSION as c_int
 }
 
 #[no_mangle]

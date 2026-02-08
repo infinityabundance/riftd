@@ -43,6 +43,10 @@ typedef enum {
     RIFT_ERR_OTHER = 255
 } RiftErrorCode;
 
+// SDK versioning
+const char* rift_sdk_version(void);
+int rift_sdk_abi_version(void);
+
 RiftHandle* rift_init(const char* config_path, RiftErrorCode* out_error);
 void rift_free(RiftHandle* handle);
 
