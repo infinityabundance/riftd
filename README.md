@@ -127,6 +127,7 @@ theme = "dark"
 ## Docs
 - `CODE.md`: high-level code map.
 - `PROTOCOL.md`: protocol framing and message types.
+- `docs/srt-tooling.md`: SRT generation and inspection tooling.
 - `docs/predictive-rendezvous.md`: Predictive Rendezvous architecture and SRT format.
 - `SECURITY.md`: threat model and security checklist.
 - `TURN_GUIDE.md`: self-hosted TURN setup and config.
