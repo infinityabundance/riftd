@@ -10,6 +10,7 @@ rift-discovery = { path = "../rift-discovery" }
 rift-nat = { path = "../rift-nat" }
 rift-protocol = { path = "../rift-protocol" }
 rift-metrics = { path = "../rift-metrics" }
+rift-pr = { path = "../rift-pr", optional = true }
 snow = "0.9"
 tokio = { version = "1", features = ["macros", "net", "rt", "sync", "time"] }
 tokio-stream = "0.1"
@@ -17,6 +18,10 @@ tracing = "0.1"
 aes-gcm = { version = "0.10", features = ["alloc"] }
 rand = "0.8"
 bincode = "1"
+
+[features]
+default = ["predictive-rendezvous"]
+predictive-rendezvous = ["rift-pr"]
 
 [dev-dependencies]
 criterion = "0.5"
