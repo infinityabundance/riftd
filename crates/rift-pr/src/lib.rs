@@ -1,6 +1,7 @@
 //! Predictive Rendezvous (PR) core types.
 
 pub mod identity;
+pub mod metrics;
 pub mod probe;
 pub mod runner;
 pub mod schedule;
@@ -8,6 +9,7 @@ pub mod strategy;
 pub mod time;
 
 pub use identity::IdentityConstraints;
+pub use metrics::RendezvousMetrics;
 pub use probe::{
     parse_probe_payload, rendezvous_id_from_seed, validate_probe_for_token, ParsedProbe, ProbeError,
     RendezvousOutcome, RendezvousState,

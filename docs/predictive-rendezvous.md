@@ -74,3 +74,14 @@ rift tir-accept <riftd-srt://...>
 ```
 
 When `tir-accept` runs, it checks the SRT's identity constraints against the local identity if available and prints a decoded summary.
+
+## Metrics and Logging
+Predictive Rendezvous emits debug-level `tracing` logs with the rendezvous ID and slot metadata. These logs include per-slot emission, success, and timeout summaries.
+
+The async runner also collects a `RendezvousMetrics` snapshot, including:
+- `slots_attempted` and `slots_succeeded`
+- `probes_sent` and `probes_received`
+- `total_duration_ms` and `time_to_first_packet_ms`
+- `nat_behavior_notes` (e.g. `port_preserving`, `high_variance`)
+
+Use `rift pr-test <peer-addr> --show-metrics` to print a summarized metrics table for manual inspection.
