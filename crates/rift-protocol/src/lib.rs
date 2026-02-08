@@ -25,6 +25,7 @@ const MAGIC: &[u8; 4] = b"RFT1";
 #[repr(u8)]
 pub enum ProtocolVersion {
     V1 = 1,
+    V2 = 2,
 }
 
 impl ProtocolVersion {
@@ -35,6 +36,7 @@ impl ProtocolVersion {
     pub fn from_u8(value: u8) -> Option<Self> {
         match value {
             1 => Some(ProtocolVersion::V1),
+            2 => Some(ProtocolVersion::V2),
             _ => None,
         }
     }
@@ -168,6 +170,21 @@ pub enum CallControl {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CandidateType {
+    Host,
+    Srflx,
+    Relay,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IceCandidate {
+    pub addr: std::net::SocketAddr,
+    pub cand_type: CandidateType,
+    pub priority: u32,
+    pub foundation: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ControlMessage {
     Join { peer_id: PeerId, display_name: Option<String> },
@@ -177,6 +194,20 @@ pub enum ControlMessage {
         capabilities: Capabilities,
         #[serde(default)]
         candidates: Vec<std::net::SocketAddr>,
+    },
+    IceCandidates {
+        peer_id: PeerId,
+        session: SessionId,
+        candidates: Vec<IceCandidate>,
+    },
+    IceCheck {
+        session: SessionId,
+        tie_breaker: u64,
+        candidate: IceCandidate,
+    },
+    IceCheckAck {
+        session: SessionId,
+        candidate: IceCandidate,
     },
     Leave { peer_id: PeerId },
     PeerState { peer_id: PeerId, relay_capable: bool },
@@ -255,7 +286,7 @@ pub enum FrameError {
 }
 
 pub fn supported_versions() -> &'static [ProtocolVersion] {
-    &[ProtocolVersion::V1]
+    &[ProtocolVersion::V2, ProtocolVersion::V1]
 }
 
 pub fn select_version(theirs: &[ProtocolVersion]) -> Option<ProtocolVersion> {
