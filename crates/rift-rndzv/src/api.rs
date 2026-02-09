@@ -133,6 +133,59 @@ impl fmt::Display for RndzvError {
 
 impl std::error::Error for RndzvError {}
 
+/// Target parameters for establishing a rendezvous session.
+pub struct RndzvConnectTarget {
+    pub srt: Srt,
+    pub local_peer: PeerId,
+}
+
+impl RndzvConnectTarget {
+    /// Build a connect target from an SRT and local peer id.
+    pub fn from_srt(srt: Srt, local_peer: PeerId) -> Self {
+        Self { srt, local_peer }
+    }
+}
+
+/// High-level connector for establishing rndzv sessions.
+pub struct RndzvConnector {
+    // later: config, handles to transport, etc.
+    _private: (),
+}
+
+impl RndzvConnector {
+    /// Create a new connector instance.
+    pub fn new() -> Self {
+        Self { _private: () }
+    }
+
+    /// Connect using a rendezvous target (stub).
+    pub async fn connect(
+        &self,
+        _target: RndzvConnectTarget,
+    ) -> Result<RndzvSession, RndzvError> {
+        Err(RndzvError::NotImplemented("connect"))
+    }
+}
+
+/// Listener for inbound rndzv sessions.
+pub struct RndzvListener {
+    space: RendezvousSpaceId,
+    local_peer: PeerId,
+    // later: references to PR engine, UDP sockets, etc.
+}
+
+impl RndzvListener {
+    /// Create a new listener for a rendezvous space.
+    pub fn new(space: RendezvousSpaceId, local_peer: PeerId) -> Self {
+        Self { space, local_peer }
+    }
+
+    /// Accept an incoming rendezvous session (stub).
+    pub async fn accept(&self) -> Result<RndzvSession, RndzvError> {
+        Err(RndzvError::NotImplemented("accept"))
+    }
+}
+
 /// Placeholder for future session/channel APIs.
 #[derive(Debug, Default)]
 pub struct RndzvClient;
@@ -143,3 +196,21 @@ impl RndzvClient {
         Self
     }
 }
+
+/// Example showing the intended connect flow.
+///
+/// ```ignore
+/// use rift_rndzv::{
+///     PeerId, RendezvousSpaceId, RndzvConnector, RndzvConnectTarget, Srt,
+/// };
+///
+/// # async fn example() -> Result<(), rift_rndzv::RndzvError> {
+/// let local = PeerId([0u8; 32]);
+/// let srt = Srt::from_uri("riftd-srt://v1?space=00&seed=00&t0=0&tw=1&slot=1&ss=basic&esc=none")?;
+/// let target = RndzvConnectTarget::from_srt(srt, local);
+/// let connector = RndzvConnector::new();
+/// let session = connector.connect(target).await?;
+/// let _ch = session.open_channel(rift_rndzv::ChannelKind::ReliableOrdered).await?;
+/// # Ok(())
+/// # }
+/// ```
