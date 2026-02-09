@@ -1,48 +1,50 @@
 //! Higher-level networking/session API (stub).
 
+use std::collections::HashMap;
 use std::fmt;
-use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use tokio::net::UdpSocket;
+use tokio::sync::{mpsc, Mutex, watch};
+use tokio::task::JoinHandle;
 
 /// Stable identifier for a peer in the rndzv layer.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct PeerId(pub [u8; 32]);
 
 /// Logical coordination namespace for a rendezvous session.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct RendezvousSpaceId(pub [u8; 32]);
 
 /// Public alias for Semantic Rendezvous Tokens.
 pub use crate::srt::SemanticRendezvousToken as Srt;
 
 /// Stable identifier for a rendezvous session.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct SessionId(pub [u8; 16]);
 
 /// Underlying path/transport binding (placeholder).
 #[derive(Debug)]
 pub struct PathBinding {
     /// Local UDP socket bound for this session.
-    pub local_socket: std::net::UdpSocket,
+    pub socket: Arc<UdpSocket>,
     /// Remote socket address selected for the session.
     pub remote_addr: std::net::SocketAddr,
     /// Demux state for channel receivers.
-    pub demux: Arc<Mutex<DemuxState>>,
+    demux: Arc<Mutex<DemuxState>>,
     // TODO: add crypto context later.
 }
 
 #[derive(Debug)]
 struct DemuxState {
-    socket: std::net::UdpSocket,
-    channels: std::collections::HashMap<ChannelId, std::sync::mpsc::Sender<Vec<u8>>>,
+    channels: HashMap<ChannelId, mpsc::Sender<Vec<u8>>>,
     next_channel: u32,
 }
 
 impl DemuxState {
-    fn new(socket: std::net::UdpSocket) -> Self {
+    fn new() -> Self {
         Self {
-            socket,
-            channels: std::collections::HashMap::new(),
+            channels: HashMap::new(),
             next_channel: 1,
         }
     }
@@ -53,7 +55,7 @@ impl DemuxState {
         id
     }
 
-    fn register(&mut self, id: ChannelId, tx: std::sync::mpsc::Sender<Vec<u8>>) {
+    fn register(&mut self, id: ChannelId, tx: mpsc::Sender<Vec<u8>>) {
         self.channels.insert(id, tx);
     }
 
@@ -62,49 +64,44 @@ impl DemuxState {
     }
 }
 
-fn start_demux_thread(state: Arc<Mutex<DemuxState>>) {
-    std::thread::spawn(move || {
+fn start_demux_task(
+    socket: Arc<UdpSocket>,
+    state: Arc<Mutex<DemuxState>>,
+    mut shutdown: watch::Receiver<bool>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
         let mut buf = [0u8; 2048];
         loop {
-            let (len, _addr) = {
-                let state_guard = match state.lock() {
-                    Ok(guard) => guard,
-                    Err(_) => return,
-                };
-                match state_guard.socket.recv_from(&mut buf) {
-                    Ok(res) => res,
-                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(std::time::Duration::from_millis(5));
-                        continue;
+            tokio::select! {
+                _ = shutdown.changed() => {
+                    if *shutdown.borrow() {
+                        break;
                     }
-                    Err(err) if err.kind() == std::io::ErrorKind::TimedOut => {
-                        std::thread::sleep(std::time::Duration::from_millis(5));
-                        continue;
-                    }
-                    Err(_) => return,
                 }
-            };
-
-            if let Ok((channel_id, payload)) = decode_frame(&buf[..len]) {
-                let tx = {
-                    let state_guard = match state.lock() {
-                        Ok(guard) => guard,
-                        Err(_) => return,
+                res = socket.recv_from(&mut buf) => {
+                    let (len, _addr) = match res {
+                        Ok(res) => res,
+                        Err(_) => break,
                     };
-                    state_guard.channels.get(&channel_id).cloned()
-                };
-                if let Some(tx) = tx {
-                    let _ = tx.send(payload);
+                    if let Ok((channel_id, payload)) = decode_frame(&buf[..len]) {
+                        let tx = {
+                            let guard = state.lock().await;
+                            guard.channels.get(&channel_id).cloned()
+                        };
+                        if let Some(tx) = tx {
+                            let _ = tx.send(payload).await;
+                        }
+                    }
                 }
             }
         }
-    });
+    })
 }
 
 fn encode_frame(channel_id: ChannelId, payload: &[u8]) -> Result<Vec<u8>, RndzvError> {
     let mut out = Vec::with_capacity(8 + payload.len());
     out.extend_from_slice(&channel_id.0.to_le_bytes());
-    let len = payload
+    let len: u32 = payload
         .len()
         .try_into()
         .map_err(|_| RndzvError::InvalidState("payload too large"))?;
@@ -151,6 +148,8 @@ pub struct RndzvSession {
     pub space: RendezvousSpaceId,
     // Underlying path/transport binding to be filled in later.
     pub path: Arc<PathBinding>,
+    shutdown_tx: watch::Sender<bool>,
+    demux_task: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 impl RndzvSession {
@@ -161,6 +160,8 @@ impl RndzvSession {
         remote: PeerId,
         space: RendezvousSpaceId,
         path: PathBinding,
+        shutdown_tx: watch::Sender<bool>,
+        demux_task: JoinHandle<()>,
     ) -> Self {
         Self {
             id,
@@ -168,6 +169,8 @@ impl RndzvSession {
             remote,
             space,
             path: Arc::new(path),
+            shutdown_tx,
+            demux_task: Arc::new(Mutex::new(Some(demux_task))),
         }
     }
 
@@ -198,21 +201,36 @@ impl RndzvSession {
             other => other,
         };
         let channel_id = {
-            let mut demux = self.path.demux.lock().map_err(|_| RndzvError::InvalidState("demux poisoned"))?;
+            let mut demux = self.path.demux.lock().await;
             demux.next_channel_id()
         };
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = mpsc::channel(64);
         {
-            let mut demux = self.path.demux.lock().map_err(|_| RndzvError::InvalidState("demux poisoned"))?;
+            let mut demux = self.path.demux.lock().await;
             demux.register(channel_id, tx);
         }
         Ok(RndzvChannel {
             id: channel_id,
             kind,
-            session_id: self.id,
             path: self.path.clone(),
             rx: Arc::new(Mutex::new(rx)),
         })
+    }
+
+    /// Shut down the session and stop the demux task.
+    pub async fn shutdown(&self) -> Result<(), RndzvError> {
+        let _ = self.shutdown_tx.send(true);
+        let mut task = self.demux_task.lock().await;
+        if let Some(handle) = task.take() {
+            let _ = handle.await;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for RndzvSession {
+    fn drop(&mut self) {
+        let _ = self.shutdown_tx.send(true);
     }
 }
 
@@ -221,42 +239,31 @@ impl RndzvSession {
 pub struct RndzvChannel {
     pub id: ChannelId,
     pub kind: ChannelKind,
-    session_id: SessionId,
     path: Arc<PathBinding>,
-    rx: Arc<Mutex<std::sync::mpsc::Receiver<Vec<u8>>>>,
+    rx: Arc<Mutex<mpsc::Receiver<Vec<u8>>>>,
 }
 
 impl RndzvChannel {
     /// Send data on this channel (stub).
-    pub async fn send(&self, _data: &[u8]) -> Result<(), RndzvError> {
-        let frame = encode_frame(self.id, _data)?;
+    pub async fn send(&self, data: &[u8]) -> Result<(), RndzvError> {
+        let frame = encode_frame(self.id, data)?;
         self.path
-            .local_socket
+            .socket
             .send_to(&frame, self.path.remote_addr)
+            .await
             .map_err(RndzvError::Io)?;
         Ok(())
     }
 
     /// Receive data from this channel (stub).
     pub async fn recv(&self) -> Result<Option<Vec<u8>>, RndzvError> {
-        let rx = self
-            .rx
-            .lock()
-            .map_err(|_| RndzvError::InvalidState("receiver poisoned"))?;
-        match rx.recv_timeout(std::time::Duration::from_millis(100)) {
-            Ok(data) => Ok(Some(data)),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Ok(None),
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Ok(None),
-        }
+        let mut rx = self.rx.lock().await;
+        Ok(rx.recv().await)
     }
 
     /// Close this channel and unregister it.
-    pub fn close(&self) -> Result<(), RndzvError> {
-        let mut demux = self
-            .path
-            .demux
-            .lock()
-            .map_err(|_| RndzvError::InvalidState("demux poisoned"))?;
+    pub async fn close(&self) -> Result<(), RndzvError> {
+        let mut demux = self.path.demux.lock().await;
         demux.unregister(self.id);
         Ok(())
     }
@@ -357,19 +364,13 @@ impl RndzvConnector {
         let bind_addr = self
             .local_bind
             .unwrap_or_else(|| std::net::SocketAddr::from(([0, 0, 0, 0], 0)));
-        let socket = std::net::UdpSocket::bind(bind_addr).map_err(RndzvError::Io)?;
+        let socket = UdpSocket::bind(bind_addr).await.map_err(RndzvError::Io)?;
         if use_broadcast {
             socket.set_broadcast(true).map_err(RndzvError::Io)?;
         }
-        socket
-            .set_read_timeout(Some(std::time::Duration::from_millis(50)))
-            .map_err(RndzvError::Io)?;
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|_| RndzvError::InvalidState("system clock before unix epoch"))?;
-        let start_ms = now.as_millis() as u64;
-        let deadline_ms = start_ms.saturating_add(self.timeout.as_millis() as u64);
+        let start_instant = tokio::time::Instant::now();
+        let deadline = start_instant + self.timeout;
 
         let mut sender_fingerprint = [0u8; 16];
         sender_fingerprint.copy_from_slice(&target.local_peer.0[..16]);
@@ -379,14 +380,14 @@ impl RndzvConnector {
         let mut buf = [0u8; 1500];
 
         loop {
+            if tokio::time::Instant::now() >= deadline {
+                return Err(RndzvError::Timeout);
+            }
+
             let now_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_err(|_| RndzvError::InvalidState("system clock before unix epoch"))?
                 .as_millis() as u64;
-
-            if now_ms >= deadline_ms {
-                return Err(RndzvError::Timeout);
-            }
 
             if let Some(slot) = compute_slot_params(
                 &target.srt.seed,
@@ -404,17 +405,17 @@ impl RndzvConnector {
                     if use_broadcast {
                         let port = base_port.wrapping_add(slot.remote_port_offset);
                         let addr = std::net::SocketAddr::from(([255, 255, 255, 255], port));
-                        let _ = socket.send_to(&payload, addr);
+                        let _ = socket.send_to(&payload, addr).await;
                     } else {
                         for addr in &self.remote_addrs {
-                            let _ = socket.send_to(&payload, addr);
+                            let _ = socket.send_to(&payload, addr).await;
                         }
                     }
                 }
             }
 
-            match socket.recv_from(&mut buf) {
-                Ok((len, addr)) => {
+            match tokio::time::timeout(std::time::Duration::from_millis(50), socket.recv_from(&mut buf)).await {
+                Ok(Ok((len, addr))) => {
                     if let Ok(parsed) = parse_probe_payload(&buf[..len]) {
                         if validate_probe_for_token(&target.srt, &parsed) {
                             let mut remote_bytes = [0u8; 32];
@@ -423,15 +424,12 @@ impl RndzvConnector {
                             let mut session_id = [0u8; 16];
                             session_id[..8].copy_from_slice(&rendezvous_id.to_le_bytes());
                             let session_id = SessionId(session_id);
-                            socket
-                                .set_nonblocking(true)
-                                .map_err(RndzvError::Io)?;
-                            let demux = Arc::new(Mutex::new(DemuxState::new(
-                                socket.try_clone().map_err(RndzvError::Io)?,
-                            )));
-                            start_demux_thread(demux.clone());
+                            let socket = Arc::new(socket);
+                            let demux = Arc::new(Mutex::new(DemuxState::new()));
+                            let (shutdown_tx, shutdown_rx) = watch::channel(false);
+                            let demux_task = start_demux_task(socket.clone(), demux.clone(), shutdown_rx);
                             let path = PathBinding {
-                                local_socket: socket,
+                                socket,
                                 remote_addr: addr,
                                 demux,
                             };
@@ -441,16 +439,17 @@ impl RndzvConnector {
                                 remote_peer,
                                 target.srt.space,
                                 path,
+                                shutdown_tx,
+                                demux_task,
                             ));
                         }
                     }
                 }
-                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
-                Err(err) if err.kind() == std::io::ErrorKind::TimedOut => {}
-                Err(err) => return Err(RndzvError::Io(err)),
+                Ok(Err(err)) => return Err(RndzvError::Io(err)),
+                Err(_) => {}
             }
 
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     }
 }
@@ -511,19 +510,13 @@ impl RndzvListener {
         }
 
         let base_port = derive_base_port(&srt.seed);
-        let bind_addr = self.local_bind.unwrap_or_else(|| {
-            std::net::SocketAddr::from(([0, 0, 0, 0], base_port))
-        });
-        let socket = std::net::UdpSocket::bind(bind_addr).map_err(RndzvError::Io)?;
-        socket
-            .set_read_timeout(Some(std::time::Duration::from_millis(50)))
-            .map_err(RndzvError::Io)?;
+        let bind_addr = self
+            .local_bind
+            .unwrap_or_else(|| std::net::SocketAddr::from(([0, 0, 0, 0], base_port)));
+        let socket = UdpSocket::bind(bind_addr).await.map_err(RndzvError::Io)?;
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|_| RndzvError::InvalidState("system clock before unix epoch"))?;
-        let start_ms = now.as_millis() as u64;
-        let deadline_ms = start_ms.saturating_add(self.timeout.as_millis() as u64);
+        let start_instant = tokio::time::Instant::now();
+        let deadline = start_instant + self.timeout;
 
         let rendezvous_id = rendezvous_id_from_seed(&srt.seed);
         let mut sender_fingerprint = [0u8; 16];
@@ -531,17 +524,12 @@ impl RndzvListener {
 
         let mut buf = [0u8; 1500];
         loop {
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_err(|_| RndzvError::InvalidState("system clock before unix epoch"))?
-                .as_millis() as u64;
-
-            if now_ms >= deadline_ms {
+            if tokio::time::Instant::now() >= deadline {
                 return Err(RndzvError::Timeout);
             }
 
-            match socket.recv_from(&mut buf) {
-                Ok((len, addr)) => {
+            match tokio::time::timeout(std::time::Duration::from_millis(50), socket.recv_from(&mut buf)).await {
+                Ok(Ok((len, addr))) => {
                     if let Ok(parsed) = parse_probe_payload(&buf[..len]) {
                         if validate_probe_for_token(srt, &parsed) {
                             let response = build_probe_payload(ProbePayload {
@@ -549,7 +537,7 @@ impl RndzvListener {
                                 slot_index: parsed.slot_index,
                                 sender_fingerprint,
                             });
-                            let _ = socket.send_to(&response, addr);
+                            let _ = socket.send_to(&response, addr).await;
 
                             let mut remote_bytes = [0u8; 32];
                             remote_bytes[..16].copy_from_slice(&parsed.sender_fingerprint);
@@ -557,15 +545,12 @@ impl RndzvListener {
                             let mut session_id = [0u8; 16];
                             session_id[..8].copy_from_slice(&rendezvous_id.to_le_bytes());
                             let session_id = SessionId(session_id);
-                            socket
-                                .set_nonblocking(true)
-                                .map_err(RndzvError::Io)?;
-                            let demux = Arc::new(Mutex::new(DemuxState::new(
-                                socket.try_clone().map_err(RndzvError::Io)?,
-                            )));
-                            start_demux_thread(demux.clone());
+                            let socket = Arc::new(socket);
+                            let demux = Arc::new(Mutex::new(DemuxState::new()));
+                            let (shutdown_tx, shutdown_rx) = watch::channel(false);
+                            let demux_task = start_demux_task(socket.clone(), demux.clone(), shutdown_rx);
                             let path = PathBinding {
-                                local_socket: socket,
+                                socket,
                                 remote_addr: addr,
                                 demux,
                             };
@@ -575,16 +560,17 @@ impl RndzvListener {
                                 remote_peer,
                                 self.space,
                                 path,
+                                shutdown_tx,
+                                demux_task,
                             ));
                         }
                     }
                 }
-                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
-                Err(err) if err.kind() == std::io::ErrorKind::TimedOut => {}
-                Err(err) => return Err(RndzvError::Io(err)),
+                Ok(Err(err)) => return Err(RndzvError::Io(err)),
+                Err(_) => {}
             }
 
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     }
 }
@@ -623,13 +609,11 @@ mod tests {
     use super::*;
     use crate::srt::{EscalationPolicy, IdentityConstraints, SearchStrategy};
     use crate::time::TimeModel;
-    use futures::executor::block_on;
     use std::net::SocketAddr;
-    use std::thread;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-    #[test]
-    fn connect_loopback_succeeds() {
+    #[tokio::test]
+    async fn connect_loopback_succeeds() {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -653,33 +637,34 @@ mod tests {
         let addr_a: SocketAddr = "127.0.0.1:40001".parse().unwrap();
         let addr_b: SocketAddr = "127.0.0.1:40002".parse().unwrap();
 
-        let handle_a = thread::spawn(move || {
+        let handle_a = tokio::spawn(async move {
             let connector = RndzvConnector::new()
                 .with_local_bind(addr_a)
                 .with_remote_addrs(vec![addr_b])
                 .with_timeout(Duration::from_secs(3));
             let target = RndzvConnectTarget::from_srt(srt_a, PeerId([1u8; 32]));
-            block_on(connector.connect(target))
+            connector.connect(target).await
         });
 
-        let handle_b = thread::spawn(move || {
+        let handle_b = tokio::spawn(async move {
             let connector = RndzvConnector::new()
                 .with_local_bind(addr_b)
                 .with_remote_addrs(vec![addr_a])
                 .with_timeout(Duration::from_secs(3));
             let target = RndzvConnectTarget::from_srt(srt_b, PeerId([2u8; 32]));
-            block_on(connector.connect(target))
+            connector.connect(target).await
         });
 
-        let res_a = handle_a.join().expect("thread a");
-        let res_b = handle_b.join().expect("thread b");
+        let (res_a, res_b) = tokio::join!(handle_a, handle_b);
+        let res_a = res_a.expect("task a");
+        let res_b = res_b.expect("task b");
 
         assert!(res_a.is_ok(), "connect A failed: {res_a:?}");
         assert!(res_b.is_ok(), "connect B failed: {res_b:?}");
     }
 
-    #[test]
-    fn listener_accepts_connector() {
+    #[tokio::test]
+    async fn listener_accepts_connector() {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -705,32 +690,33 @@ mod tests {
         let srt_listener = srt.clone();
         let srt_connector = srt.clone();
 
-        let handle_listener = thread::spawn(move || {
+        let handle_listener = tokio::spawn(async move {
             let listener = RndzvListener::new(RendezvousSpaceId([9u8; 32]), PeerId([3u8; 32]))
                 .with_srt(srt_listener)
                 .with_local_bind(addr_listener)
                 .with_timeout(Duration::from_secs(3));
-            block_on(listener.accept())
+            listener.accept().await
         });
 
-        let handle_connector = thread::spawn(move || {
+        let handle_connector = tokio::spawn(async move {
             let connector = RndzvConnector::new()
                 .with_local_bind(addr_connector)
                 .with_remote_addrs(vec![addr_listener])
                 .with_timeout(Duration::from_secs(3));
             let target = RndzvConnectTarget::from_srt(srt_connector, PeerId([4u8; 32]));
-            block_on(connector.connect(target))
+            connector.connect(target).await
         });
 
-        let res_listener = handle_listener.join().expect("listener thread");
-        let res_connector = handle_connector.join().expect("connector thread");
+        let (res_listener, res_connector) = tokio::join!(handle_listener, handle_connector);
+        let res_listener = res_listener.expect("listener task");
+        let res_connector = res_connector.expect("connector task");
 
         assert!(res_listener.is_ok(), "listener failed: {res_listener:?}");
         assert!(res_connector.is_ok(), "connector failed: {res_connector:?}");
     }
 
-    #[test]
-    fn channel_datagram_roundtrip() {
+    #[tokio::test]
+    async fn channel_datagram_roundtrip() {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -756,36 +742,102 @@ mod tests {
         let srt_listener = srt.clone();
         let srt_connector = srt.clone();
 
-        let handle_listener = thread::spawn(move || {
+        let handle_listener = tokio::spawn(async move {
             let listener = RndzvListener::new(RendezvousSpaceId([0xAB; 32]), PeerId([3u8; 32]))
                 .with_srt(srt_listener)
                 .with_local_bind(addr_listener)
                 .with_timeout(Duration::from_secs(3));
-            let session = block_on(listener.accept())?;
-            let channel = block_on(session.open_channel(ChannelKind::UnreliableDatagram))?;
+            let session = listener.accept().await?;
+            let channel = session.open_channel(ChannelKind::UnreliableDatagram).await?;
             loop {
-                if let Some(data) = block_on(channel.recv())? {
+                if let Some(data) = channel.recv().await? {
                     return Ok::<_, RndzvError>(data);
                 }
             }
         });
 
-        let handle_connector = thread::spawn(move || {
+        let handle_connector = tokio::spawn(async move {
             let connector = RndzvConnector::new()
                 .with_local_bind(addr_connector)
                 .with_remote_addrs(vec![addr_listener])
                 .with_timeout(Duration::from_secs(3));
             let target = RndzvConnectTarget::from_srt(srt_connector, PeerId([4u8; 32]));
-            let session = block_on(connector.connect(target))?;
-            let channel = block_on(session.open_channel(ChannelKind::UnreliableDatagram))?;
-            block_on(channel.send(b"hello"))
+            let session = connector.connect(target).await?;
+            let channel = session.open_channel(ChannelKind::UnreliableDatagram).await?;
+            channel.send(b"hello").await
         });
 
-        let recv = handle_listener.join().expect("listener thread");
-        let send = handle_connector.join().expect("connector thread");
+        let (recv, send) = tokio::join!(handle_listener, handle_connector);
+        let recv = recv.expect("listener task");
+        let send = send.expect("connector task");
 
         assert!(send.is_ok(), "send failed: {send:?}");
         let payload = recv.expect("recv ok");
         assert_eq!(payload, b"hello");
+    }
+
+    #[tokio::test]
+    async fn shutdown_completes() -> Result<(), RndzvError> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let srt = Srt::new(
+            RendezvousSpaceId([0xCD; 32]),
+            [0x22u8; 32],
+            IdentityConstraints {
+                allowed_fingerprints: Vec::new(),
+            },
+            TimeModel {
+                t0: now + 1,
+                window_secs: 3,
+                slot_ms: 50,
+            },
+            SearchStrategy::BasicDeterministic,
+            EscalationPolicy::None,
+        );
+
+        let addr_listener: SocketAddr = "127.0.0.1:40301".parse().unwrap();
+        let addr_connector: SocketAddr = "127.0.0.1:40302".parse().unwrap();
+
+        let srt_listener = srt.clone();
+        let srt_connector = srt.clone();
+
+        let listener_task = tokio::spawn(async move {
+            let listener = RndzvListener::new(RendezvousSpaceId([0xCD; 32]), PeerId([9u8; 32]))
+                .with_srt(srt_listener)
+                .with_local_bind(addr_listener)
+                .with_timeout(Duration::from_secs(3));
+            let session = listener.accept().await?;
+            let channel = session.open_channel(ChannelKind::UnreliableDatagram).await?;
+            Ok::<_, RndzvError>((session, channel))
+        });
+
+        let connector_task = tokio::spawn(async move {
+            let connector = RndzvConnector::new()
+                .with_local_bind(addr_connector)
+                .with_remote_addrs(vec![addr_listener])
+                .with_timeout(Duration::from_secs(3));
+            let target = RndzvConnectTarget::from_srt(srt_connector, PeerId([8u8; 32]));
+            let session = connector.connect(target).await?;
+            let channel = session.open_channel(ChannelKind::UnreliableDatagram).await?;
+            Ok::<_, RndzvError>((session, channel))
+        });
+
+        let (listener_res, connector_res) = tokio::join!(listener_task, connector_task);
+        let (listener_session, listener_channel) = listener_res.expect("listener task")?;
+        let (connector_session, connector_channel) = connector_res.expect("connector task")?;
+
+        connector_channel.send(b"ping").await?;
+        let msg = listener_channel.recv().await?.expect("listener recv");
+        assert_eq!(msg, b"ping");
+
+        listener_channel.send(b"pong").await?;
+        let msg = connector_channel.recv().await?.expect("connector recv");
+        assert_eq!(msg, b"pong");
+
+        listener_session.shutdown().await?;
+        connector_session.shutdown().await?;
+        Ok(())
     }
 }

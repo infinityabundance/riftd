@@ -8,6 +8,6 @@ base64 = "0.21"
 blake3 = "1"
 hex = "0.4"
 serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["net", "time", "rt", "sync", "macros"] }
 
 [dev-dependencies]
-futures = "0.3"
