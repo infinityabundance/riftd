@@ -1,0 +1,10 @@
+[package]
+name = "rndzv-sim"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rift-rndzv = { path = "../rift-rndzv" }
+
+[dev-dependencies]
+

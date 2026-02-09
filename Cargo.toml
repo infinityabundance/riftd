@@ -11,6 +11,7 @@ members = [
   "crates/rift-dht",
   "crates/rift-metrics",
   "crates/rift-e2e",
+  "crates/rndzv-sim",
   "bin/rift",
   "crates/rift-wasm",
   "bin/rift-ws-relay",

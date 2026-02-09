@@ -3653,6 +3653,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rndzv-sim"
+version = "0.1.0"
+dependencies = [
+ "rift-rndzv",
+]
+
+[[package]]
 name = "rtnetlink"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
