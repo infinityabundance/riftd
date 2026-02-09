@@ -1028,6 +1028,11 @@ async fn cmd_rndzv_connect(uri: String, peer_id: Option<String>, reliable: bool,
             print_metrics(&metrics);
             return Ok(());
         }
+        Err(rift_rndzv::RndzvError::FallbackFailed { method, metrics }) => {
+            println!("rendezvous fallback failed: {method}");
+            print_metrics(&metrics);
+            return Ok(());
+        }
         Err(err) => return Err(anyhow::anyhow!("rndzv connect failed: {err}")),
     };
     println!("rndzv connected:");
@@ -1125,6 +1130,11 @@ async fn cmd_rndzv_listen(
         Ok(outcome) => outcome,
         Err(rift_rndzv::RndzvError::Timeout { metrics }) => {
             println!("rendezvous timed out");
+            print_metrics(&metrics);
+            return Ok(());
+        }
+        Err(rift_rndzv::RndzvError::FallbackFailed { method, metrics }) => {
+            println!("rendezvous fallback failed: {method}");
             print_metrics(&metrics);
             return Ok(());
         }
@@ -2818,6 +2828,15 @@ fn print_metrics(metrics: &rift_rndzv::RendezvousMetrics) {
     println!("  probes_sent: {}", metrics.probes_sent);
     println!("  probes_received: {}", metrics.probes_received);
     println!("  escalations_triggered: {}", metrics.escalations_triggered);
+    println!("  hybrid_mode: {:?}", metrics.hybrid_mode);
+    println!("  hints_used: {}", metrics.hints_used);
+    println!(
+        "  hybrid_winner: {}",
+        metrics
+            .hybrid_winner
+            .map(|v| format!("{v:?}"))
+            .unwrap_or_else(|| "none".to_string())
+    );
     println!("  nat_behavior_hint: {:?}", metrics.nat_behavior_hint);
     if metrics.fallback_used {
         println!(

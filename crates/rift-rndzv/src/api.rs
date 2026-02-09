@@ -8,7 +8,8 @@ use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot, Mutex, watch};
 use tokio::task::JoinHandle;
 
-use crate::engine::{NatBehaviorHint, RendezvousMetrics};
+use crate::config::HybridMode;
+use crate::engine::{HybridPath, NatBehaviorHint, RendezvousMetrics};
 
 use rift_core::noise::{noise_builder, NoiseSession};
 
@@ -19,6 +20,11 @@ pub struct PeerId(pub [u8; 32]);
 /// Logical coordination namespace for a rendezvous session.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct RendezvousSpaceId(pub [u8; 32]);
+
+/// Optional DHT hint provider for candidate rendezvous addresses.
+pub trait DhtHints: Send + Sync {
+    fn get_candidate_addrs(&self, key: &RendezvousSpaceId) -> Vec<std::net::SocketAddr>;
+}
 
 /// Public alias for Semantic Rendezvous Tokens.
 pub use crate::srt::SemanticRendezvousToken as Srt;
@@ -500,6 +506,7 @@ pub enum RndzvError {
     HandshakeFailed(&'static str),
     CryptoFailed(&'static str),
     Timeout { metrics: RendezvousMetrics },
+    FallbackFailed { method: &'static str, metrics: RendezvousMetrics },
     Io(std::io::Error),
 }
 
@@ -512,6 +519,9 @@ impl fmt::Display for RndzvError {
             RndzvError::HandshakeFailed(msg) => write!(f, "handshake failed: {msg}"),
             RndzvError::CryptoFailed(msg) => write!(f, "crypto failed: {msg}"),
             RndzvError::Timeout { .. } => write!(f, "rendezvous timed out"),
+            RndzvError::FallbackFailed { method, .. } => {
+                write!(f, "rendezvous fallback failed: {method}")
+            }
             RndzvError::Io(err) => write!(f, "io error: {err}"),
         }
     }
@@ -543,6 +553,9 @@ pub struct RndzvOutcome {
 pub struct RndzvConnector {
     // later: config, handles to transport, etc.
     remote_addrs: Vec<std::net::SocketAddr>,
+    relay_addrs: Vec<std::net::SocketAddr>,
+    dht_hints: Option<Arc<dyn DhtHints>>,
+    hybrid_mode: HybridMode,
     local_bind: Option<std::net::SocketAddr>,
     timeout: std::time::Duration,
 }
@@ -638,6 +651,9 @@ impl RndzvConnector {
     pub fn new() -> Self {
         Self {
             remote_addrs: Vec::new(),
+            relay_addrs: Vec::new(),
+            dht_hints: None,
+            hybrid_mode: HybridMode::default(),
             local_bind: None,
             timeout: std::time::Duration::from_secs(5),
         }
@@ -646,6 +662,24 @@ impl RndzvConnector {
     /// Provide candidate remote addresses to probe.
     pub fn with_remote_addrs(mut self, addrs: Vec<std::net::SocketAddr>) -> Self {
         self.remote_addrs = addrs;
+        self
+    }
+
+    /// Provide relay endpoints for hybrid fallback.
+    pub fn with_relay_addrs(mut self, addrs: Vec<std::net::SocketAddr>) -> Self {
+        self.relay_addrs = addrs;
+        self
+    }
+
+    /// Provide a DHT hints provider.
+    pub fn with_dht_hints(mut self, hints: Arc<dyn DhtHints>) -> Self {
+        self.dht_hints = Some(hints);
+        self
+    }
+
+    /// Select the hybrid rendezvous mode.
+    pub fn with_hybrid_mode(mut self, mode: HybridMode) -> Self {
+        self.hybrid_mode = mode;
         self
     }
 
@@ -674,9 +708,24 @@ impl RndzvConnector {
 
         let base_port = derive_base_port(&target.srt.seed);
         let mut metrics = RendezvousMetrics::new();
+        metrics.hybrid_mode = self.hybrid_mode;
+        let mut candidate_addrs = self.remote_addrs.clone();
+        if matches!(self.hybrid_mode, HybridMode::RndzvWithDhtHints) {
+            if let Some(hints) = &self.dht_hints {
+                let hint_addrs = hints.get_candidate_addrs(&target.srt.space);
+                if !hint_addrs.is_empty() {
+                    metrics.hints_used = true;
+                    for addr in hint_addrs {
+                        if !candidate_addrs.contains(&addr) {
+                            candidate_addrs.push(addr);
+                        }
+                    }
+                }
+            }
+        }
         let mut observed_remote_ports: HashSet<u16> = HashSet::new();
         tracing::info!(target: "rndzv", "connect_start");
-        let use_broadcast = self.remote_addrs.is_empty();
+        let use_broadcast = candidate_addrs.is_empty();
         let bind_addr = self
             .local_bind
             .unwrap_or_else(|| std::net::SocketAddr::from(([0, 0, 0, 0], 0)));
@@ -698,6 +747,16 @@ impl RndzvConnector {
         loop {
             if tokio::time::Instant::now() >= deadline {
                 metrics.total_duration_ms = start_instant.elapsed().as_millis() as u64;
+                if matches!(
+                    self.hybrid_mode,
+                    HybridMode::RndzvThenRelay | HybridMode::ParallelRndzvAndRelay
+                ) && !self.relay_addrs.is_empty()
+                {
+                    metrics.fallback_used = true;
+                    metrics.fallback_method = Some("relay");
+                    tracing::info!(target: "rndzv", ?metrics, "connect_fallback_relay");
+                    return self.connect_via_relay(&target, metrics).await;
+                }
                 tracing::info!(target: "rndzv", ?metrics, "connect_timeout");
                 return Err(RndzvError::Timeout { metrics });
             }
@@ -728,7 +787,7 @@ impl RndzvConnector {
                             metrics.probes_sent += 1;
                         }
                     } else {
-                        for addr in &self.remote_addrs {
+                        for addr in &candidate_addrs {
                             if socket.send_to(&payload, addr).await.is_ok() {
                                 metrics.probes_sent += 1;
                             }
@@ -760,6 +819,7 @@ impl RndzvConnector {
                             metrics.slot_index_success = Some(parsed.slot_index);
                             metrics.total_duration_ms =
                                 start_instant.elapsed().as_millis() as u64;
+                            metrics.hybrid_winner = Some(HybridPath::Rndzv);
                             metrics.nat_behavior_hint = match observed_remote_ports.len() {
                                 0 => NatBehaviorHint::Unknown,
                                 1 => NatBehaviorHint::PortPreserving,
@@ -801,6 +861,18 @@ impl RndzvConnector {
 
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
+    }
+
+    async fn connect_via_relay(
+        &self,
+        _target: &RndzvConnectTarget,
+        metrics: RendezvousMetrics,
+    ) -> Result<RndzvOutcome, RndzvError> {
+        // TODO: integrate with riftd relay transport.
+        Err(RndzvError::FallbackFailed {
+            method: "relay",
+            metrics,
+        })
     }
 }
 
