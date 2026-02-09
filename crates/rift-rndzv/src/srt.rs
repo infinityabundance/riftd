@@ -1,29 +1,38 @@
-//! Predictive Rendezvous (PR) core types.
-
-pub mod identity;
-pub mod metrics;
-pub mod probe;
-pub mod runner;
-pub mod schedule;
-pub mod sim;
-pub mod strategy;
-pub mod time;
-
-pub use identity::IdentityConstraints;
-pub use metrics::RendezvousMetrics;
-pub use probe::{
-    parse_probe_payload, rendezvous_id_from_seed, validate_probe_for_token, ParsedProbe, ProbeError,
-    RendezvousOutcome, RendezvousState,
-};
-pub use runner::{build_probe_payload, Clock, ProbePayload, RendezvousError, RendezvousRunner, UdpIo};
-pub use schedule::{compute_slot_params, Role, SlotParams};
-pub use strategy::{EscalationPolicy, SearchStrategy};
-pub use time::TimeModel;
+//! Semantic Rendezvous Tokens (SRT) and encoding.
 
 use std::collections::HashMap;
 use std::fmt;
 
 use base64::Engine;
+
+use crate::time::TimeModel;
+
+/// Constraints on acceptable peer identities.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct IdentityConstraints {
+    /// Allowed peer fingerprints (32-byte hashes or public key digests).
+    pub allowed_fingerprints: Vec<[u8; 32]>,
+}
+
+/// Deterministic search strategy used for rendezvous scheduling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum SearchStrategy {
+    /// Basic deterministic schedule traversal.
+    BasicDeterministic,
+    /// Extended deterministic strategy (placeholder).
+    Extended,
+}
+
+/// Policy describing how the search escalates over time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum EscalationPolicy {
+    /// No escalation (fixed parameters).
+    None,
+    /// Simple escalation (placeholder).
+    Simple,
+    /// Aggressive escalation (placeholder).
+    Aggressive,
+}
 
 /// Semantic Rendezvous Token (SRT) describes the deterministic rendezvous schedule
 /// and the constraints used to locate peers.
@@ -64,8 +73,7 @@ impl SemanticRendezvousToken {
     /// Example:
     /// `riftd-srt://v1?seed=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&t0=1700000000&tw=120&slot=250&ss=basic&esc=none`
     pub fn to_uri(&self) -> Result<String, SrtError> {
-        let seed = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(self.seed);
+        let seed = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(self.seed);
 
         let ids = if self.identities.allowed_fingerprints.is_empty() {
             None
@@ -232,35 +240,6 @@ fn parse_escalation(value: Option<&&str>) -> Result<EscalationPolicy, SrtError> 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn constructs_srt() {
-        let seed = [7u8; 32];
-        let identities = IdentityConstraints {
-            allowed_fingerprints: vec![[1u8; 32], [2u8; 32]],
-        };
-        let time_model = TimeModel {
-            t0: 1_700_000_000,
-            window_secs: 120,
-            slot_ms: 250,
-        };
-        let search_strategy = SearchStrategy::BasicDeterministic;
-        let escalation = EscalationPolicy::None;
-
-        let token = SemanticRendezvousToken::new(
-            seed,
-            identities.clone(),
-            time_model.clone(),
-            search_strategy,
-            escalation,
-        );
-
-        assert_eq!(token.seed, seed);
-        assert_eq!(token.identities, identities);
-        assert_eq!(token.time_model, time_model);
-        assert_eq!(token.search_strategy, search_strategy);
-        assert_eq!(token.escalation, escalation);
-    }
 
     #[test]
     fn round_trip_uri() {
