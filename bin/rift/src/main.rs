@@ -18,7 +18,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 use serde_json;
 use tokio::sync::mpsc;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::time::Instant;
 use tokio::task::LocalSet;
 use tracing_subscriber::{fmt::writer::BoxMakeWriter, EnvFilter};
@@ -98,7 +98,10 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogMakeWriter {
 
 use rift_core::{decode_invite, encode_invite, generate_invite, Identity};
 use rift_mesh::{Mesh, MeshConfig};
-use rift_rndzv::{EscalationPolicy, IdentityConstraints, RendezvousConfig, Role, SearchStrategy, SemanticRendezvousToken, TimeModel};
+use rift_rndzv::{
+    ChannelKind as RndzvChannelKind, EscalationPolicy, IdentityConstraints, RendezvousConfig, Role,
+    SearchStrategy, SemanticRendezvousToken, TimeModel,
+};
 use rift_protocol::QosProfile;
 use rift_sdk::{
     AudioConfigSdk, NetworkConfigSdk, RiftConfig, RiftEvent, RiftHandle, RiftSessionId,
@@ -125,6 +128,10 @@ enum Commands {
     Srt {
         #[command(subcommand)]
         action: SrtCommand,
+    },
+    Rndzv {
+        #[command(subcommand)]
+        action: RndzvCommand,
     },
     TirInvite {
         /// 32-byte peer fingerprint as 64 hex characters.
@@ -351,6 +358,63 @@ enum SrtCommand {
     },
 }
 
+#[derive(Subcommand, Debug)]
+enum RndzvCommand {
+    Generate {
+        /// Seconds from now for t0.
+        #[arg(long, default_value_t = 10)]
+        start_in: u64,
+        /// Rendezvous window in seconds.
+        #[arg(long, default_value_t = 120)]
+        window_secs: u64,
+        /// Slot duration in milliseconds.
+        #[arg(long, default_value_t = 250)]
+        slot_ms: u64,
+        /// Optional rendezvous space id (64 hex chars).
+        #[arg(long)]
+        space_id: Option<String>,
+        /// Optional local peer id to constrain identity (64 hex chars).
+        #[arg(long)]
+        peer_id: Option<String>,
+    },
+    Inspect {
+        /// SRT URI to decode.
+        #[arg(value_name = "SRT_URI")]
+        uri: String,
+    },
+    Connect {
+        /// SRT URI to connect with.
+        #[arg(value_name = "SRT_URI")]
+        uri: String,
+        /// Optional local peer id (64 hex chars).
+        #[arg(long)]
+        peer_id: Option<String>,
+        /// Use reliable ordered channel for REPL.
+        #[arg(long)]
+        reliable: bool,
+        /// Enter interactive REPL.
+        #[arg(long)]
+        repl: bool,
+    },
+    Listen {
+        /// Rendezvous space id (64 hex chars).
+        #[arg(value_name = "SPACE_ID_HEX")]
+        space_id: String,
+        /// Optional local peer id (64 hex chars).
+        #[arg(long)]
+        peer_id: Option<String>,
+        /// Allow only specific peer fingerprints (comma-separated 64-hex strings).
+        #[arg(long, value_delimiter = ',', num_args = 1..)]
+        allow_peer: Vec<String>,
+        /// Use reliable ordered channel for REPL.
+        #[arg(long)]
+        reliable: bool,
+        /// Enter interactive REPL (also sends input).
+        #[arg(long)]
+        repl: bool,
+    },
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     init_logging();
@@ -368,6 +432,29 @@ async fn main() -> Result<()> {
                 peer_identity,
             } => cmd_srt_generate(start_in, window_secs, slot_ms, role_hint, peer_identity).await,
             SrtCommand::Inspect { uri } => cmd_srt_inspect(uri).await,
+        },
+        Commands::Rndzv { action } => match action {
+            RndzvCommand::Generate {
+                start_in,
+                window_secs,
+                slot_ms,
+                space_id,
+                peer_id,
+            } => cmd_rndzv_generate(start_in, window_secs, slot_ms, space_id, peer_id).await,
+            RndzvCommand::Inspect { uri } => cmd_srt_inspect(uri).await,
+            RndzvCommand::Connect {
+                uri,
+                peer_id,
+                reliable,
+                repl,
+            } => cmd_rndzv_connect(uri, peer_id, reliable, repl).await,
+            RndzvCommand::Listen {
+                space_id,
+                peer_id,
+                allow_peer,
+                reliable,
+                repl,
+            } => cmd_rndzv_listen(space_id, peer_id, allow_peer, reliable, repl).await,
         },
         Commands::TirInvite { peer_identity } => cmd_tir_invite(peer_identity).await,
         Commands::TirAccept { srt_uri } => cmd_tir_accept(srt_uri).await,
@@ -836,6 +923,227 @@ async fn cmd_srt_inspect(uri: String) -> Result<()> {
         println!("warning: rendezvous window appears to be closed");
     }
 
+    Ok(())
+}
+
+async fn cmd_rndzv_generate(
+    start_in: u64,
+    window_secs: u64,
+    slot_ms: u64,
+    space_id: Option<String>,
+    peer_id: Option<String>,
+) -> Result<()> {
+    let space = match space_id {
+        Some(space) => rift_rndzv::api::RendezvousSpaceId(parse_fingerprint_hex(&space)?),
+        None => rift_rndzv::api::RendezvousSpaceId([0u8; 32]),
+    };
+    let mut allowed = Vec::new();
+    if let Some(peer) = peer_id {
+        allowed.push(parse_fingerprint_hex(&peer)?);
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system time before UNIX_EPOCH")?
+        .as_secs();
+    let t0 = now.saturating_add(start_in);
+    let token = SemanticRendezvousToken::new(
+        space,
+        random_seed(),
+        IdentityConstraints {
+            allowed_fingerprints: allowed,
+        },
+        TimeModel {
+            t0,
+            window_secs,
+            slot_ms,
+        },
+        SearchStrategy::BasicDeterministic,
+        EscalationPolicy::None,
+    );
+    let uri = token.to_uri().context("failed to encode SRT URI")?;
+    println!("rndzv SRT generated:");
+    println!("  space: {}", hex::encode(token.space.0));
+    println!("  t0: {t0}");
+    println!("  window_secs: {window_secs}");
+    println!("  slot_ms: {slot_ms}");
+    println!(
+        "  identities: {}",
+        if token.identities.allowed_fingerprints.is_empty() {
+            "unrestricted".to_string()
+        } else {
+            format!("{}", token.identities.allowed_fingerprints.len())
+        }
+    );
+    println!("  uri: {uri}");
+    Ok(())
+}
+
+async fn cmd_rndzv_connect(uri: String, peer_id: Option<String>, reliable: bool, repl: bool) -> Result<()> {
+    let token = SemanticRendezvousToken::from_uri(&uri)
+        .context("failed to decode SRT URI")?;
+    let local_peer = match peer_id {
+        Some(peer) => rift_rndzv::api::PeerId(parse_fingerprint_hex(&peer)?),
+        None => rift_rndzv::api::PeerId(random_seed()),
+    };
+    let connector = rift_rndzv::RndzvConnector::new().with_timeout(Duration::from_secs(5));
+    let target = rift_rndzv::RndzvConnectTarget::from_srt(token, local_peer);
+    let outcome = match connector.connect(target).await {
+        Ok(outcome) => outcome,
+        Err(rift_rndzv::RndzvError::Timeout { metrics }) => {
+            println!("rendezvous timed out");
+            print_metrics(&metrics);
+            return Ok(());
+        }
+        Err(err) => return Err(anyhow::anyhow!("rndzv connect failed: {err}")),
+    };
+    println!("rndzv connected:");
+    println!("  session: {}", hex::encode(outcome.session.id.0));
+    println!("  remote: {}", hex::encode(outcome.session.remote.0));
+    println!("  addr: {}", outcome.session.path.remote_addr);
+    print_metrics(&outcome.metrics);
+
+    let kind = if reliable {
+        RndzvChannelKind::ReliableOrdered
+    } else {
+        RndzvChannelKind::UnreliableDatagram
+    };
+    let channel = outcome.session.open_channel(kind).await?;
+
+    if repl {
+        let recv_channel = channel.clone();
+        tokio::spawn(async move {
+            loop {
+                match recv_channel.recv().await {
+                    Ok(Some(bytes)) => {
+                        if let Ok(text) = String::from_utf8(bytes) {
+                            println!("recv: {text}");
+                        } else {
+                            println!("recv: <binary>");
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        println!("recv error: {err}");
+                        break;
+                    }
+                }
+            }
+        });
+
+        let stdin = tokio::io::stdin();
+        let mut lines = tokio::io::BufReader::new(stdin).lines();
+        while let Some(line) = lines.next_line().await? {
+            if line == "/quit" {
+                break;
+            }
+            let _ = channel.send(line.as_bytes()).await;
+        }
+    }
+
+    outcome.session.shutdown().await.ok();
+    Ok(())
+}
+
+async fn cmd_rndzv_listen(
+    space_id: String,
+    peer_id: Option<String>,
+    allow_peer: Vec<String>,
+    reliable: bool,
+    repl: bool,
+) -> Result<()> {
+    let space = rift_rndzv::api::RendezvousSpaceId(parse_fingerprint_hex(&space_id)?);
+    let local_peer = match peer_id {
+        Some(peer) => rift_rndzv::api::PeerId(parse_fingerprint_hex(&peer)?),
+        None => rift_rndzv::api::PeerId(random_seed()),
+    };
+    let mut allowed = Vec::new();
+    for item in allow_peer {
+        allowed.push(parse_fingerprint_hex(&item)?);
+    }
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system time before UNIX_EPOCH")?
+        .as_secs();
+    let token = SemanticRendezvousToken::new(
+        space,
+        random_seed(),
+        IdentityConstraints {
+            allowed_fingerprints: allowed,
+        },
+        TimeModel {
+            t0: now + 5,
+            window_secs: 120,
+            slot_ms: 250,
+        },
+        SearchStrategy::BasicDeterministic,
+        EscalationPolicy::None,
+    );
+    let uri = token.to_uri().context("failed to encode SRT URI")?;
+    println!("rndzv listening with SRT:");
+    println!("  space: {}", hex::encode(token.space.0));
+    println!("  uri: {uri}");
+
+    let listener = rift_rndzv::RndzvListener::new(space, local_peer)
+        .with_srt(token)
+        .with_timeout(Duration::from_secs(5));
+    let outcome = match listener.accept().await {
+        Ok(outcome) => outcome,
+        Err(rift_rndzv::RndzvError::Timeout { metrics }) => {
+            println!("rendezvous timed out");
+            print_metrics(&metrics);
+            return Ok(());
+        }
+        Err(err) => return Err(anyhow::anyhow!("rndzv accept failed: {err}")),
+    };
+
+    println!("rndzv session accepted:");
+    println!("  session: {}", hex::encode(outcome.session.id.0));
+    println!("  remote: {}", hex::encode(outcome.session.remote.0));
+    println!("  addr: {}", outcome.session.path.remote_addr);
+    print_metrics(&outcome.metrics);
+
+    let kind = if reliable {
+        RndzvChannelKind::ReliableOrdered
+    } else {
+        RndzvChannelKind::UnreliableDatagram
+    };
+    let channel = outcome.session.open_channel(kind).await?;
+
+    let recv_channel = channel.clone();
+    tokio::spawn(async move {
+        loop {
+            match recv_channel.recv().await {
+                Ok(Some(bytes)) => {
+                    if let Ok(text) = String::from_utf8(bytes) {
+                        println!("recv: {text}");
+                    } else {
+                        println!("recv: <binary>");
+                    }
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    println!("recv error: {err}");
+                    break;
+                }
+            }
+        }
+    });
+
+    if repl {
+        let stdin = tokio::io::stdin();
+        let mut lines = tokio::io::BufReader::new(stdin).lines();
+        while let Some(line) = lines.next_line().await? {
+            if line == "/quit" {
+                break;
+            }
+            let _ = channel.send(line.as_bytes()).await;
+        }
+    } else {
+        tokio::time::sleep(Duration::from_secs(30)).await;
+    }
+
+    outcome.session.shutdown().await.ok();
     Ok(())
 }
 
@@ -2406,9 +2714,9 @@ fn print_metrics(metrics: &rift_rndzv::RendezvousMetrics) {
     println!("metrics:");
     println!("  slots_attempted: {}", metrics.slots_attempted);
     println!(
-        "  slots_succeeded: {}",
+        "  slot_index_success: {}",
         metrics
-            .slots_succeeded
+            .slot_index_success
             .map(|v| v.to_string())
             .unwrap_or_else(|| "none".to_string())
     );
@@ -2416,25 +2724,14 @@ fn print_metrics(metrics: &rift_rndzv::RendezvousMetrics) {
     println!("  probes_sent: {}", metrics.probes_sent);
     println!("  probes_received: {}", metrics.probes_received);
     println!("  escalations_triggered: {}", metrics.escalations_triggered);
-    if metrics.nat_behavior_notes.is_empty() {
-        println!("  nat_behavior_notes: []");
-    } else {
-        println!("  nat_behavior_notes: {:?}", metrics.nat_behavior_notes);
-    }
+    println!("  nat_behavior_hint: {:?}", metrics.nat_behavior_hint);
     if metrics.fallback_used {
         println!(
             "  fallback_method: {}",
             metrics
                 .fallback_method
-                .as_deref()
                 .unwrap_or("unknown")
         );
-    }
-    if let Some(ms) = metrics.time_to_first_packet_ms {
-        println!("  time_to_first_packet_ms: {ms}");
-    }
-    if let Some(ms) = metrics.legacy_time_to_first_packet_ms {
-        println!("  legacy_time_to_first_packet_ms: {ms}");
     }
 }
 
