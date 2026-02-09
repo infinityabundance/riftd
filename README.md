@@ -125,6 +125,8 @@ theme = "dark"
 - `docs/future-directions.md`: cross-domain synthesis and future directions.
 - `docs/hybrid-coordination.md`: optional hybrid coordination patterns.
 - `docs/hybrid-modes.md`: optional hybrid modes (rndzv + relay / DHT hints).
+- `docs/rndzv-1x-contract.md`: stable rndzv 1.x public contract.
+- `docs/rndzv-2.0-plan.md`: phased plan for rndzv 2.0.
 - `docs/pr-security.md`: security and abuse considerations for Predictive Rendezvous.
 - `docs/formalization.md`: minimal formal model for Predictive Rendezvous.
 - `docs/cross-protocol.md`: protocol-agnostic mapping across domains.
