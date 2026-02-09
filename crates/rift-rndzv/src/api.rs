@@ -257,7 +257,9 @@ impl RndzvConnector {
                             let mut remote_bytes = [0u8; 32];
                             remote_bytes[..16].copy_from_slice(&parsed.sender_fingerprint);
                             let remote_peer = PeerId(remote_bytes);
-                            let session_id = SessionId(rendezvous_id.to_le_bytes());
+                            let mut session_id = [0u8; 16];
+                            session_id[..8].copy_from_slice(&rendezvous_id.to_le_bytes());
+                            let session_id = SessionId(session_id);
                             let path = PathBinding {
                                 local_socket: socket,
                                 remote_addr: addr,
@@ -286,18 +288,124 @@ impl RndzvConnector {
 pub struct RndzvListener {
     space: RendezvousSpaceId,
     local_peer: PeerId,
+    srt: Option<Srt>,
+    local_bind: Option<std::net::SocketAddr>,
+    timeout: std::time::Duration,
     // later: references to PR engine, UDP sockets, etc.
 }
 
 impl RndzvListener {
     /// Create a new listener for a rendezvous space.
     pub fn new(space: RendezvousSpaceId, local_peer: PeerId) -> Self {
-        Self { space, local_peer }
+        Self {
+            space,
+            local_peer,
+            srt: None,
+            local_bind: None,
+            timeout: std::time::Duration::from_secs(5),
+        }
+    }
+
+    /// Provide the SRT used to validate incoming probes.
+    pub fn with_srt(mut self, srt: Srt) -> Self {
+        self.srt = Some(srt);
+        self
+    }
+
+    /// Bind the local UDP socket to a specific address.
+    pub fn with_local_bind(mut self, addr: std::net::SocketAddr) -> Self {
+        self.local_bind = Some(addr);
+        self
+    }
+
+    /// Override the rendezvous timeout.
+    pub fn with_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.timeout = timeout;
+        self
     }
 
     /// Accept an incoming rendezvous session (stub).
     pub async fn accept(&self) -> Result<RndzvSession, RndzvError> {
-        Err(RndzvError::NotImplemented("accept"))
+        use crate::engine::{
+            build_probe_payload, parse_probe_payload, rendezvous_id_from_seed,
+            validate_probe_for_token, ProbePayload,
+        };
+
+        let srt = self
+            .srt
+            .as_ref()
+            .ok_or(RndzvError::InvalidState("listener missing SRT"))?;
+        if srt.space != self.space {
+            return Err(RndzvError::InvalidState("listener space mismatch"));
+        }
+
+        let bind_addr = self
+            .local_bind
+            .unwrap_or_else(|| std::net::SocketAddr::from(([0, 0, 0, 0], 0)));
+        let socket = std::net::UdpSocket::bind(bind_addr).map_err(RndzvError::Io)?;
+        socket
+            .set_read_timeout(Some(std::time::Duration::from_millis(50)))
+            .map_err(RndzvError::Io)?;
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| RndzvError::InvalidState("system clock before unix epoch"))?;
+        let start_ms = now.as_millis() as u64;
+        let deadline_ms = start_ms.saturating_add(self.timeout.as_millis() as u64);
+
+        let rendezvous_id = rendezvous_id_from_seed(&srt.seed);
+        let mut sender_fingerprint = [0u8; 16];
+        sender_fingerprint.copy_from_slice(&self.local_peer.0[..16]);
+
+        let mut buf = [0u8; 1500];
+        loop {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|_| RndzvError::InvalidState("system clock before unix epoch"))?
+                .as_millis() as u64;
+
+            if now_ms >= deadline_ms {
+                return Err(RndzvError::Timeout);
+            }
+
+            match socket.recv_from(&mut buf) {
+                Ok((len, addr)) => {
+                    if let Ok(parsed) = parse_probe_payload(&buf[..len]) {
+                        if validate_probe_for_token(srt, &parsed) {
+                            let response = build_probe_payload(ProbePayload {
+                                rendezvous_id,
+                                slot_index: parsed.slot_index,
+                                sender_fingerprint,
+                            });
+                            let _ = socket.send_to(&response, addr);
+
+                            let mut remote_bytes = [0u8; 32];
+                            remote_bytes[..16].copy_from_slice(&parsed.sender_fingerprint);
+                            let remote_peer = PeerId(remote_bytes);
+                            let mut session_id = [0u8; 16];
+                            session_id[..8].copy_from_slice(&rendezvous_id.to_le_bytes());
+                            let session_id = SessionId(session_id);
+                            let path = PathBinding {
+                                local_socket: socket,
+                                remote_addr: addr,
+                            };
+                            return Ok(RndzvSession::new(
+                                session_id,
+                                self.local_peer,
+                                remote_peer,
+                                self.space,
+                                path,
+                            ));
+                        }
+                    }
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(err) if err.kind() == std::io::ErrorKind::TimedOut => {}
+                Err(err) => return Err(RndzvError::Io(err)),
+            }
+
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 }
 
@@ -390,5 +498,56 @@ mod tests {
 
         assert!(res_a.is_ok(), "connect A failed: {res_a:?}");
         assert!(res_b.is_ok(), "connect B failed: {res_b:?}");
+    }
+
+    #[test]
+    fn listener_accepts_connector() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let srt = Srt::new(
+            RendezvousSpaceId([9u8; 32]),
+            [5u8; 32],
+            IdentityConstraints {
+                allowed_fingerprints: Vec::new(),
+            },
+            TimeModel {
+                t0: now + 1,
+                window_secs: 3,
+                slot_ms: 50,
+            },
+            SearchStrategy::BasicDeterministic,
+            EscalationPolicy::None,
+        );
+
+        let addr_listener: SocketAddr = "127.0.0.1:40101".parse().unwrap();
+        let addr_connector: SocketAddr = "127.0.0.1:40102".parse().unwrap();
+
+        let srt_listener = srt.clone();
+        let srt_connector = srt.clone();
+
+        let handle_listener = thread::spawn(move || {
+            let listener = RndzvListener::new(RendezvousSpaceId([9u8; 32]), PeerId([3u8; 32]))
+                .with_srt(srt_listener)
+                .with_local_bind(addr_listener)
+                .with_timeout(Duration::from_secs(3));
+            block_on(listener.accept())
+        });
+
+        let handle_connector = thread::spawn(move || {
+            let connector = RndzvConnector::new()
+                .with_local_bind(addr_connector)
+                .with_remote_addrs(vec![addr_listener])
+                .with_timeout(Duration::from_secs(3));
+            let target = RndzvConnectTarget::from_srt(srt_connector, PeerId([4u8; 32]));
+            block_on(connector.connect(target))
+        });
+
+        let res_listener = handle_listener.join().expect("listener thread");
+        let res_connector = handle_connector.join().expect("connector thread");
+
+        assert!(res_listener.is_ok(), "listener failed: {res_listener:?}");
+        assert!(res_connector.is_ok(), "connector failed: {res_connector:?}");
     }
 }
