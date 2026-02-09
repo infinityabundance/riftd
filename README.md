@@ -120,6 +120,7 @@ theme = "dark"
 - `CODE.md`: high-level code map.
 - `PROTOCOL.md`: protocol framing and message types.
 - `docs/srt-tooling.md`: SRT generation and inspection tooling.
+- `docs/srt-invites.md`: SRT invite UX and sharing patterns.
 - `docs/predictive-rendezvous.md`: Predictive Rendezvous architecture and SRT format.
 - `docs/future-directions.md`: cross-domain synthesis and future directions.
 - `docs/hybrid-coordination.md`: optional hybrid coordination patterns.

@@ -21,6 +21,7 @@ rift-dht = { path = "../rift-dht" }
 rift-metrics = { path = "../rift-metrics" }
 serde = { version = "1", features = ["derive"] }
 hex = "0.4"
+rand = "0.8"
 thiserror = "1"
 toml = "0.8"
 hkdf = "0.12"
