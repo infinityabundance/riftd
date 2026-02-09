@@ -3656,6 +3656,7 @@ dependencies = [
 name = "rndzv-sim"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "rift-rndzv",
 ]
 
