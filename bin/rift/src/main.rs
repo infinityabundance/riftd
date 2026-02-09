@@ -22,6 +22,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::time::Instant;
 use tokio::task::LocalSet;
 use tracing_subscriber::{fmt::writer::BoxMakeWriter, EnvFilter};
+use qrcode::QrCode;
+use qrcode::render::unicode::Dense1x2;
 
 static LOG_BUFFER: OnceLock<Mutex<VecDeque<String>>> = OnceLock::new();
 
@@ -376,6 +378,9 @@ enum RndzvCommand {
         /// Optional local peer id to constrain identity (64 hex chars).
         #[arg(long)]
         peer_id: Option<String>,
+        /// Print a QR code in the terminal.
+        #[arg(long)]
+        qr: bool,
     },
     Inspect {
         /// SRT URI to decode.
@@ -413,6 +418,23 @@ enum RndzvCommand {
         #[arg(long)]
         repl: bool,
     },
+    Invite {
+        /// Invite label (e.g. \"Alice Voice Call\").
+        #[arg(long)]
+        label: String,
+        /// Optional peer id to constrain identity (64 hex chars).
+        #[arg(long)]
+        peer_id: Option<String>,
+        /// Optional rendezvous space id (64 hex chars).
+        #[arg(long)]
+        space_id: Option<String>,
+        /// Output JSON instead of text.
+        #[arg(long)]
+        json: bool,
+        /// Print a QR code in the terminal.
+        #[arg(long)]
+        qr: bool,
+    },
 }
 
 #[tokio::main]
@@ -440,7 +462,8 @@ async fn main() -> Result<()> {
                 slot_ms,
                 space_id,
                 peer_id,
-            } => cmd_rndzv_generate(start_in, window_secs, slot_ms, space_id, peer_id).await,
+                qr,
+            } => cmd_rndzv_generate(start_in, window_secs, slot_ms, space_id, peer_id, qr).await,
             RndzvCommand::Inspect { uri } => cmd_srt_inspect(uri).await,
             RndzvCommand::Connect {
                 uri,
@@ -455,6 +478,13 @@ async fn main() -> Result<()> {
                 reliable,
                 repl,
             } => cmd_rndzv_listen(space_id, peer_id, allow_peer, reliable, repl).await,
+            RndzvCommand::Invite {
+                label,
+                peer_id,
+                space_id,
+                json,
+                qr,
+            } => cmd_rndzv_invite(label, peer_id, space_id, json, qr).await,
         },
         Commands::TirInvite { peer_identity } => cmd_tir_invite(peer_identity).await,
         Commands::TirAccept { srt_uri } => cmd_tir_accept(srt_uri).await,
@@ -932,6 +962,7 @@ async fn cmd_rndzv_generate(
     slot_ms: u64,
     space_id: Option<String>,
     peer_id: Option<String>,
+    qr: bool,
 ) -> Result<()> {
     let space = match space_id {
         Some(space) => rift_rndzv::api::RendezvousSpaceId(parse_fingerprint_hex(&space)?),
@@ -975,6 +1006,9 @@ async fn cmd_rndzv_generate(
         }
     );
     println!("  uri: {uri}");
+    if qr {
+        print_qr(&uri)?;
+    }
     Ok(())
 }
 
@@ -1144,6 +1178,59 @@ async fn cmd_rndzv_listen(
     }
 
     outcome.session.shutdown().await.ok();
+    Ok(())
+}
+
+async fn cmd_rndzv_invite(
+    label: String,
+    peer_id: Option<String>,
+    space_id: Option<String>,
+    json: bool,
+    qr: bool,
+) -> Result<()> {
+    let invite = if let Some(peer) = peer_id {
+        let peer_id = rift_sdk::PeerId(parse_fingerprint_hex(&peer)?);
+        let mut invite = rift_sdk::create_voice_invite(peer_id);
+        invite.label = label;
+        invite
+    } else {
+        let space = match space_id {
+            Some(space) => rift_rndzv::api::RendezvousSpaceId(parse_fingerprint_hex(&space)?),
+            None => rift_rndzv::api::RendezvousSpaceId([0u8; 32]),
+        };
+        let token = SemanticRendezvousToken::new(
+            space,
+            random_seed(),
+            IdentityConstraints {
+                allowed_fingerprints: Vec::new(),
+            },
+            TimeModel {
+                t0: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+                    .saturating_add(10),
+                window_secs: 120,
+                slot_ms: 250,
+            },
+            SearchStrategy::BasicDeterministic,
+            EscalationPolicy::None,
+        );
+        let uri = token.to_uri().context("failed to encode SRT URI")?;
+        rift_sdk::SrtInvite { label, uri }
+    };
+
+    if json {
+        let obj = serde_json::json!({ "label": invite.label, "uri": invite.uri });
+        println!("{}", serde_json::to_string_pretty(&obj)?);
+    } else {
+        println!("invite:");
+        println!("  label: {}", invite.label);
+        println!("  uri: {}", invite.uri);
+    }
+    if qr {
+        print_qr(&invite.uri)?;
+    }
     Ok(())
 }
 
@@ -2686,6 +2773,13 @@ fn parse_fingerprint_hex(input: &str) -> Result<[u8; 32]> {
     let mut out = [0u8; 32];
     out.copy_from_slice(&bytes);
     Ok(out)
+}
+
+fn print_qr(uri: &str) -> Result<()> {
+    let code = QrCode::new(uri.as_bytes()).context("failed to encode QR")?;
+    let image = code.render::<Dense1x2>().build();
+    println!("{image}");
+    Ok(())
 }
 
 fn random_seed() -> [u8; 32] {

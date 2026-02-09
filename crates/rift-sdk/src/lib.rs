@@ -14,6 +14,8 @@ use std::sync::{
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
+use rand::rngs::OsRng;
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::{mpsc, Mutex};
@@ -35,6 +37,8 @@ use rift_protocol::{CallState, Capabilities, GroupMode, QosProfile, SessionId};
 use rift_rndzv::{
     ChannelKind as RndzvChannelKind, PeerId as RndzvPeerId, RndzvChannel, RndzvConnectTarget,
     RndzvConnector, RndzvListener, Srt as RndzvSrt,
+    EscalationPolicy, IdentityConstraints, RendezvousSpaceId, SearchStrategy,
+    SemanticRendezvousToken, TimeModel,
 };
 use hkdf::Hkdf;
 use sha2::Sha256;
@@ -173,6 +177,14 @@ pub enum RndzvRole {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SrtInvite {
+    /// Human-readable label for the invite (e.g. "Alice Voice Call").
+    pub label: String,
+    /// Encoded SRT URI.
+    pub uri: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DhtConfigSdk {
     /// Enable DHT discovery.
     pub enabled: bool,
@@ -204,6 +216,44 @@ impl Default for RiftConfig {
             network: NetworkConfigSdk::default(),
         }
     }
+}
+
+/// Create a voice-call SRT invite targeted at a specific peer.
+pub fn create_voice_invite(to: PeerId) -> SrtInvite {
+    let mut seed = [0u8; 32];
+    OsRng.fill_bytes(&mut seed);
+    let space = RendezvousSpaceId(*blake3::hash(b"rift-rndzv-voice-call").as_bytes());
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let token = SemanticRendezvousToken::new(
+        space,
+        seed,
+        IdentityConstraints {
+            allowed_fingerprints: vec![to.0],
+        },
+        TimeModel {
+            t0: now.saturating_add(10),
+            window_secs: 120,
+            slot_ms: 250,
+        },
+        SearchStrategy::BasicDeterministic,
+        EscalationPolicy::None,
+    );
+    let uri = token
+        .to_uri()
+        .expect("SRT URI encoding should succeed for valid inputs");
+    SrtInvite {
+        label: "Voice Call".to_string(),
+        uri,
+    }
+}
+
+/// Parse an SRT invite into a rendezvous token.
+pub fn accept_voice_invite(invite: &SrtInvite) -> Result<RndzvSrt, RiftError> {
+    RndzvSrt::from_uri(&invite.uri)
+        .map_err(|e| RiftError::Other(format!("rndzv srt decode failed: {e}")))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
