@@ -18,6 +18,8 @@ tracing = "0.1"
 aes-gcm = { version = "0.10", features = ["alloc"] }
 rand = "0.8"
 bincode = "1"
+hex = "0.4"
+sha2 = "0.10"
 
 [features]
 default = ["predictive-rendezvous"]

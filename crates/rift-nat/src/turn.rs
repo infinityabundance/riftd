@@ -188,7 +188,7 @@ pub async fn allocate_turn_relay(
     for attempt in 0..=1 {
         let tx_id = random_tx_id();
         let mut msg = build_allocate_request(&tx_id, server.username.as_deref(), &nonce, &realm)?;
-        if let (Some(username), Some(password), Some(realm), Some(nonce)) = (
+        if let (Some(username), Some(password), Some(realm), Some(_nonce)) = (
             server.username.as_deref(),
             server.credential.as_deref(),
             realm.as_deref(),
@@ -292,11 +292,14 @@ impl TurnRelay {
             }
 
             if let Ok((peer, payload)) = parse_data_indication(&buf[..len]) {
-                if payload.len() > buf.len() {
+                let payload_len = payload.len();
+                if payload_len > buf.len() {
                     continue;
                 }
-                buf[..payload.len()].copy_from_slice(payload);
-                return Ok((payload.len(), peer));
+                let mut tmp = vec![0u8; payload_len];
+                tmp.copy_from_slice(payload);
+                buf[..payload_len].copy_from_slice(&tmp);
+                return Ok((payload_len, peer));
             }
         }
     }
@@ -347,7 +350,7 @@ impl TurnRelay {
         let username = self.username.as_ref().ok_or(TurnError::MissingCredentials)?;
         let credential = self.credential.as_ref().ok_or(TurnError::MissingCredentials)?;
         let realm = self.realm.as_ref().ok_or(TurnError::MissingCredentials)?;
-        let nonce = self.nonce.as_ref().ok_or(TurnError::MissingCredentials)?;
+        let _nonce = self.nonce.as_ref().ok_or(TurnError::MissingCredentials)?;
         add_message_integrity(msg, username, realm, credential);
         add_fingerprint(msg);
         Ok(())
