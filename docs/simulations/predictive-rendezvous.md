@@ -12,9 +12,9 @@ The harness simulates:
 Each model is deterministic with configurable parameters.
 
 ## Running the Harness
-Use the lightweight simulation binary in `rift-pr`:
+Use the lightweight simulation binary in `rift-rndzv`:
 ```
-cargo run -p rift-pr --bin pr-sim
+cargo run -p rift-rndzv --bin pr-sim
 ```
 
 It writes a CSV event log to:

@@ -98,7 +98,7 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogMakeWriter {
 
 use rift_core::{decode_invite, encode_invite, generate_invite, Identity};
 use rift_mesh::{Mesh, MeshConfig};
-use rift_pr::{EscalationPolicy, IdentityConstraints, RendezvousConfig, Role, SearchStrategy, SemanticRendezvousToken, TimeModel};
+use rift_rndzv::{EscalationPolicy, IdentityConstraints, RendezvousConfig, Role, SearchStrategy, SemanticRendezvousToken, TimeModel};
 use rift_protocol::QosProfile;
 use rift_sdk::{
     AudioConfigSdk, NetworkConfigSdk, RiftConfig, RiftEvent, RiftHandle, RiftSessionId,
@@ -2377,7 +2377,7 @@ fn derive_seed_from_infohash(infohash_hex: &str, salt_hex: Option<&str>) -> Resu
     Ok(okm)
 }
 
-fn print_metrics(metrics: &rift_pr::RendezvousMetrics) {
+fn print_metrics(metrics: &rift_rndzv::RendezvousMetrics) {
     println!("metrics:");
     println!("  slots_attempted: {}", metrics.slots_attempted);
     println!(

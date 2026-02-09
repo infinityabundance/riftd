@@ -1,10 +1,10 @@
 use std::fs;
 use std::path::PathBuf;
 
-use rift_pr::sim::{
+use rift_rndzv::engine::sim::{
     render_csv, run_simulation, NatBehavior, NatConfig, NatSim, SimConfig, SimPeer,
 };
-use rift_pr::{Role, TimeModel};
+use rift_rndzv::{Role, TimeModel};
 
 fn main() {
     let output_dir = PathBuf::from("docs/simulations");

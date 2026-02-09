@@ -40,7 +40,7 @@ use rand::RngCore;
 use rand::rngs::OsRng;
 
 #[cfg(feature = "predictive-rendezvous")]
-use rift_pr::{
+use rift_rndzv::{
     build_probe_payload, compute_slot_params, parse_probe_payload, rendezvous_id_from_seed,
     ParsedProbe, ProbePayload, RendezvousMetrics, RendezvousOutcome, RendezvousState, Role,
     SemanticRendezvousToken,
@@ -3757,7 +3757,7 @@ fn encrypt_payload_with_key(
 #[cfg(all(test, feature = "predictive-rendezvous"))]
 mod pr_tests {
     use super::*;
-    use rift_pr::{EscalationPolicy, IdentityConstraints, SearchStrategy, SemanticRendezvousToken, TimeModel};
+    use rift_rndzv::{EscalationPolicy, IdentityConstraints, SearchStrategy, SemanticRendezvousToken, TimeModel};
 
     #[tokio::test]
     async fn predictive_rendezvous_succeeds_loopback() {

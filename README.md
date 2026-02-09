@@ -119,7 +119,7 @@ theme = "dark"
 - `rift-protocol`: versioned framing + on-the-wire types.
 - `rift-discovery`: LAN mDNS discovery.
 - `rift-nat`: UDP hole punching.
-- `rift-pr`: Predictive Rendezvous (SRTs, scheduling, runner).
+- `rift-rndzv`: Predictive Rendezvous networking layer (SRTs, scheduling, runner).
 - `rift-mesh`: mesh routing, relay, call/session handling.
 - `rift-media`: audio capture/playback and Opus codec.
 - `bin/rift`: TUI client.
