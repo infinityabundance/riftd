@@ -7,7 +7,7 @@
 
 use ed25519_dalek::{PublicKey as Ed25519PublicKey, Signature, Signer, Verifier};
 use hkdf::Hkdf;
-use rand_core::OsRng;
+use rand::rngs::OsRng;
 use sha2::Sha256;
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 

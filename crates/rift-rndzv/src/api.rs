@@ -10,6 +10,8 @@ use tokio::task::JoinHandle;
 
 use crate::engine::{NatBehaviorHint, RendezvousMetrics};
 
+use rift_core::noise::{noise_builder, NoiseSession};
+
 /// Stable identifier for a peer in the rndzv layer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct PeerId(pub [u8; 32]);
@@ -32,9 +34,25 @@ pub struct PathBinding {
     pub socket: Arc<UdpSocket>,
     /// Remote socket address selected for the session.
     pub remote_addr: std::net::SocketAddr,
+    /// Crypto context for the session.
+    pub crypto: Arc<Mutex<CryptoContext>>,
     /// Demux state for channel receivers.
     demux: Arc<Mutex<DemuxState>>,
     // TODO: add crypto context later.
+}
+
+/// Noise-based crypto context for a session.
+pub struct CryptoContext {
+    session: NoiseSession,
+    remote_fingerprint: [u8; 32],
+}
+
+impl std::fmt::Debug for CryptoContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CryptoContext")
+            .field("remote_fingerprint", &self.remote_fingerprint)
+            .finish()
+    }
 }
 
 #[derive(Debug)]
@@ -68,11 +86,13 @@ impl DemuxState {
 
 fn start_demux_task(
     socket: Arc<UdpSocket>,
+    crypto: Arc<Mutex<CryptoContext>>,
     state: Arc<Mutex<DemuxState>>,
     mut shutdown: watch::Receiver<bool>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let mut buf = [0u8; 2048];
+        let mut buf = [0u8; 4096];
+        let mut plaintext = vec![0u8; 4096];
         loop {
             tokio::select! {
                 _ = shutdown.changed() => {
@@ -85,7 +105,17 @@ fn start_demux_task(
                         Ok(res) => res,
                         Err(_) => break,
                     };
-                    if let Ok((channel_id, payload)) = decode_frame(&buf[..len]) {
+                    let decrypted_len = {
+                        let mut guard = crypto.lock().await;
+                        match guard.session.decrypt(&buf[..len], &mut plaintext) {
+                            Ok(n) => n,
+                            Err(err) => {
+                                tracing::warn!(target: "rndzv", error = %err, "decrypt_failed");
+                                continue;
+                            }
+                        }
+                    };
+                    if let Ok((channel_id, payload)) = decode_frame(&plaintext[..decrypted_len]) {
                         let tx = {
                             let guard = state.lock().await;
                             guard.channels.get(&channel_id).cloned()
@@ -249,9 +279,17 @@ impl RndzvChannel {
     /// Send data on this channel (stub).
     pub async fn send(&self, data: &[u8]) -> Result<(), RndzvError> {
         let frame = encode_frame(self.id, data)?;
+        let mut ciphertext = vec![0u8; frame.len() + 64];
+        let encrypted_len = {
+            let mut guard = self.path.crypto.lock().await;
+            guard
+                .session
+                .encrypt(&frame, &mut ciphertext)
+                .map_err(|_| RndzvError::CryptoFailed("encrypt failed"))?
+        };
         self.path
             .socket
-            .send_to(&frame, self.path.remote_addr)
+            .send_to(&ciphertext[..encrypted_len], self.path.remote_addr)
             .await
             .map_err(RndzvError::Io)?;
         Ok(())
@@ -277,6 +315,8 @@ pub enum RndzvError {
     NotImplemented(&'static str),
     InvalidState(&'static str),
     Transport(&'static str),
+    HandshakeFailed(&'static str),
+    CryptoFailed(&'static str),
     Timeout { metrics: RendezvousMetrics },
     Io(std::io::Error),
 }
@@ -287,6 +327,8 @@ impl fmt::Display for RndzvError {
             RndzvError::NotImplemented(op) => write!(f, "not implemented: {op}"),
             RndzvError::InvalidState(msg) => write!(f, "invalid state: {msg}"),
             RndzvError::Transport(msg) => write!(f, "transport error: {msg}"),
+            RndzvError::HandshakeFailed(msg) => write!(f, "handshake failed: {msg}"),
+            RndzvError::CryptoFailed(msg) => write!(f, "crypto failed: {msg}"),
             RndzvError::Timeout { .. } => write!(f, "rendezvous timed out"),
             RndzvError::Io(err) => write!(f, "io error: {err}"),
         }
@@ -327,6 +369,86 @@ fn derive_base_port(seed: &[u8; 32]) -> u16 {
     let raw = u16::from_le_bytes([seed[0], seed[1]]);
     let range: u16 = 20_000;
     40_000u16.saturating_add(raw % range)
+}
+
+async fn run_handshake(
+    socket: &UdpSocket,
+    remote_addr: std::net::SocketAddr,
+    initiator: bool,
+    expected_fingerprints: &[ [u8; 32] ],
+) -> Result<CryptoContext, RndzvError> {
+    let builder = noise_builder();
+    let static_kp = builder
+        .generate_keypair()
+        .map_err(|_| RndzvError::HandshakeFailed("keypair generation failed"))?;
+    let mut hs = if initiator {
+        builder
+            .local_private_key(&static_kp.private)
+            .build_initiator()
+            .map_err(|_| RndzvError::HandshakeFailed("build initiator failed"))?
+    } else {
+        builder
+            .local_private_key(&static_kp.private)
+            .build_responder()
+            .map_err(|_| RndzvError::HandshakeFailed("build responder failed"))?
+    };
+
+    let mut buf = vec![0u8; 1024];
+    let mut out = vec![0u8; 1024];
+    let timeout = std::time::Duration::from_secs(2);
+
+    if initiator {
+        let len = hs
+            .write_message(&[], &mut out)
+            .map_err(|_| RndzvError::HandshakeFailed("init write failed"))?;
+        socket.send_to(&out[..len], remote_addr).await.map_err(RndzvError::Io)?;
+        let (len, _addr) = tokio::time::timeout(timeout, socket.recv_from(&mut buf))
+            .await
+            .map_err(|_| RndzvError::HandshakeFailed("init read timeout"))?
+            .map_err(RndzvError::Io)?;
+        hs.read_message(&buf[..len], &mut out)
+            .map_err(|_| RndzvError::HandshakeFailed("init read failed"))?;
+        let len = hs
+            .write_message(&[], &mut out)
+            .map_err(|_| RndzvError::HandshakeFailed("init write2 failed"))?;
+        socket.send_to(&out[..len], remote_addr).await.map_err(RndzvError::Io)?;
+    } else {
+        let (len, _addr) = tokio::time::timeout(timeout, socket.recv_from(&mut buf))
+            .await
+            .map_err(|_| RndzvError::HandshakeFailed("resp read timeout"))?
+            .map_err(RndzvError::Io)?;
+        hs.read_message(&buf[..len], &mut out)
+            .map_err(|_| RndzvError::HandshakeFailed("resp read failed"))?;
+        let len = hs
+            .write_message(&[], &mut out)
+            .map_err(|_| RndzvError::HandshakeFailed("resp write failed"))?;
+        socket.send_to(&out[..len], remote_addr).await.map_err(RndzvError::Io)?;
+        let (len, _addr) = tokio::time::timeout(timeout, socket.recv_from(&mut buf))
+            .await
+            .map_err(|_| RndzvError::HandshakeFailed("resp read2 timeout"))?
+            .map_err(RndzvError::Io)?;
+        hs.read_message(&buf[..len], &mut out)
+            .map_err(|_| RndzvError::HandshakeFailed("resp read2 failed"))?;
+    }
+
+    let transport = hs
+        .into_transport_mode()
+        .map_err(|_| RndzvError::HandshakeFailed("transport mode failed"))?;
+    let remote_static = transport
+        .get_remote_static()
+        .ok_or(RndzvError::HandshakeFailed("missing remote static"))?;
+    let fingerprint = blake3::hash(remote_static);
+    let mut fp_bytes = [0u8; 32];
+    fp_bytes.copy_from_slice(fingerprint.as_bytes());
+
+    if !expected_fingerprints.is_empty() && !expected_fingerprints.contains(&fp_bytes) {
+        return Err(RndzvError::HandshakeFailed("remote identity mismatch"));
+    }
+
+    Ok(CryptoContext {
+        session: NoiseSession::new(transport),
+        remote_fingerprint: fp_bytes,
+    })
 }
 
 impl RndzvConnector {
@@ -441,11 +563,18 @@ impl RndzvConnector {
                         if validate_probe_for_token(&target.srt, &parsed) {
                             let mut remote_bytes = [0u8; 32];
                             remote_bytes[..16].copy_from_slice(&parsed.sender_fingerprint);
-                            let remote_peer = PeerId(remote_bytes);
                             let mut session_id = [0u8; 16];
                             session_id[..8].copy_from_slice(&rendezvous_id.to_le_bytes());
                             let session_id = SessionId(session_id);
                             let socket = Arc::new(socket);
+                            let crypto = run_handshake(
+                                socket.as_ref(),
+                                addr,
+                                true,
+                                &target.srt.identities.allowed_fingerprints,
+                            )
+                            .await?;
+                            let remote_peer = PeerId(crypto.remote_fingerprint);
                             metrics.slot_index_success = Some(parsed.slot_index);
                             metrics.total_duration_ms =
                                 start_instant.elapsed().as_millis() as u64;
@@ -457,10 +586,17 @@ impl RndzvConnector {
                             };
                             let demux = Arc::new(Mutex::new(DemuxState::new()));
                             let (shutdown_tx, shutdown_rx) = watch::channel(false);
-                            let demux_task = start_demux_task(socket.clone(), demux.clone(), shutdown_rx);
+                            let crypto = Arc::new(Mutex::new(crypto));
+                            let demux_task = start_demux_task(
+                                socket.clone(),
+                                crypto.clone(),
+                                demux.clone(),
+                                shutdown_rx,
+                            );
                             let path = PathBinding {
                                 socket,
                                 remote_addr: addr,
+                                crypto,
                                 demux,
                             };
                             let session = RndzvSession::new(
@@ -582,11 +718,18 @@ impl RndzvListener {
 
                             let mut remote_bytes = [0u8; 32];
                             remote_bytes[..16].copy_from_slice(&parsed.sender_fingerprint);
-                            let remote_peer = PeerId(remote_bytes);
                             let mut session_id = [0u8; 16];
                             session_id[..8].copy_from_slice(&rendezvous_id.to_le_bytes());
                             let session_id = SessionId(session_id);
                             let socket = Arc::new(socket);
+                            let crypto = run_handshake(
+                                socket.as_ref(),
+                                addr,
+                                false,
+                                &srt.identities.allowed_fingerprints,
+                            )
+                            .await?;
+                            let remote_peer = PeerId(crypto.remote_fingerprint);
                             metrics.slot_index_success = Some(parsed.slot_index);
                             metrics.total_duration_ms =
                                 start_instant.elapsed().as_millis() as u64;
@@ -598,10 +741,17 @@ impl RndzvListener {
                             };
                             let demux = Arc::new(Mutex::new(DemuxState::new()));
                             let (shutdown_tx, shutdown_rx) = watch::channel(false);
-                            let demux_task = start_demux_task(socket.clone(), demux.clone(), shutdown_rx);
+                            let crypto = Arc::new(Mutex::new(crypto));
+                            let demux_task = start_demux_task(
+                                socket.clone(),
+                                crypto.clone(),
+                                demux.clone(),
+                                shutdown_rx,
+                            );
                             let path = PathBinding {
                                 socket,
                                 remote_addr: addr,
+                                crypto,
                                 demux,
                             };
                             let session = RndzvSession::new(
@@ -685,35 +835,52 @@ mod tests {
             SearchStrategy::BasicDeterministic,
             EscalationPolicy::None,
         );
-        let srt_b = srt_a.clone();
-
         let addr_a: SocketAddr = "127.0.0.1:40001".parse().unwrap();
         let addr_b: SocketAddr = "127.0.0.1:40002".parse().unwrap();
 
-        let handle_a = tokio::spawn(async move {
+        let handle_listener = tokio::spawn(async move {
+            let listener = RndzvListener::new(RendezvousSpaceId([0u8; 32]), PeerId([2u8; 32]))
+                .with_srt(srt_a)
+                .with_local_bind(addr_b)
+                .with_timeout(Duration::from_secs(3));
+            listener.accept().await
+        });
+
+        let handle_connector = tokio::spawn(async move {
             let connector = RndzvConnector::new()
                 .with_local_bind(addr_a)
                 .with_remote_addrs(vec![addr_b])
                 .with_timeout(Duration::from_secs(3));
-            let target = RndzvConnectTarget::from_srt(srt_a, PeerId([1u8; 32]));
+            let target = RndzvConnectTarget::from_srt(
+                Srt::new(
+                    RendezvousSpaceId([0u8; 32]),
+                    [7u8; 32],
+                    IdentityConstraints {
+                        allowed_fingerprints: Vec::new(),
+                    },
+                    TimeModel {
+                        t0: now + 1,
+                        window_secs: 3,
+                        slot_ms: 50,
+                    },
+                    SearchStrategy::BasicDeterministic,
+                    EscalationPolicy::None,
+                ),
+                PeerId([1u8; 32]),
+            );
             connector.connect(target).await
         });
 
-        let handle_b = tokio::spawn(async move {
-            let connector = RndzvConnector::new()
-                .with_local_bind(addr_b)
-                .with_remote_addrs(vec![addr_a])
-                .with_timeout(Duration::from_secs(3));
-            let target = RndzvConnectTarget::from_srt(srt_b, PeerId([2u8; 32]));
-            connector.connect(target).await
-        });
+        let (res_listener, res_connector) = tokio::join!(handle_listener, handle_connector);
+        let res_listener = res_listener.expect("listener task");
+        let res_connector = res_connector.expect("connector task");
 
-        let (res_a, res_b) = tokio::join!(handle_a, handle_b);
-        let res_a = res_a.expect("task a");
-        let res_b = res_b.expect("task b");
-
-        assert!(res_a.is_ok(), "connect A failed: {res_a:?}");
-        assert!(res_b.is_ok(), "connect B failed: {res_b:?}");
+        assert!(res_listener.is_ok(), "listener failed: {res_listener:?}");
+        assert!(res_connector.is_ok(), "connector failed: {res_connector:?}");
+        let listener_session = res_listener.unwrap().session;
+        let connector_session = res_connector.unwrap().session;
+        listener_session.shutdown().await.ok();
+        connector_session.shutdown().await.ok();
     }
 
     #[tokio::test]
@@ -768,6 +935,8 @@ mod tests {
         assert!(connector_outcome.metrics.probes_sent > 0);
         assert!(listener_outcome.metrics.slot_index_success.is_some());
         assert!(connector_outcome.metrics.slot_index_success.is_some());
+        listener_outcome.session.shutdown().await.ok();
+        connector_outcome.session.shutdown().await.ok();
         Ok(())
     }
 
@@ -853,6 +1022,10 @@ mod tests {
 
         assert!(res_listener.is_ok(), "listener failed: {res_listener:?}");
         assert!(res_connector.is_ok(), "connector failed: {res_connector:?}");
+        let listener_session = res_listener.unwrap().session;
+        let connector_session = res_connector.unwrap().session;
+        listener_session.shutdown().await.ok();
+        connector_session.shutdown().await.ok();
     }
 
     #[tokio::test]
@@ -888,9 +1061,11 @@ mod tests {
                 .with_local_bind(addr_listener)
                 .with_timeout(Duration::from_secs(3));
             let outcome = listener.accept().await?;
-            let channel = outcome.session.open_channel(ChannelKind::UnreliableDatagram).await?;
+            let session = outcome.session;
+            let channel = session.open_channel(ChannelKind::UnreliableDatagram).await?;
             loop {
                 if let Some(data) = channel.recv().await? {
+                    session.shutdown().await.ok();
                     return Ok::<_, RndzvError>(data);
                 }
             }
@@ -903,8 +1078,11 @@ mod tests {
                 .with_timeout(Duration::from_secs(3));
             let target = RndzvConnectTarget::from_srt(srt_connector, PeerId([4u8; 32]));
             let outcome = connector.connect(target).await?;
-            let channel = outcome.session.open_channel(ChannelKind::UnreliableDatagram).await?;
-            channel.send(b"hello").await
+            let session = outcome.session;
+            let channel = session.open_channel(ChannelKind::UnreliableDatagram).await?;
+            let res = channel.send(b"hello").await;
+            session.shutdown().await.ok();
+            res
         });
 
         let (recv, send) = tokio::join!(handle_listener, handle_connector);
@@ -914,6 +1092,85 @@ mod tests {
         assert!(send.is_ok(), "send failed: {send:?}");
         let payload = recv.expect("recv ok");
         assert_eq!(payload, b"hello");
+    }
+
+    #[tokio::test]
+    async fn tampered_frame_is_dropped() -> Result<(), RndzvError> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let srt = Srt::new(
+            RendezvousSpaceId([0xEF; 32]),
+            [0x77u8; 32],
+            IdentityConstraints {
+                allowed_fingerprints: Vec::new(),
+            },
+            TimeModel {
+                t0: now + 1,
+                window_secs: 3,
+                slot_ms: 50,
+            },
+            SearchStrategy::BasicDeterministic,
+            EscalationPolicy::None,
+        );
+
+        let addr_listener: SocketAddr = "127.0.0.1:40501".parse().unwrap();
+        let addr_connector: SocketAddr = "127.0.0.1:40502".parse().unwrap();
+
+        let srt_listener = srt.clone();
+        let srt_connector = srt.clone();
+
+        let listener_task = tokio::spawn(async move {
+            let listener = RndzvListener::new(RendezvousSpaceId([0xEF; 32]), PeerId([1u8; 32]))
+                .with_srt(srt_listener)
+                .with_local_bind(addr_listener)
+                .with_timeout(Duration::from_secs(3));
+            let outcome = listener.accept().await?;
+            let channel = outcome.session.open_channel(ChannelKind::UnreliableDatagram).await?;
+            Ok::<_, RndzvError>((outcome.session, channel))
+        });
+
+        let connector_task = tokio::spawn(async move {
+            let connector = RndzvConnector::new()
+                .with_local_bind(addr_connector)
+                .with_remote_addrs(vec![addr_listener])
+                .with_timeout(Duration::from_secs(3));
+            let target = RndzvConnectTarget::from_srt(srt_connector, PeerId([2u8; 32]));
+            let outcome = connector.connect(target).await?;
+            let channel = outcome.session.open_channel(ChannelKind::UnreliableDatagram).await?;
+            Ok::<_, RndzvError>((outcome.session, channel))
+        });
+
+        let (listener_res, connector_res) = tokio::join!(listener_task, connector_task);
+        let (listener_session, listener_channel) = listener_res.expect("listener task")?;
+        let (connector_session, _connector_channel) = connector_res.expect("connector task")?;
+
+        let plaintext = encode_frame(ChannelId(99), b"tamper")?;
+        let mut ciphertext = vec![0u8; plaintext.len() + 64];
+        let encrypted_len = {
+            let mut guard = connector_session.path.crypto.lock().await;
+            guard
+                .session
+                .encrypt(&plaintext, &mut ciphertext)
+                .map_err(|_| RndzvError::CryptoFailed("encrypt failed"))?
+        };
+        if let Some(byte) = ciphertext.get_mut(0) {
+            *byte ^= 0xFF;
+        }
+        connector_session
+            .path
+            .socket
+            .send_to(&ciphertext[..encrypted_len], connector_session.path.remote_addr)
+            .await
+            .map_err(RndzvError::Io)?;
+
+        let recv = tokio::time::timeout(Duration::from_millis(200), listener_channel.recv()).await;
+        assert!(recv.is_err(), "tampered frame should be dropped");
+
+        listener_session.shutdown().await?;
+        connector_session.shutdown().await?;
+        Ok(())
     }
 
     #[tokio::test]
