@@ -21,6 +21,8 @@
 - `docs/cross-protocol.md` — protocol‑agnostic mapping
 - `docs/hybrid-coordination.md` — optional hybrid patterns
 - `docs/hybrid-modes.md` — hybrid modes for rndzv + relay/DHT hints
+- `docs/rndzv-1x-contract.md` — stable rndzv 1.x public contract
+- `docs/rndzv-2.0-plan.md` — rndzv 2.0 phased plan
 - `docs/future-directions.md` — synthesis and future work
 
 ## Status

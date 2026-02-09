@@ -296,4 +296,15 @@ mod tests {
             .expect_err("invalid version");
         assert!(matches!(err, SrtError::InvalidVersion(_)));
     }
+
+    #[test]
+    fn parses_v1_compatibility() {
+        let uri = "riftd-srt://v1?space=0000000000000000000000000000000000000000000000000000000000000000&seed=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&t0=1700000000&tw=120&slot=250&ss=basic&esc=none";
+        let decoded = SemanticRendezvousToken::from_uri(uri).expect("decode v1 uri");
+        assert_eq!(decoded.time_model.t0, 1_700_000_000);
+        assert_eq!(decoded.time_model.window_secs, 120);
+        assert_eq!(decoded.time_model.slot_ms, 250);
+        assert_eq!(decoded.search_strategy, SearchStrategy::BasicDeterministic);
+        assert_eq!(decoded.escalation, EscalationPolicy::None);
+    }
 }
