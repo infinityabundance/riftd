@@ -8,7 +8,10 @@ pub mod schedule;
 pub mod srt;
 pub mod time;
 
-pub use api::RndzvClient;
+pub use api::{
+    ChannelId, ChannelKind, PathBinding, PeerId, RendezvousSpaceId, RndzvChannel, RndzvClient,
+    RndzvError, RndzvSession, SessionId, Srt,
+};
 pub use engine::{
     build_probe_payload, parse_probe_payload, rendezvous_id_from_seed, validate_probe_for_token,
     Clock, ParsedProbe, ProbeError, ProbePayload, RendezvousError, RendezvousMetrics,
