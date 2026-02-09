@@ -33,7 +33,7 @@ use rift_nat::{
     attempt_hole_punch, gather_local_candidates, gather_public_addrs, parse_turn_server, NatConfig,
     PeerEndpoint,
 };
-use rift_protocol::{CallState, Capabilities, GroupMode, QosProfile, SessionId};
+use rift_protocol::{CallState, Capabilities, QosProfile, SessionId};
 use rift_rndzv::{
     ChannelKind as RndzvChannelKind, PeerId as RndzvPeerId, RndzvChannel, RndzvConnectTarget,
     RndzvConnector, RndzvListener, Srt as RndzvSrt,
@@ -135,27 +135,6 @@ pub struct NetworkConfigSdk {
     /// Optional Predictive Rendezvous configuration.
     #[serde(default)]
     pub rndzv: Option<RndzvConfigSdk>,
-}
-
-impl Default for NetworkConfigSdk {
-    fn default() -> Self {
-        Self {
-            prefer_p2p: true,
-            local_ports: None,
-            known_peers: Vec::new(),
-            invite: None,
-            stun_servers: Vec::new(),
-            stun_timeout_ms: None,
-            enable_turn: false,
-            turn_servers: Vec::new(),
-            turn_timeout_ms: None,
-            turn_keepalive_ms: None,
-            punch_interval_ms: None,
-            punch_timeout_ms: None,
-            max_direct_peers: None,
-            rndzv: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -321,6 +300,7 @@ impl Default for NetworkConfigSdk {
             punch_interval_ms: Some(200),
             punch_timeout_ms: Some(5000),
             max_direct_peers: None,
+            rndzv: None,
         }
     }
 }
@@ -525,7 +505,7 @@ pub struct RiftHandle {
     /// Persistent identity (if initialized).
     identity: Mutex<Option<Identity>>,
     /// Local peer id (generated at startup).
-    local_peer_id: PeerId,
+    _local_peer_id: PeerId,
     /// Effective runtime configuration.
     config: RiftConfig,
     /// In-memory overrides (PTT, mute, etc).
@@ -569,7 +549,7 @@ impl RiftHandle {
         Ok(Self {
             ptt_active: Arc::new(AtomicBool::new(!config.audio.ptt)),
             identity: Mutex::new(Some(identity)),
-            local_peer_id,
+            _local_peer_id: local_peer_id,
             config,
             overrides: Mutex::new(RiftConfigOverrides::default()),
             runtime: Mutex::new(None),
@@ -745,7 +725,9 @@ impl RiftHandle {
                 password: password.map(|v| v.to_string()),
                 channel_key: [0u8; 32],
                 known_peers: Vec::new(),
-                version: 1,
+                candidates: Vec::new(),
+                relay_candidates: Vec::new(),
+                version: 2,
                 created_at: now_timestamp(),
             });
             mesh.join_invite(invite, nat_cfg)
@@ -766,7 +748,7 @@ impl RiftHandle {
             match start_audio_pipeline(
                 cfg.clone(),
                 handle.clone(),
-                self.local_peer_id,
+                self.local_peer_id(),
                 self.ptt_active.clone(),
                 self.mute_active.clone(),
             ) {
@@ -827,7 +809,7 @@ impl RiftHandle {
                     .collect::<Vec<_>>(),
             };
             let info = PeerEndpointInfo {
-                peer_id: self.local_peer_id,
+                peer_id: self.local_peer_id(),
                 addrs,
             };
             let _ = handle_dht.announce(channel_id, info.clone()).await;
@@ -1112,7 +1094,7 @@ impl RiftHandle {
             .map_err(|e| RiftError::Mesh(format!("{e}")))?;
 
         if let (Some(srt), Some(voice)) = (parsed_srt, voice) {
-            let local_peer = RndzvPeerId(self.local_peer_id.0);
+            let local_peer = RndzvPeerId(self.local_peer_id().0);
             let target = RndzvConnectTarget::from_srt(srt, local_peer);
             let connector = RndzvConnector::new().with_timeout(Duration::from_secs(5));
             let outcome = connector
@@ -1162,7 +1144,7 @@ impl RiftHandle {
             .map_err(|e| RiftError::Mesh(format!("{e}")))?;
 
         if let (Some(srt), Some(voice)) = (parsed_srt, voice) {
-            let local_peer = RndzvPeerId(self.local_peer_id.0);
+            let local_peer = RndzvPeerId(self.local_peer_id().0);
             let listener = RndzvListener::new(srt.space, local_peer).with_srt(srt);
             let outcome = listener
                 .accept()
@@ -1238,7 +1220,7 @@ impl RiftHandle {
 
     /// Return the local peer id.
     pub fn local_peer_id(&self) -> PeerId {
-        self.local_peer_id
+        self._local_peer_id
     }
 }
 
@@ -1254,7 +1236,7 @@ struct VoiceRuntimeRef {
 fn start_audio_pipeline(
     config: RiftConfig,
     handle: MeshHandle,
-    local_peer_id: PeerId,
+    _local_peer_id: PeerId,
     ptt_active: Arc<AtomicBool>,
     mute_active: Arc<AtomicBool>,
 ) -> Result<VoiceRuntime, RiftError> {
@@ -1285,6 +1267,7 @@ fn start_audio_pipeline(
 
     let rndzv_channel: Arc<StdMutex<Option<RndzvChannel>>> = Arc::new(StdMutex::new(None));
     let rndzv_remote_peer: Arc<StdMutex<Option<PeerId>>> = Arc::new(StdMutex::new(None));
+    let rndzv_channel_for_task = rndzv_channel.clone();
     tokio::spawn(async move {
         let mut seq: u32 = 0;
         let mut hangover: u8 = 0;
@@ -1293,7 +1276,7 @@ fn start_audio_pipeline(
             fec: false,
             loss_pct: 0,
         };
-        let rndzv_sender = rndzv_channel.clone();
+        let rndzv_sender = rndzv_channel_for_task.clone();
         while let Some(frame) = audio_rx.recv().await {
             let next_tuning = {
                 let tuning = tuning_for_task.lock().unwrap();

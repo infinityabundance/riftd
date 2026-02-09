@@ -99,10 +99,11 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogMakeWriter {
 }
 
 use rift_core::{decode_invite, encode_invite, generate_invite, Identity};
-use rift_mesh::{Mesh, MeshConfig};
+use rift_nat::gather_local_candidates;
+use rift_mesh::{Mesh, MeshConfig, RendezvousConfig};
 use rift_rndzv::{
-    ChannelKind as RndzvChannelKind, EscalationPolicy, IdentityConstraints, RendezvousConfig, Role,
-    SearchStrategy, SemanticRendezvousToken, TimeModel,
+    ChannelKind as RndzvChannelKind, EscalationPolicy, IdentityConstraints, Role, SearchStrategy,
+    SemanticRendezvousToken, TimeModel,
 };
 use rift_protocol::QosProfile;
 use rift_sdk::{
@@ -534,7 +535,6 @@ async fn main() -> Result<()> {
                 enable_turn,
                 turn_servers,
                 StartupAction::None,
-                None,
             )
             .await
         }
@@ -1199,7 +1199,7 @@ async fn cmd_rndzv_invite(
     qr: bool,
 ) -> Result<()> {
     let invite = if let Some(peer) = peer_id {
-        let peer_id = rift_sdk::PeerId(parse_fingerprint_hex(&peer)?);
+        let peer_id = rift_sdk::RiftPeerId(parse_fingerprint_hex(&peer)?);
         let mut invite = rift_sdk::create_voice_invite(peer_id);
         invite.label = label;
         invite
@@ -1472,7 +1472,10 @@ async fn cmd_create(
     let relay_enabled = relay || user_cfg.network.relay.unwrap_or(false);
 
     if internet {
-    let invite = generate_invite(&channel, password.as_deref(), Vec::new(), Vec::new());
+        let mut candidates = gather_local_candidates(port);
+        candidates.sort();
+        candidates.dedup();
+        let invite = generate_invite(&channel, password.as_deref(), candidates.clone(), candidates);
         let invite_str = encode_invite(&invite);
         save_invite_string(&channel, &invite_str)?;
     }
@@ -2246,11 +2249,12 @@ fn take_startup_action(startup: &mut StartupAction, state: &UiState) -> Option<U
     match startup {
         StartupAction::None => None,
         StartupAction::Call { peer, rndzv_srt } => {
+            let rndzv_srt = rndzv_srt.clone();
             if let Some(peer_id) = resolve_peer_input(state, peer) {
                 *startup = StartupAction::None;
                 Some(UiAction::StartCall {
                     peer: peer_id,
-                    rndzv_srt: rndzv_srt.clone(),
+                    rndzv_srt,
                 })
             } else {
                 None
