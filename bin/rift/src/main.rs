@@ -722,6 +722,7 @@ async fn cmd_tir_invite(peer_identity: String) -> Result<()> {
     let t0 = now.saturating_add(10);
 
     let token = SemanticRendezvousToken::new(
+        rift_rndzv::api::RendezvousSpaceId([0u8; 32]),
         seed,
         IdentityConstraints {
             allowed_fingerprints: vec![fingerprint],
@@ -759,6 +760,7 @@ async fn cmd_srt_generate(
     let t0 = now.saturating_add(start_in);
 
     let token = SemanticRendezvousToken::new(
+        rift_rndzv::api::RendezvousSpaceId([0u8; 32]),
         random_seed(),
         IdentityConstraints {
             allowed_fingerprints: allowed,
@@ -797,6 +799,7 @@ async fn cmd_srt_inspect(uri: String) -> Result<()> {
         .context("failed to decode SRT URI")?;
 
     println!("SRT inspection:");
+    println!("  space: {}", hex::encode(token.space.0));
     println!("  seed: {}", hex::encode(token.seed));
     println!(
         "  time_model: t0={} window_secs={} slot_ms={}",
@@ -856,6 +859,7 @@ async fn cmd_tir_accept(srt_uri: String) -> Result<()> {
     }
 
     println!("SRT decoded:");
+    println!("  space: {}", hex::encode(token.space.0));
     println!("  seed: {}", hex::encode(token.seed));
     println!(
         "  time_model: t0={} window_secs={} slot_ms={}",
@@ -892,6 +896,7 @@ async fn cmd_pr_test(
     let t0 = now.saturating_add(1);
 
     let token = SemanticRendezvousToken::new(
+        rift_rndzv::api::RendezvousSpaceId([0u8; 32]),
         random_seed(),
         IdentityConstraints {
             allowed_fingerprints: Vec::new(),
@@ -975,6 +980,7 @@ async fn cmd_ptr_test(
     let t0 = now.saturating_add(1);
 
     let token = SemanticRendezvousToken::new(
+        rift_rndzv::api::RendezvousSpaceId([0u8; 32]),
         seed,
         IdentityConstraints {
             allowed_fingerprints: Vec::new(),

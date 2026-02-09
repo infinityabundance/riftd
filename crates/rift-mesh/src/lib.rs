@@ -3786,6 +3786,7 @@ mod pr_tests {
             .as_secs();
 
         let token = SemanticRendezvousToken::new(
+            rift_rndzv::api::RendezvousSpaceId([0u8; 32]),
             [7u8; 32],
             IdentityConstraints {
                 allowed_fingerprints: Vec::new(),

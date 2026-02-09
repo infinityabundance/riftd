@@ -5,6 +5,7 @@ use std::fmt;
 
 use base64::Engine;
 
+use crate::api::RendezvousSpaceId;
 use crate::time::TimeModel;
 
 /// Constraints on acceptable peer identities.
@@ -38,6 +39,8 @@ pub enum EscalationPolicy {
 /// and the constraints used to locate peers.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SemanticRendezvousToken {
+    /// Logical coordination namespace for this rendezvous.
+    pub space: RendezvousSpaceId,
     /// 32-byte seed that deterministically drives schedule generation.
     pub seed: [u8; 32],
     /// Identity constraints that limit acceptable peers.
@@ -53,6 +56,7 @@ pub struct SemanticRendezvousToken {
 impl SemanticRendezvousToken {
     /// Construct a new SRT from its component parts.
     pub fn new(
+        space: RendezvousSpaceId,
         seed: [u8; 32],
         identities: IdentityConstraints,
         time_model: TimeModel,
@@ -60,6 +64,7 @@ impl SemanticRendezvousToken {
         escalation: EscalationPolicy,
     ) -> Self {
         Self {
+            space,
             seed,
             identities,
             time_model,
@@ -95,8 +100,9 @@ impl SemanticRendezvousToken {
             EscalationPolicy::Aggressive => "aggressive",
         };
 
+        let space = hex::encode(self.space.0);
         let mut uri = format!(
-            "riftd-srt://v1?seed={seed}&t0={}&tw={}&slot={}&ss={ss}&esc={esc}",
+            "riftd-srt://v1?space={space}&seed={seed}&t0={}&tw={}&slot={}&ss={ss}&esc={esc}",
             self.time_model.t0, self.time_model.window_secs, self.time_model.slot_ms
         );
         if let Some(ids) = ids {
@@ -122,6 +128,7 @@ impl SemanticRendezvousToken {
 
         let params = parse_query(query)?;
 
+        let space = decode_space(params.get("space"))?;
         let seed = decode_seed(params.get("seed"))?;
         let t0 = parse_u64(params.get("t0"), "t0")?;
         let window_secs = parse_u64(params.get("tw"), "tw")?;
@@ -133,6 +140,7 @@ impl SemanticRendezvousToken {
         };
 
         Ok(Self {
+            space,
             seed,
             identities,
             time_model: TimeModel {
@@ -197,6 +205,17 @@ fn decode_seed(value: Option<&&str>) -> Result<[u8; 32], SrtError> {
     Ok(seed)
 }
 
+fn decode_space(value: Option<&&str>) -> Result<RendezvousSpaceId, SrtError> {
+    let value = value.ok_or(SrtError::MissingField("space"))?;
+    let bytes = hex::decode(value).map_err(|_| SrtError::DecodeError("space"))?;
+    if bytes.len() != 32 {
+        return Err(SrtError::InvalidField("space"));
+    }
+    let mut space = [0u8; 32];
+    space.copy_from_slice(&bytes);
+    Ok(RendezvousSpaceId(space))
+}
+
 fn decode_ids(value: Option<&&str>) -> Result<Vec<[u8; 32]>, SrtError> {
     let value = match value {
         Some(v) if !v.is_empty() => *v,
@@ -244,6 +263,7 @@ mod tests {
     #[test]
     fn round_trip_uri() {
         let token = SemanticRendezvousToken::new(
+            RendezvousSpaceId([8u8; 32]),
             [9u8; 32],
             IdentityConstraints {
                 allowed_fingerprints: vec![[3u8; 32], [4u8; 32]],
@@ -265,14 +285,14 @@ mod tests {
 
     #[test]
     fn rejects_invalid_scheme() {
-        let err = SemanticRendezvousToken::from_uri("http://v1?seed=abcd")
+        let err = SemanticRendezvousToken::from_uri("http://v1?space=00&seed=abcd")
             .expect_err("invalid scheme");
         assert_eq!(err, SrtError::InvalidScheme);
     }
 
     #[test]
     fn rejects_invalid_version() {
-        let err = SemanticRendezvousToken::from_uri("riftd-srt://v2?seed=abcd")
+        let err = SemanticRendezvousToken::from_uri("riftd-srt://v2?space=00&seed=abcd")
             .expect_err("invalid version");
         assert!(matches!(err, SrtError::InvalidVersion(_)));
     }

@@ -153,6 +153,7 @@ mod tests {
 
     fn base_token() -> SemanticRendezvousToken {
         SemanticRendezvousToken::new(
+            crate::api::RendezvousSpaceId([0u8; 32]),
             [7u8; 32],
             IdentityConstraints {
                 allowed_fingerprints: vec![],
