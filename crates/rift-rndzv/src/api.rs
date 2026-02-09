@@ -307,6 +307,12 @@ pub struct RndzvConnector {
     timeout: std::time::Duration,
 }
 
+fn derive_base_port(seed: &[u8; 32]) -> u16 {
+    let raw = u16::from_le_bytes([seed[0], seed[1]]);
+    let range: u16 = 20_000;
+    40_000u16.saturating_add(raw % range)
+}
+
 impl RndzvConnector {
     /// Create a new connector instance.
     pub fn new() -> Self {
@@ -346,10 +352,15 @@ impl RndzvConnector {
         };
         use crate::schedule::{compute_slot_params, Role};
 
+        let base_port = derive_base_port(&target.srt.seed);
+        let use_broadcast = self.remote_addrs.is_empty();
         let bind_addr = self
             .local_bind
             .unwrap_or_else(|| std::net::SocketAddr::from(([0, 0, 0, 0], 0)));
         let socket = std::net::UdpSocket::bind(bind_addr).map_err(RndzvError::Io)?;
+        if use_broadcast {
+            socket.set_broadcast(true).map_err(RndzvError::Io)?;
+        }
         socket
             .set_read_timeout(Some(std::time::Duration::from_millis(50)))
             .map_err(RndzvError::Io)?;
@@ -390,8 +401,14 @@ impl RndzvConnector {
                         slot_index: slot.slot_index,
                         sender_fingerprint,
                     });
-                    for addr in &self.remote_addrs {
+                    if use_broadcast {
+                        let port = base_port.wrapping_add(slot.remote_port_offset);
+                        let addr = std::net::SocketAddr::from(([255, 255, 255, 255], port));
                         let _ = socket.send_to(&payload, addr);
+                    } else {
+                        for addr in &self.remote_addrs {
+                            let _ = socket.send_to(&payload, addr);
+                        }
                     }
                 }
             }
@@ -493,9 +510,10 @@ impl RndzvListener {
             return Err(RndzvError::InvalidState("listener space mismatch"));
         }
 
-        let bind_addr = self
-            .local_bind
-            .unwrap_or_else(|| std::net::SocketAddr::from(([0, 0, 0, 0], 0)));
+        let base_port = derive_base_port(&srt.seed);
+        let bind_addr = self.local_bind.unwrap_or_else(|| {
+            std::net::SocketAddr::from(([0, 0, 0, 0], base_port))
+        });
         let socket = std::net::UdpSocket::bind(bind_addr).map_err(RndzvError::Io)?;
         socket
             .set_read_timeout(Some(std::time::Duration::from_millis(50)))

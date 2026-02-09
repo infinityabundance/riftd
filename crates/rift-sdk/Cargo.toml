@@ -15,6 +15,7 @@ rift-protocol = { path = "../rift-protocol" }
 rift-discovery = { path = "../rift-discovery" }
 rift-nat = { path = "../rift-nat" }
 rift-mesh = { path = "../rift-mesh" }
+rift-rndzv = { path = "../rift-rndzv" }
 rift-media = { path = "../rift-media" }
 rift-dht = { path = "../rift-dht" }
 rift-metrics = { path = "../rift-metrics" }
@@ -27,6 +28,7 @@ sha2 = "0.10"
 serde_json = "1"
 dirs = "5"
 blake3 = "1"
+futures = "0.3"
 jni = { version = "0.21", optional = true }
 ndk-context = { version = "0.1", optional = true }
 

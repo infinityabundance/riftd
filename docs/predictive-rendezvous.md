@@ -76,6 +76,9 @@ rift tir-accept <riftd-srt://...>
 
 When `tir-accept` runs, it checks the SRT's identity constraints against the local identity if available and prints a decoded summary.
 
+## Voice Calls (rndzv)
+When an SRT is supplied on the CLI, voice calls can use `rndzv` as the primary networking/session layer. The caller supplies the SRT URI on the invite; the callee reads it from the incoming call offer and listens for matching probes. No explicit remote address list is required for this path. This is experimental and intended for LAN or simple NAT scenarios.
+
 ## Metrics and Logging
 Predictive Rendezvous emits debug-level `tracing` logs with the rendezvous ID and slot metadata. These logs include per-slot emission, success, and timeout summaries.
 

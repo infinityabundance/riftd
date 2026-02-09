@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::Instant;
+use futures::executor::block_on;
 
 use rift_core::{decode_invite, generate_invite, Identity, Invite, PeerId, KeyStore};
 use rift_dht::{DhtConfig as RiftDhtConfig, DhtHandle, PeerEndpointInfo};
@@ -32,6 +33,10 @@ use rift_nat::{
     PeerEndpoint,
 };
 use rift_protocol::{CallState, Capabilities, GroupMode, QosProfile, SessionId};
+use rift_rndzv::{
+    ChannelKind as RndzvChannelKind, PeerId as RndzvPeerId, RndzvChannel, RndzvConnectTarget,
+    RndzvConnector, RndzvListener, Srt as RndzvSrt,
+};
 use hkdf::Hkdf;
 use sha2::Sha256;
 
@@ -124,6 +129,48 @@ pub struct NetworkConfigSdk {
     pub punch_timeout_ms: Option<u64>,
     #[serde(default)]
     pub max_direct_peers: Option<usize>,
+    /// Optional Predictive Rendezvous configuration.
+    #[serde(default)]
+    pub rndzv: Option<RndzvConfigSdk>,
+}
+
+impl Default for NetworkConfigSdk {
+    fn default() -> Self {
+        Self {
+            prefer_p2p: true,
+            local_ports: None,
+            known_peers: Vec::new(),
+            invite: None,
+            stun_servers: Vec::new(),
+            stun_timeout_ms: None,
+            enable_turn: false,
+            turn_servers: Vec::new(),
+            turn_timeout_ms: None,
+            turn_keepalive_ms: None,
+            punch_interval_ms: None,
+            punch_timeout_ms: None,
+            max_direct_peers: None,
+            rndzv: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RndzvConfigSdk {
+    /// SRT URI used for rendezvous.
+    pub srt_uri: String,
+    /// Role for rendezvous: connector or listener.
+    pub role: RndzvRole,
+    /// Optional remote address for connector mode.
+    pub remote_addr: Option<SocketAddr>,
+    /// Optional local bind address for listener mode.
+    pub listen_addr: Option<SocketAddr>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum RndzvRole {
+    Connector,
+    Listener,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -276,7 +323,11 @@ pub enum RiftEvent {
     /// Incoming chat message.
     IncomingChat(ChatMessage),
     /// Incoming call invitation.
-    IncomingCall { session: SessionId, from: PeerId },
+    IncomingCall {
+        session: SessionId,
+        from: PeerId,
+        rndzv_srt_uri: Option<String>,
+    },
     /// Call state changes (ringing/active/ended).
     CallStateChanged { session: SessionId, state: CallState },
     /// A peer joined the channel.
@@ -336,6 +387,63 @@ struct VoiceRuntime {
     emit_voice: bool,
     audio_config: AudioConfig,
     tuning: Arc<StdMutex<AudioTuning>>,
+    rndzv_channel: Arc<StdMutex<Option<RndzvChannel>>>,
+    rndzv_remote_peer: Arc<StdMutex<Option<PeerId>>>,
+}
+
+impl VoiceRuntime {
+    fn set_rndzv_channel(&self, channel: RndzvChannel, remote_peer: PeerId) {
+        {
+            let mut slot = self.rndzv_channel.lock().unwrap();
+            *slot = Some(channel.clone());
+        }
+        {
+            let mut peer_slot = self.rndzv_remote_peer.lock().unwrap();
+            *peer_slot = Some(remote_peer);
+        }
+
+        let mixer = self.mixer.clone();
+        let frame_samples = self.frame_samples;
+        let emit_voice = self.emit_voice;
+        let audio_config = self.audio_config.clone();
+        tokio::spawn(async move {
+            let mut decoder = match OpusDecoder::new(&audio_config) {
+                Ok(decoder) => decoder,
+                Err(err) => {
+                    tracing::warn!("rndzv opus decoder init failed: {err}");
+                    return;
+                }
+            };
+            loop {
+                let payload = match channel.recv().await {
+                    Ok(Some(payload)) => payload,
+                    Ok(None) => continue,
+                    Err(err) => {
+                        tracing::warn!("rndzv channel recv failed: {err}");
+                        return;
+                    }
+                };
+                if let Ok(out) = decode_frame(CodecId::Opus, &payload, &mut decoder, frame_samples) {
+                    let mut mixer = mixer.lock().unwrap();
+                    mixer.push(peer_to_stream_id(&remote_peer), out.clone());
+                    if emit_voice {
+                        let _ = out;
+                    }
+                }
+            }
+        });
+    }
+
+    fn clear_rndzv_channel(&self) {
+        {
+            let mut slot = self.rndzv_channel.lock().unwrap();
+            *slot = None;
+        }
+        {
+            let mut peer_slot = self.rndzv_remote_peer.lock().unwrap();
+            *peer_slot = None;
+        }
+    }
 }
 
 /// Current audio tuning parameters.
@@ -358,8 +466,9 @@ struct QosState {
 struct SessionRuntime {
     _channel: String,
     handle: MeshHandle,
-    _voice: Option<VoiceRuntime>,
+    _voice: Option<Arc<VoiceRuntime>>,
     _dht: Option<DhtHandle>,
+    pending_call_srt: Arc<StdMutex<HashMap<SessionId, String>>>,
 }
 
 /// Primary SDK handle exposed to callers.
@@ -601,14 +710,18 @@ impl RiftHandle {
         let event_tx = self.event_tx.clone();
         let channel = name.to_string();
         let channel_for_task = channel.clone();
+        let pending_call_srt: Arc<StdMutex<HashMap<SessionId, String>>> =
+            Arc::new(StdMutex::new(HashMap::new()));
+        let pending_call_srt_task = pending_call_srt.clone();
         let voice = if cfg.audio.enabled {
             match start_audio_pipeline(
                 cfg.clone(),
                 handle.clone(),
+                self.local_peer_id,
                 self.ptt_active.clone(),
                 self.mute_active.clone(),
             ) {
-                Ok(voice) => Some(voice),
+                Ok(voice) => Some(Arc::new(voice)),
                 Err(err) => {
                     if cfg.audio.allow_fail {
                         tracing::warn!("audio pipeline failed: {err}");
@@ -774,8 +887,20 @@ impl RiftHandle {
                     MeshEvent::ChatReceived(chat) => {
                         let _ = event_tx.send(RiftEvent::IncomingChat(chat));
                     }
-                    MeshEvent::IncomingCall { session, from } => {
-                        let _ = event_tx.send(RiftEvent::IncomingCall { session, from });
+                    MeshEvent::IncomingCall {
+                        session,
+                        from,
+                        rndzv_srt_uri,
+                    } => {
+                        if let Some(uri) = rndzv_srt_uri.clone() {
+                            let mut map = pending_call_srt_task.lock().unwrap();
+                            map.insert(session, uri);
+                        }
+                        let _ = event_tx.send(RiftEvent::IncomingCall {
+                            session,
+                            from,
+                            rndzv_srt_uri,
+                        });
                     }
                     MeshEvent::CallAccepted { session, .. } => {
                         let _ = event_tx.send(RiftEvent::CallStateChanged {
@@ -881,6 +1006,7 @@ impl RiftHandle {
             handle,
             _voice: voice,
             _dht: dht,
+            pending_call_srt,
         });
         Ok(())
     }
@@ -908,32 +1034,118 @@ impl RiftHandle {
 
     /// Start a call with a specific peer.
     pub async fn start_call(&self, peer: PeerId) -> Result<SessionId, RiftError> {
-        let runtime_guard = self.runtime.lock().await;
-        let runtime = runtime_guard.as_ref().ok_or(RiftError::NotJoined)?;
-        runtime
-            .handle
-            .start_call(peer)
+        self.start_call_with_srt(peer, None).await
+    }
+
+    /// Start a call with an optional rndzv SRT URI attached to the invite.
+    pub async fn start_call_with_srt(
+        &self,
+        peer: PeerId,
+        rndzv_srt_uri: Option<String>,
+    ) -> Result<SessionId, RiftError> {
+        let parsed_srt = if let Some(uri) = rndzv_srt_uri.as_ref() {
+            Some(
+                RndzvSrt::from_uri(uri)
+                    .map_err(|e| RiftError::Other(format!("rndzv srt decode failed: {e}")))?,
+            )
+        } else {
+            None
+        };
+        let (handle, voice) = {
+            let runtime_guard = self.runtime.lock().await;
+            let runtime = runtime_guard.as_ref().ok_or(RiftError::NotJoined)?;
+            (runtime.handle.clone(), runtime._voice.clone())
+        };
+
+        let session = handle
+            .start_call_with_srt(peer, rndzv_srt_uri.clone())
             .await
-            .map_err(|e| RiftError::Mesh(format!("{e}")))
+            .map_err(|e| RiftError::Mesh(format!("{e}")))?;
+
+        if let (Some(srt), Some(voice)) = (parsed_srt, voice) {
+            let local_peer = RndzvPeerId(self.local_peer_id.0);
+            let target = RndzvConnectTarget::from_srt(srt, local_peer);
+            let connector = RndzvConnector::new().with_timeout(Duration::from_secs(5));
+            let session = tokio::task::spawn_blocking(move || {
+                block_on(connector.connect(target))
+            })
+            .await
+            .map_err(|e| RiftError::Other(format!("rndzv connect task failed: {e}")))?
+            .map_err(|e| RiftError::Other(format!("rndzv connect failed: {e}")))?;
+
+            let channel = session
+                .open_channel(RndzvChannelKind::UnreliableDatagram)
+                .await
+                .map_err(|e| RiftError::Other(format!("rndzv channel open failed: {e}")))?;
+            let remote_peer = PeerId((session.remote).0);
+            voice.set_rndzv_channel(channel, remote_peer);
+        }
+
+        Ok(session)
     }
 
     /// Accept an incoming call.
     pub async fn accept_call(&self, session: SessionId) -> Result<(), RiftError> {
-        let runtime_guard = self.runtime.lock().await;
-        let runtime = runtime_guard.as_ref().ok_or(RiftError::NotJoined)?;
-        runtime
-            .handle
+        let (handle, voice, pending_call_srt) = {
+            let runtime_guard = self.runtime.lock().await;
+            let runtime = runtime_guard.as_ref().ok_or(RiftError::NotJoined)?;
+            (
+                runtime.handle.clone(),
+                runtime._voice.clone(),
+                runtime.pending_call_srt.clone(),
+            )
+        };
+        let srt_uri = {
+            let mut map = pending_call_srt.lock().unwrap();
+            map.remove(&session)
+        };
+        let parsed_srt = if let Some(uri) = srt_uri.as_ref() {
+            Some(
+                RndzvSrt::from_uri(uri)
+                    .map_err(|e| RiftError::Other(format!("rndzv srt decode failed: {e}")))?,
+            )
+        } else {
+            None
+        };
+
+        handle
             .accept_call(session)
             .await
-            .map_err(|e| RiftError::Mesh(format!("{e}")))
+            .map_err(|e| RiftError::Mesh(format!("{e}")))?;
+
+        if let (Some(srt), Some(voice)) = (parsed_srt, voice) {
+            let local_peer = RndzvPeerId(self.local_peer_id.0);
+            let listener = RndzvListener::new(srt.space, local_peer).with_srt(srt);
+            let session = tokio::task::spawn_blocking(move || {
+                block_on(listener.accept())
+            })
+            .await
+            .map_err(|e| RiftError::Other(format!("rndzv accept task failed: {e}")))?
+            .map_err(|e| RiftError::Other(format!("rndzv accept failed: {e}")))?;
+
+            let channel = session
+                .open_channel(RndzvChannelKind::UnreliableDatagram)
+                .await
+                .map_err(|e| RiftError::Other(format!("rndzv channel open failed: {e}")))?;
+            let remote_peer = PeerId((session.remote).0);
+            voice.set_rndzv_channel(channel, remote_peer);
+        }
+
+        Ok(())
     }
 
     /// Decline an incoming call with optional reason.
     pub async fn decline_call(&self, session: SessionId, reason: Option<&str>) -> Result<(), RiftError> {
-        let runtime_guard = self.runtime.lock().await;
-        let runtime = runtime_guard.as_ref().ok_or(RiftError::NotJoined)?;
-        runtime
-            .handle
+        let (handle, pending_call_srt) = {
+            let runtime_guard = self.runtime.lock().await;
+            let runtime = runtime_guard.as_ref().ok_or(RiftError::NotJoined)?;
+            (runtime.handle.clone(), runtime.pending_call_srt.clone())
+        };
+        {
+            let mut map = pending_call_srt.lock().unwrap();
+            map.remove(&session);
+        }
+        handle
             .decline_call(session, reason.map(|v| v.to_string()))
             .await
             .map_err(|e| RiftError::Mesh(format!("{e}")))
@@ -941,10 +1153,15 @@ impl RiftHandle {
 
     /// End an active call session.
     pub async fn end_call(&self, session: SessionId) -> Result<(), RiftError> {
-        let runtime_guard = self.runtime.lock().await;
-        let runtime = runtime_guard.as_ref().ok_or(RiftError::NotJoined)?;
-        runtime
-            .handle
+        let (handle, voice) = {
+            let runtime_guard = self.runtime.lock().await;
+            let runtime = runtime_guard.as_ref().ok_or(RiftError::NotJoined)?;
+            (runtime.handle.clone(), runtime._voice.clone())
+        };
+        if let Some(voice) = voice {
+            voice.clear_rndzv_channel();
+        }
+        handle
             .end_call(session)
             .await
             .map_err(|e| RiftError::Mesh(format!("{e}")))
@@ -990,6 +1207,7 @@ struct VoiceRuntimeRef {
 fn start_audio_pipeline(
     config: RiftConfig,
     handle: MeshHandle,
+    local_peer_id: PeerId,
     ptt_active: Arc<AtomicBool>,
     mute_active: Arc<AtomicBool>,
 ) -> Result<VoiceRuntime, RiftError> {
@@ -1017,6 +1235,9 @@ fn start_audio_pipeline(
         loss_pct: 0,
     }));
     let tuning_for_task = tuning.clone();
+
+    let rndzv_channel: Arc<StdMutex<Option<RndzvChannel>>> = Arc::new(StdMutex::new(None));
+    let rndzv_remote_peer: Arc<StdMutex<Option<PeerId>>> = Arc::new(StdMutex::new(None));
     tokio::spawn(async move {
         let mut seq: u32 = 0;
         let mut hangover: u8 = 0;
@@ -1025,6 +1246,7 @@ fn start_audio_pipeline(
             fec: false,
             loss_pct: 0,
         };
+        let rndzv_sender = rndzv_channel.clone();
         while let Some(frame) = audio_rx.recv().await {
             let next_tuning = {
                 let tuning = tuning_for_task.lock().unwrap();
@@ -1071,7 +1293,12 @@ fn start_audio_pipeline(
                 Err(_) => continue,
             };
             let timestamp = now_timestamp();
-            let _ = handle.broadcast_voice(seq, timestamp, out).await;
+            let maybe_channel = rndzv_sender.lock().unwrap().clone();
+            if let Some(channel) = maybe_channel {
+                let _ = channel.send(&out).await;
+            } else {
+                let _ = handle.broadcast_voice(seq, timestamp, out).await;
+            }
             seq = seq.wrapping_add(1);
         }
     });
@@ -1125,6 +1352,8 @@ fn start_audio_pipeline(
         emit_voice: config.audio.emit_voice_frames,
         audio_config,
         tuning,
+        rndzv_channel,
+        rndzv_remote_peer,
     })
 }
 

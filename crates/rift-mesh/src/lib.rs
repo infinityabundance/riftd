@@ -123,7 +123,11 @@ pub enum MeshEvent {
     GroupCodec(CodecId),
     StatsUpdate { peer: PeerId, stats: LinkStats, global: GlobalStats },
     PeerIdentity { peer_id: PeerId, public_key: Vec<u8> },
-    IncomingCall { session: SessionId, from: PeerId },
+    IncomingCall {
+        session: SessionId,
+        from: PeerId,
+        rndzv_srt_uri: Option<String>,
+    },
     CallAccepted { session: SessionId, from: PeerId },
     CallDeclined {
         session: SessionId,
@@ -684,38 +688,6 @@ impl Mesh {
             }
         }
         Ok(())
-    }
-
-    /// Broadcast a chat message to all peers.
-    pub async fn broadcast_chat(&self, text: String) -> Result<()> {
-        self.inner.broadcast_chat(text).await
-    }
-
-    /// Broadcast a voice packet to all peers.
-    pub async fn broadcast_voice(&self, seq: u32, timestamp: u64, payload: Vec<u8>) -> Result<()> {
-        self.inner
-            .broadcast_voice(self.inner.identity.peer_id, seq, timestamp, payload)
-            .await
-    }
-
-    /// Start a call with a specific peer.
-    pub async fn start_call(&self, to: PeerId) -> Result<SessionId> {
-        self.inner.start_call(to).await
-    }
-
-    /// Accept a pending call session.
-    pub async fn accept_call(&self, session: SessionId) -> Result<()> {
-        self.inner.accept_call(session).await
-    }
-
-    /// Decline a pending call session with optional reason.
-    pub async fn decline_call(&self, session: SessionId, reason: Option<String>) -> Result<()> {
-        self.inner.decline_call(session, reason).await
-    }
-
-    /// End an active call session.
-    pub async fn end_call(&self, session: SessionId) -> Result<()> {
-        self.inner.end_call(session).await
     }
 
     /// Return the currently active session id.
@@ -3021,7 +2993,7 @@ impl MeshInner {
         Ok(())
     }
 
-    async fn start_call(&self, to: PeerId) -> Result<SessionId> {
+    async fn start_call(&self, to: PeerId, rndzv_srt_uri: Option<String>) -> Result<SessionId> {
         let session = SessionId::random();
         tracing::info!(to = %to, session = ?session, "call start");
         {
@@ -3036,6 +3008,7 @@ impl MeshInner {
             from: self.identity.peer_id,
             to,
             display_name: None,
+            rndzv_srt_uri,
         };
         self.send_call_to_peer(to, call, session).await?;
         Ok(session)
@@ -3144,7 +3117,13 @@ impl MeshInner {
 
     async fn handle_call(&self, call: CallControl) -> Result<()> {
         match call {
-            CallControl::Invite { session, from, to, .. } => {
+            CallControl::Invite {
+                session,
+                from,
+                to,
+                rndzv_srt_uri,
+                ..
+            } => {
                 if to != self.identity.peer_id {
                     return Ok(());
                 }
@@ -3157,7 +3136,11 @@ impl MeshInner {
                 let _ = self.update_group_topology(session).await;
                 let _ = self
                     .events_tx
-                    .send(MeshEvent::IncomingCall { session, from })
+                    .send(MeshEvent::IncomingCall {
+                        session,
+                        from,
+                        rndzv_srt_uri,
+                    })
                     .await;
             }
             CallControl::Accept { session, from } => {
@@ -3413,7 +3396,16 @@ impl MeshHandle {
 
     /// Start a call with a specific peer.
     pub async fn start_call(&self, to: PeerId) -> Result<SessionId> {
-        self.inner.start_call(to).await
+        self.inner.start_call(to, None).await
+    }
+
+    /// Start a call with an optional rndzv SRT URI attached.
+    pub async fn start_call_with_srt(
+        &self,
+        to: PeerId,
+        rndzv_srt_uri: Option<String>,
+    ) -> Result<SessionId> {
+        self.inner.start_call(to, rndzv_srt_uri).await
     }
 
     /// Accept a pending call.
