@@ -5,7 +5,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use tokio::net::UdpSocket;
-use tokio::sync::{mpsc, Mutex, watch};
+use tokio::sync::{mpsc, oneshot, Mutex, watch};
 use tokio::task::JoinHandle;
 
 use crate::engine::{NatBehaviorHint, RendezvousMetrics};
@@ -58,13 +58,25 @@ impl std::fmt::Debug for CryptoContext {
 #[derive(Debug)]
 struct DemuxState {
     channels: HashMap<ChannelId, mpsc::Sender<Vec<u8>>>,
+    kinds: HashMap<ChannelId, ChannelKind>,
+    reliable_recv: HashMap<ChannelId, ReliableRecvState>,
+    ack_waiters: HashMap<(ChannelId, u64), oneshot::Sender<()>>,
     next_channel: u32,
+}
+
+#[derive(Debug, Default)]
+struct ReliableRecvState {
+    next_seq: u64,
+    buffered: std::collections::BTreeMap<u64, Vec<u8>>,
 }
 
 impl DemuxState {
     fn new() -> Self {
         Self {
             channels: HashMap::new(),
+            kinds: HashMap::new(),
+            reliable_recv: HashMap::new(),
+            ack_waiters: HashMap::new(),
             next_channel: 1,
         }
     }
@@ -75,12 +87,19 @@ impl DemuxState {
         id
     }
 
-    fn register(&mut self, id: ChannelId, tx: mpsc::Sender<Vec<u8>>) {
+    fn register(&mut self, id: ChannelId, kind: ChannelKind, tx: mpsc::Sender<Vec<u8>>) {
         self.channels.insert(id, tx);
+        self.kinds.insert(id, kind);
+        if matches!(kind, ChannelKind::ReliableOrdered) {
+            self.reliable_recv.insert(id, ReliableRecvState::default());
+        }
     }
 
     fn unregister(&mut self, id: ChannelId) {
         self.channels.remove(&id);
+        self.kinds.remove(&id);
+        self.reliable_recv.remove(&id);
+        self.ack_waiters.retain(|(chan, _), _| *chan != id);
     }
 }
 
@@ -115,13 +134,83 @@ fn start_demux_task(
                             }
                         }
                     };
-                    if let Ok((channel_id, payload)) = decode_frame(&plaintext[..decrypted_len]) {
-                        let tx = {
-                            let guard = state.lock().await;
-                            guard.channels.get(&channel_id).cloned()
-                        };
-                        if let Some(tx) = tx {
-                            let _ = tx.send(payload).await;
+                    let frame = match decode_frame(&plaintext[..decrypted_len]) {
+                        Ok(frame) => frame,
+                        Err(err) => {
+                            tracing::warn!(target: "rndzv", error = %err, "frame_decode_failed");
+                            continue;
+                        }
+                    };
+
+                    match frame.kind {
+                        ChannelKind::UnreliableDatagram => {
+                            if frame.flags & FRAME_FLAG_DATA == 0 {
+                                continue;
+                            }
+                            let tx = {
+                                let guard = state.lock().await;
+                                guard.channels.get(&frame.channel_id).cloned()
+                            };
+                            if let Some(tx) = tx {
+                                let _ = tx.send(frame.payload).await;
+                            }
+                        }
+                        ChannelKind::ReliableOrdered => {
+                            if frame.flags & FRAME_FLAG_ACK != 0 {
+                                let waiter = {
+                                    let mut guard = state.lock().await;
+                                    guard.ack_waiters.remove(&(frame.channel_id, frame.seq))
+                                };
+                                if let Some(tx) = waiter {
+                                    let _ = tx.send(());
+                                }
+                                continue;
+                            }
+
+                            let ack_frame = Frame {
+                                channel_id: frame.channel_id,
+                                kind: ChannelKind::ReliableOrdered,
+                                flags: FRAME_FLAG_ACK,
+                                seq: frame.seq,
+                                payload: Vec::new(),
+                            };
+                            if let Ok(bytes) = encode_frame(&ack_frame) {
+                                let mut ciphertext = vec![0u8; bytes.len() + 64];
+                                let encrypted_len = {
+                                    let mut guard = crypto.lock().await;
+                                    guard
+                                        .session
+                                        .encrypt(&bytes, &mut ciphertext)
+                                        .unwrap_or(0)
+                                };
+                                if encrypted_len > 0 {
+                                    let _ = socket.send_to(&ciphertext[..encrypted_len], _addr).await;
+                                }
+                            }
+
+                            let mut drain = Vec::new();
+                            let tx;
+                            {
+                                let mut guard = state.lock().await;
+                                let recv_state = guard
+                                    .reliable_recv
+                                    .entry(frame.channel_id)
+                                    .or_default();
+                                if frame.seq < recv_state.next_seq {
+                                    continue;
+                                }
+                                recv_state.buffered.insert(frame.seq, frame.payload);
+                                while let Some(payload) = recv_state.buffered.remove(&recv_state.next_seq) {
+                                    drain.push(payload);
+                                    recv_state.next_seq = recv_state.next_seq.wrapping_add(1);
+                                }
+                                tx = guard.channels.get(&frame.channel_id).cloned();
+                            }
+                            if let Some(tx) = tx {
+                                for payload in drain {
+                                    let _ = tx.send(payload).await;
+                                }
+                            }
                         }
                     }
                 }
@@ -130,32 +219,66 @@ fn start_demux_task(
     })
 }
 
-fn encode_frame(channel_id: ChannelId, payload: &[u8]) -> Result<Vec<u8>, RndzvError> {
-    let mut out = Vec::with_capacity(8 + payload.len());
-    out.extend_from_slice(&channel_id.0.to_le_bytes());
-    let len: u32 = payload
+const FRAME_FLAG_ACK: u8 = 0x01;
+const FRAME_FLAG_DATA: u8 = 0x02;
+
+#[derive(Debug, Clone)]
+struct Frame {
+    channel_id: ChannelId,
+    kind: ChannelKind,
+    flags: u8,
+    seq: u64,
+    payload: Vec<u8>,
+}
+
+fn encode_frame(frame: &Frame) -> Result<Vec<u8>, RndzvError> {
+    let mut out = Vec::with_capacity(24 + frame.payload.len());
+    out.extend_from_slice(&frame.channel_id.0.to_le_bytes());
+    out.push(match frame.kind {
+        ChannelKind::UnreliableDatagram => 0,
+        ChannelKind::ReliableOrdered => 1,
+    });
+    out.push(frame.flags);
+    out.extend_from_slice(&0u16.to_le_bytes()); // reserved
+    out.extend_from_slice(&frame.seq.to_le_bytes());
+    let len: u32 = frame
+        .payload
         .len()
         .try_into()
         .map_err(|_| RndzvError::InvalidState("payload too large"))?;
     out.extend_from_slice(&len.to_le_bytes());
-    out.extend_from_slice(payload);
+    out.extend_from_slice(&frame.payload);
     Ok(out)
 }
 
-fn decode_frame(input: &[u8]) -> Result<(ChannelId, Vec<u8>), RndzvError> {
-    if input.len() < 8 {
+fn decode_frame(input: &[u8]) -> Result<Frame, RndzvError> {
+    if input.len() < 20 {
         return Err(RndzvError::InvalidState("frame too short"));
     }
     let mut id_bytes = [0u8; 4];
     id_bytes.copy_from_slice(&input[..4]);
+    let kind = match input[4] {
+        0 => ChannelKind::UnreliableDatagram,
+        1 => ChannelKind::ReliableOrdered,
+        _ => return Err(RndzvError::InvalidState("unknown channel kind")),
+    };
+    let flags = input[5];
+    let mut seq_bytes = [0u8; 8];
+    seq_bytes.copy_from_slice(&input[8..16]);
+    let seq = u64::from_le_bytes(seq_bytes);
     let mut len_bytes = [0u8; 4];
-    len_bytes.copy_from_slice(&input[4..8]);
-    let channel_id = ChannelId(u32::from_le_bytes(id_bytes));
+    len_bytes.copy_from_slice(&input[16..20]);
     let len = u32::from_le_bytes(len_bytes) as usize;
-    if input.len() < 8 + len {
+    if input.len() < 20 + len {
         return Err(RndzvError::InvalidState("frame length mismatch"));
     }
-    Ok((channel_id, input[8..8 + len].to_vec()))
+    Ok(Frame {
+        channel_id: ChannelId(u32::from_le_bytes(id_bytes)),
+        kind,
+        flags,
+        seq,
+        payload: input[20..20 + len].to_vec(),
+    })
 }
 
 /// Logical channel semantics for a session.
@@ -228,10 +351,6 @@ impl RndzvSession {
 
     /// Open a logical channel (stub).
     pub async fn open_channel(&self, kind: ChannelKind) -> Result<RndzvChannel, RndzvError> {
-        let kind = match kind {
-            ChannelKind::ReliableOrdered => ChannelKind::UnreliableDatagram,
-            other => other,
-        };
         let channel_id = {
             let mut demux = self.path.demux.lock().await;
             demux.next_channel_id()
@@ -239,13 +358,14 @@ impl RndzvSession {
         let (tx, rx) = mpsc::channel(64);
         {
             let mut demux = self.path.demux.lock().await;
-            demux.register(channel_id, tx);
+            demux.register(channel_id, kind, tx);
         }
         Ok(RndzvChannel {
             id: channel_id,
             kind,
             path: self.path.clone(),
             rx: Arc::new(Mutex::new(rx)),
+            next_seq: Arc::new(Mutex::new(0)),
         })
     }
 
@@ -273,26 +393,88 @@ pub struct RndzvChannel {
     pub kind: ChannelKind,
     path: Arc<PathBinding>,
     rx: Arc<Mutex<mpsc::Receiver<Vec<u8>>>>,
+    next_seq: Arc<Mutex<u64>>,
 }
 
 impl RndzvChannel {
     /// Send data on this channel (stub).
     pub async fn send(&self, data: &[u8]) -> Result<(), RndzvError> {
-        let frame = encode_frame(self.id, data)?;
-        let mut ciphertext = vec![0u8; frame.len() + 64];
-        let encrypted_len = {
-            let mut guard = self.path.crypto.lock().await;
-            guard
-                .session
-                .encrypt(&frame, &mut ciphertext)
-                .map_err(|_| RndzvError::CryptoFailed("encrypt failed"))?
-        };
-        self.path
-            .socket
-            .send_to(&ciphertext[..encrypted_len], self.path.remote_addr)
-            .await
-            .map_err(RndzvError::Io)?;
-        Ok(())
+        match self.kind {
+            ChannelKind::UnreliableDatagram => {
+                let frame = Frame {
+                    channel_id: self.id,
+                    kind: ChannelKind::UnreliableDatagram,
+                    flags: FRAME_FLAG_DATA,
+                    seq: 0,
+                    payload: data.to_vec(),
+                };
+                let bytes = encode_frame(&frame)?;
+                let mut ciphertext = vec![0u8; bytes.len() + 64];
+                let encrypted_len = {
+                    let mut guard = self.path.crypto.lock().await;
+                    guard
+                        .session
+                        .encrypt(&bytes, &mut ciphertext)
+                        .map_err(|_| RndzvError::CryptoFailed("encrypt failed"))?
+                };
+                self.path
+                    .socket
+                    .send_to(&ciphertext[..encrypted_len], self.path.remote_addr)
+                    .await
+                    .map_err(RndzvError::Io)?;
+                Ok(())
+            }
+            ChannelKind::ReliableOrdered => {
+                let seq = {
+                    let mut guard = self.next_seq.lock().await;
+                    let current = *guard;
+                    *guard = guard.wrapping_add(1);
+                    current
+                };
+
+                let frame = Frame {
+                    channel_id: self.id,
+                    kind: ChannelKind::ReliableOrdered,
+                    flags: FRAME_FLAG_DATA,
+                    seq,
+                    payload: data.to_vec(),
+                };
+                let bytes = encode_frame(&frame)?;
+                let mut ciphertext = vec![0u8; bytes.len() + 64];
+                let mut attempts = 0u8;
+                loop {
+                    let (tx, rx) = oneshot::channel();
+                    {
+                        let mut demux = self.path.demux.lock().await;
+                        demux.ack_waiters.insert((self.id, seq), tx);
+                    }
+                    let encrypted_len = {
+                        let mut guard = self.path.crypto.lock().await;
+                        guard
+                            .session
+                            .encrypt(&bytes, &mut ciphertext)
+                            .map_err(|_| RndzvError::CryptoFailed("encrypt failed"))?
+                    };
+                    self.path
+                        .socket
+                        .send_to(&ciphertext[..encrypted_len], self.path.remote_addr)
+                        .await
+                        .map_err(RndzvError::Io)?;
+
+                    match tokio::time::timeout(std::time::Duration::from_millis(200), rx).await {
+                        Ok(Ok(())) => return Ok(()),
+                        _ => {
+                            attempts += 1;
+                            let mut demux = self.path.demux.lock().await;
+                            demux.ack_waiters.remove(&(self.id, seq));
+                            if attempts >= 5 {
+                                return Err(RndzvError::Transport("reliable send timeout"));
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Receive data from this channel (stub).
@@ -1146,7 +1328,13 @@ mod tests {
         let (listener_session, listener_channel) = listener_res.expect("listener task")?;
         let (connector_session, _connector_channel) = connector_res.expect("connector task")?;
 
-        let plaintext = encode_frame(ChannelId(99), b"tamper")?;
+        let plaintext = encode_frame(&Frame {
+            channel_id: ChannelId(99),
+            kind: ChannelKind::UnreliableDatagram,
+            flags: FRAME_FLAG_DATA,
+            seq: 0,
+            payload: b"tamper".to_vec(),
+        })?;
         let mut ciphertext = vec![0u8; plaintext.len() + 64];
         let encrypted_len = {
             let mut guard = connector_session.path.crypto.lock().await;
