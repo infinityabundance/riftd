@@ -10,12 +10,13 @@ pub mod time;
 
 pub use api::{
     ChannelId, ChannelKind, PathBinding, PeerId, RendezvousSpaceId, RndzvChannel, RndzvClient,
-    RndzvConnectTarget, RndzvConnector, RndzvError, RndzvListener, RndzvSession, SessionId, Srt,
+    RndzvConnectTarget, RndzvConnector, RndzvError, RndzvListener, RndzvOutcome, RndzvSession,
+    SessionId, Srt,
 };
 pub use engine::{
     build_probe_payload, parse_probe_payload, rendezvous_id_from_seed, validate_probe_for_token,
-    Clock, ParsedProbe, ProbeError, ProbePayload, RendezvousError, RendezvousMetrics,
-    RendezvousOutcome, RendezvousRunner, RendezvousState, UdpIo,
+    Clock, NatBehaviorHint, ParsedProbe, ProbeError, ProbePayload, RendezvousError,
+    RendezvousMetrics, RendezvousOutcome, RendezvousRunner, RendezvousState, UdpIo,
 };
 pub use schedule::{compute_slot_params, Role, SlotParams};
 pub use srt::{EscalationPolicy, IdentityConstraints, SearchStrategy, SemanticRendezvousToken, SrtError};
