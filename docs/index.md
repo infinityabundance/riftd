@@ -20,6 +20,7 @@
 ## Cross‑Domain
 - `docs/cross-protocol.md` — protocol‑agnostic mapping
 - `docs/hybrid-coordination.md` — optional hybrid patterns
+- `docs/hybrid-modes.md` — hybrid modes for rndzv + relay/DHT hints
 - `docs/future-directions.md` — synthesis and future work
 
 ## Status

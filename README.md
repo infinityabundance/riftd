@@ -124,6 +124,7 @@ theme = "dark"
 - `docs/predictive-rendezvous.md`: Predictive Rendezvous architecture and SRT format.
 - `docs/future-directions.md`: cross-domain synthesis and future directions.
 - `docs/hybrid-coordination.md`: optional hybrid coordination patterns.
+- `docs/hybrid-modes.md`: optional hybrid modes (rndzv + relay / DHT hints).
 - `docs/pr-security.md`: security and abuse considerations for Predictive Rendezvous.
 - `docs/formalization.md`: minimal formal model for Predictive Rendezvous.
 - `docs/cross-protocol.md`: protocol-agnostic mapping across domains.
