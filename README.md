@@ -145,6 +145,22 @@ theme = "dark"
 - `PHASE34_PLAN.md`: implementation plan for ICE/E2EE reliability work.
 - `ROADMAP.md`: planned next steps.
 
+## rndzv CLI tools
+Basic SRT utilities:
+```bash
+rift rndzv generate
+rift rndzv inspect <srt-uri>
+```
+
+Manual rendezvous demo:
+```bash
+# Terminal A
+rift rndzv listen <space-id-hex> --repl
+
+# Terminal B (paste the printed SRT URI)
+rift rndzv connect <srt-uri> --repl
+```
+
 ## Development
 Tests:
 ```bash
