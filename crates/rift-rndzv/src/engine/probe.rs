@@ -172,6 +172,7 @@ mod tests {
 
     fn token_with_seed(seed: [u8; 32]) -> SemanticRendezvousToken {
         SemanticRendezvousToken::new(
+            crate::api::RendezvousSpaceId([0u8; 32]),
             seed,
             IdentityConstraints {
                 allowed_fingerprints: vec![[0xAAu8; 32]],
