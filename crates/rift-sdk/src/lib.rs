@@ -18,7 +18,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::Instant;
-use futures::executor::block_on;
 
 use rift_core::{decode_invite, generate_invite, Identity, Invite, PeerId, KeyStore};
 use rift_dht::{DhtConfig as RiftDhtConfig, DhtHandle, PeerEndpointInfo};
@@ -1066,12 +1065,10 @@ impl RiftHandle {
             let local_peer = RndzvPeerId(self.local_peer_id.0);
             let target = RndzvConnectTarget::from_srt(srt, local_peer);
             let connector = RndzvConnector::new().with_timeout(Duration::from_secs(5));
-            let session = tokio::task::spawn_blocking(move || {
-                block_on(connector.connect(target))
-            })
-            .await
-            .map_err(|e| RiftError::Other(format!("rndzv connect task failed: {e}")))?
-            .map_err(|e| RiftError::Other(format!("rndzv connect failed: {e}")))?;
+            let session = connector
+                .connect(target)
+                .await
+                .map_err(|e| RiftError::Other(format!("rndzv connect failed: {e}")))?;
 
             let channel = session
                 .open_channel(RndzvChannelKind::UnreliableDatagram)
@@ -1116,12 +1113,10 @@ impl RiftHandle {
         if let (Some(srt), Some(voice)) = (parsed_srt, voice) {
             let local_peer = RndzvPeerId(self.local_peer_id.0);
             let listener = RndzvListener::new(srt.space, local_peer).with_srt(srt);
-            let session = tokio::task::spawn_blocking(move || {
-                block_on(listener.accept())
-            })
-            .await
-            .map_err(|e| RiftError::Other(format!("rndzv accept task failed: {e}")))?
-            .map_err(|e| RiftError::Other(format!("rndzv accept failed: {e}")))?;
+            let session = listener
+                .accept()
+                .await
+                .map_err(|e| RiftError::Other(format!("rndzv accept failed: {e}")))?;
 
             let channel = session
                 .open_channel(RndzvChannelKind::UnreliableDatagram)
