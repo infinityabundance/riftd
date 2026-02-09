@@ -1065,10 +1065,11 @@ impl RiftHandle {
             let local_peer = RndzvPeerId(self.local_peer_id.0);
             let target = RndzvConnectTarget::from_srt(srt, local_peer);
             let connector = RndzvConnector::new().with_timeout(Duration::from_secs(5));
-            let session = connector
+            let outcome = connector
                 .connect(target)
                 .await
                 .map_err(|e| RiftError::Other(format!("rndzv connect failed: {e}")))?;
+            let session = outcome.session;
 
             let channel = session
                 .open_channel(RndzvChannelKind::UnreliableDatagram)
@@ -1113,10 +1114,11 @@ impl RiftHandle {
         if let (Some(srt), Some(voice)) = (parsed_srt, voice) {
             let local_peer = RndzvPeerId(self.local_peer_id.0);
             let listener = RndzvListener::new(srt.space, local_peer).with_srt(srt);
-            let session = listener
+            let outcome = listener
                 .accept()
                 .await
                 .map_err(|e| RiftError::Other(format!("rndzv accept failed: {e}")))?;
+            let session = outcome.session;
 
             let channel = session
                 .open_channel(RndzvChannelKind::UnreliableDatagram)
