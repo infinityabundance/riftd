@@ -4,10 +4,12 @@ pub mod nat;
 pub mod network;
 pub mod peer;
 pub mod runner;
+pub mod swarm;
 
 pub use nat::{NatModel, PortPreservingNat, RandomPortNat, SymmetricNat};
 pub use network::{SimNetwork, SimOutcome};
 pub use peer::{SimPeer, SimPeerId};
+pub use swarm::{simulate_swarm, ContentId, SwarmOutcome};
 
 #[cfg(test)]
 mod tests {
