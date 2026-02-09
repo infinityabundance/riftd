@@ -408,7 +408,11 @@ pub extern "C" fn rift_next_event(handle: *mut RiftHandleC, out_event: *mut Rift
                 (*out_event).text = text;
             }
         }
-        RiftEvent::IncomingCall { session, from } => unsafe {
+        RiftEvent::IncomingCall {
+            session,
+            from,
+            rndzv_srt_uri: _,
+        } => unsafe {
             (*out_event).tag = RiftEventTag::IncomingCall;
             (*out_event).peer = peer_to_c(from);
             (*out_event).session = session_to_c(session);

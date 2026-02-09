@@ -231,6 +231,9 @@ enum Commands {
         enable_turn: bool,
         #[arg(long, value_delimiter = ',', num_args = 1..)]
         turn_servers: Vec<String>,
+        /// SRT URI for rndzv voice calls.
+        #[arg(long)]
+        rndzv_srt: Option<String>,
     },
     Accept {
         #[arg(long)]
@@ -414,6 +417,7 @@ async fn main() -> Result<()> {
                 enable_turn,
                 turn_servers,
                 StartupAction::None,
+                None,
             )
             .await
         }
@@ -431,8 +435,9 @@ async fn main() -> Result<()> {
             stun_servers,
             enable_turn,
             turn_servers,
+            rndzv_srt,
         } => {
-            let action = StartupAction::Call { peer };
+            let action = StartupAction::Call { peer, rndzv_srt };
             if let Some(invite) = invite {
                 cmd_join(
                     invite,
@@ -1165,7 +1170,10 @@ enum UiEvent {
 #[derive(Debug)]
 enum UiAction {
     SendChat(String),
-    StartCall(rift_core::PeerId),
+    StartCall {
+        peer: rift_core::PeerId,
+        rndzv_srt: Option<String>,
+    },
     AcceptCall(RiftSessionId),
     DeclineCall(RiftSessionId, Option<String>),
     EndCall(RiftSessionId),
@@ -1175,7 +1183,7 @@ enum UiAction {
 #[derive(Debug, Clone)]
 enum StartupAction {
     None,
-    Call { peer: String },
+    Call { peer: String, rndzv_srt: Option<String> },
     Accept { session: RiftSessionId },
     Decline { session: RiftSessionId, reason: Option<String> },
 }
@@ -1586,7 +1594,11 @@ async fn run_tui_inner(
                                 state.add_chat_line("security".to_string(), message);
                             }
                             RiftEvent::VoiceFrame { .. } => {}
-                            RiftEvent::IncomingCall { session, from } => {
+                            RiftEvent::IncomingCall {
+                                session,
+                                from,
+                                rndzv_srt_uri: _,
+                            } => {
                                 state.incoming_call = Some((session, from));
                                 state.last_rx = Some(Instant::now());
                             }
@@ -1723,7 +1735,10 @@ fn handle_key_event(
                 if let Some(rest) = text.strip_prefix("/call ") {
                     if let Some(peer_id) = resolve_peer_input(state, rest.trim()) {
                         state.input.clear();
-                        return Ok(Some(UiAction::StartCall(peer_id)));
+                        return Ok(Some(UiAction::StartCall {
+                            peer: peer_id,
+                            rndzv_srt: None,
+                        }));
                     } else {
                         state.add_chat_line("system".to_string(), "unknown peer".to_string());
                     }
@@ -1766,11 +1781,11 @@ async fn apply_action(
             }
             state.last_tx = Some(Instant::now());
         }
-        UiAction::StartCall(peer_id) => {
-            if let Ok(session) = handle.start_call(peer_id).await {
-                state.active_call_peer = Some(peer_id);
+        UiAction::StartCall { peer, rndzv_srt } => {
+            if let Ok(session) = handle.start_call_with_srt(peer, rndzv_srt).await {
+                state.active_call_peer = Some(peer);
                 state.incoming_call = None;
-                state.pending_call = Some((session, peer_id));
+                state.pending_call = Some((session, peer));
                 state.last_tx = Some(Instant::now());
             }
         }
@@ -1825,10 +1840,13 @@ async fn apply_action(
 fn take_startup_action(startup: &mut StartupAction, state: &UiState) -> Option<UiAction> {
     match startup {
         StartupAction::None => None,
-        StartupAction::Call { peer } => {
+        StartupAction::Call { peer, rndzv_srt } => {
             if let Some(peer_id) = resolve_peer_input(state, peer) {
                 *startup = StartupAction::None;
-                Some(UiAction::StartCall(peer_id))
+                Some(UiAction::StartCall {
+                    peer: peer_id,
+                    rndzv_srt: rndzv_srt.clone(),
+                })
             } else {
                 None
             }
@@ -2335,6 +2353,7 @@ fn build_sdk_config(
             punch_interval_ms: user_cfg.network.punch_interval_ms,
             punch_timeout_ms: user_cfg.network.punch_timeout_ms,
             max_direct_peers: user_cfg.network.max_direct_peers,
+            rndzv: None,
         },
     }
 }

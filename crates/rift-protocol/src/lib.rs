@@ -217,6 +217,8 @@ pub enum CallControl {
         from: PeerId,
         to: PeerId,
         display_name: Option<String>,
+        #[serde(default)]
+        rndzv_srt_uri: Option<String>,
     },
     Accept { session: SessionId, from: PeerId },
     Decline {
