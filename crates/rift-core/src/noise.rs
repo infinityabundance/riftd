@@ -38,16 +38,5 @@ impl NoiseSession {
     }
 }
 
-impl Drop for NoiseSession {
-    fn drop(&mut self) {
-        // Best-effort zeroization: snow doesn't expose explicit key erasure,
-        // so we overwrite the TransportState memory before drop.
-        unsafe {
-            std::ptr::write_bytes(
-                &mut self.state as *mut snow::TransportState as *mut u8,
-                0,
-                std::mem::size_of::<snow::TransportState>(),
-            );
-        }
-    }
-}
+// NOTE: We intentionally avoid unsafe zeroization here because `snow::TransportState`
+// may contain heap pointers. A safer zeroize strategy can be added when available.

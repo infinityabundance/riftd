@@ -10,5 +10,6 @@ hex = "0.4"
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["net", "time", "rt", "sync", "macros"] }
 tracing = "0.1"
+rift-core = { path = "../rift-core" }
 
 [dev-dependencies]
