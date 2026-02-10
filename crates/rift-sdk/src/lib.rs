@@ -1746,3 +1746,621 @@ fn parse_socket_addrs(inputs: &[String]) -> Vec<SocketAddr> {
 pub mod ffi;
 #[cfg(target_os = "android")]
 pub mod android_jni;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    // ---- Config Default Tests ----
+
+    #[test]
+    fn rift_config_default_values() {
+        let cfg = RiftConfig::default();
+        assert_eq!(cfg.listen_port, 7777);
+        assert!(!cfg.relay);
+        assert!(cfg.user_name.is_none());
+        assert!(cfg.metrics_enabled);
+        assert_eq!(cfg.preferred_codecs, vec![CodecId::Opus, CodecId::PCM16]);
+        assert!(cfg.preferred_features.contains(&FeatureFlag::Voice));
+        assert!(cfg.preferred_features.contains(&FeatureFlag::E2EE));
+    }
+
+    #[test]
+    fn audio_config_sdk_default_values() {
+        let cfg = AudioConfigSdk::default();
+        assert!(cfg.enabled);
+        assert!(cfg.input_device.is_none());
+        assert!(cfg.output_device.is_none());
+        assert_eq!(cfg.quality, "medium");
+        assert!(!cfg.ptt);
+        assert!(cfg.vad);
+        assert!(!cfg.mute_output);
+        assert!(!cfg.emit_voice_frames);
+        assert!(!cfg.allow_fail);
+    }
+
+    #[test]
+    fn network_config_sdk_default_values() {
+        let cfg = NetworkConfigSdk::default();
+        assert!(cfg.prefer_p2p);
+        assert!(cfg.local_ports.is_none());
+        assert!(cfg.known_peers.is_empty());
+        assert!(cfg.invite.is_none());
+        assert!(!cfg.stun_servers.is_empty());
+        assert_eq!(cfg.stun_timeout_ms, Some(800));
+        assert!(!cfg.enable_turn);
+        assert!(cfg.turn_servers.is_empty());
+        assert_eq!(cfg.punch_interval_ms, Some(200));
+        assert_eq!(cfg.punch_timeout_ms, Some(5000));
+    }
+
+    #[test]
+    fn dht_config_sdk_default_values() {
+        let cfg = DhtConfigSdk::default();
+        assert!(!cfg.enabled);
+        assert!(cfg.bootstrap_nodes.is_empty());
+        assert!(cfg.listen_addr.is_none());
+    }
+
+    #[test]
+    fn security_config_default_values() {
+        let cfg = SecurityConfig::default();
+        assert!(cfg.trust_on_first_use);
+        assert!(cfg.known_hosts_path.is_none());
+        assert!(!cfg.reject_on_mismatch);
+        assert!(cfg.channel_shared_secret.is_none());
+        assert!(cfg.audit_log_path.is_none());
+        assert_eq!(cfg.rekey_interval_secs, Some(600));
+    }
+
+    // ---- Helper Function Tests ----
+
+    #[test]
+    fn derive_auth_token_deterministic() {
+        let token1 = derive_auth_token("secret", "channel");
+        let token2 = derive_auth_token("secret", "channel");
+        assert_eq!(token1, token2);
+        assert_eq!(token1.len(), 32);
+    }
+
+    #[test]
+    fn derive_auth_token_different_inputs() {
+        let token1 = derive_auth_token("secret1", "channel");
+        let token2 = derive_auth_token("secret2", "channel");
+        assert_ne!(token1, token2);
+
+        let token3 = derive_auth_token("secret", "channel1");
+        let token4 = derive_auth_token("secret", "channel2");
+        assert_ne!(token3, token4);
+    }
+
+    #[test]
+    fn derive_e2ee_key_from_shared_secret() {
+        let key = derive_e2ee_key("channel", None, None, Some("shared_secret"));
+        assert!(key.is_some());
+        let key = key.unwrap();
+        assert_eq!(key.len(), 32);
+
+        // Deterministic
+        let key2 = derive_e2ee_key("channel", None, None, Some("shared_secret"));
+        assert_eq!(key, key2.unwrap());
+    }
+
+    #[test]
+    fn derive_e2ee_key_from_password() {
+        let key = derive_e2ee_key("channel", Some("password"), None, None);
+        assert!(key.is_some());
+        let key = key.unwrap();
+        assert_eq!(key.len(), 32);
+
+        // Different password = different key
+        let key2 = derive_e2ee_key("channel", Some("other_password"), None, None);
+        assert_ne!(key, key2.unwrap());
+    }
+
+    #[test]
+    fn derive_e2ee_key_from_invite() {
+        let invite = Invite {
+            channel_name: "test".to_string(),
+            password: None,
+            channel_key: [42u8; 32],
+            known_peers: Vec::new(),
+            candidates: Vec::new(),
+            relay_candidates: Vec::new(),
+            version: 2,
+            created_at: 0,
+        };
+        let key = derive_e2ee_key("channel", None, Some(&invite), None);
+        assert_eq!(key, Some([42u8; 32]));
+    }
+
+    #[test]
+    fn derive_e2ee_key_none_without_inputs() {
+        let key = derive_e2ee_key("channel", None, None, None);
+        assert!(key.is_none());
+    }
+
+    #[test]
+    fn derive_e2ee_key_priority_shared_secret_over_password() {
+        // Shared secret takes priority over password
+        let key_secret = derive_e2ee_key("channel", Some("password"), None, Some("secret"));
+        let key_password = derive_e2ee_key("channel", Some("password"), None, None);
+        assert_ne!(key_secret, key_password);
+    }
+
+    #[test]
+    fn fingerprint_key_returns_16_chars() {
+        let key = [1u8; 32];
+        let fp = fingerprint_key(&key);
+        assert_eq!(fp.len(), 16);
+        assert!(fp.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn fingerprint_key_different_keys() {
+        let fp1 = fingerprint_key(&[1u8; 32]);
+        let fp2 = fingerprint_key(&[2u8; 32]);
+        assert_ne!(fp1, fp2);
+    }
+
+    #[test]
+    fn short_peer_returns_8_chars() {
+        let peer = PeerId([0xab; 32]);
+        let short = short_peer(&peer);
+        assert_eq!(short.len(), 8);
+        assert_eq!(short, "abababab");
+    }
+
+    // ---- Audio Helper Tests ----
+
+    #[test]
+    fn audio_level_silent_frame() {
+        let frame = vec![0i16; 480];
+        let level = audio_level(&frame);
+        assert_eq!(level, 0.0);
+    }
+
+    #[test]
+    fn audio_level_loud_frame() {
+        let frame = vec![i16::MAX; 480];
+        let level = audio_level(&frame);
+        assert!((level - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn audio_level_mixed_frame() {
+        let mut frame = vec![0i16; 480];
+        for i in 0..240 {
+            frame[i] = i16::MAX / 2;
+        }
+        let level = audio_level(&frame);
+        assert!(level > 0.0 && level < 1.0);
+    }
+
+    #[test]
+    fn is_frame_active_silent() {
+        let frame = vec![0i16; 480];
+        assert!(!is_frame_active(&frame));
+    }
+
+    #[test]
+    fn is_frame_active_low_noise() {
+        let frame = vec![100i16; 480];
+        assert!(!is_frame_active(&frame));
+    }
+
+    #[test]
+    fn is_frame_active_loud() {
+        let frame = vec![1000i16; 480];
+        assert!(is_frame_active(&frame));
+    }
+
+    // ---- Quality Mapping Tests ----
+
+    #[test]
+    fn map_quality_to_bitrate_low() {
+        assert_eq!(map_quality_to_bitrate(Some("low")), 24_000);
+    }
+
+    #[test]
+    fn map_quality_to_bitrate_medium() {
+        assert_eq!(map_quality_to_bitrate(Some("medium")), 48_000);
+    }
+
+    #[test]
+    fn map_quality_to_bitrate_high() {
+        assert_eq!(map_quality_to_bitrate(Some("high")), 96_000);
+    }
+
+    #[test]
+    fn map_quality_to_bitrate_default() {
+        assert_eq!(map_quality_to_bitrate(None), 48_000);
+        assert_eq!(map_quality_to_bitrate(Some("unknown")), 48_000);
+    }
+
+    // ---- Path Expansion Tests ----
+
+    #[test]
+    fn expand_tilde_with_tilde() {
+        let path = PathBuf::from("~/test/path");
+        let expanded = expand_tilde(&path);
+        // Should not start with ~ anymore
+        assert!(!expanded.to_string_lossy().starts_with("~/"));
+    }
+
+    #[test]
+    fn expand_tilde_without_tilde() {
+        let path = PathBuf::from("/absolute/path");
+        let expanded = expand_tilde(&path);
+        assert_eq!(expanded, path);
+    }
+
+    #[test]
+    fn expand_tilde_relative_path() {
+        let path = PathBuf::from("relative/path");
+        let expanded = expand_tilde(&path);
+        assert_eq!(expanded, path);
+    }
+
+    // ---- Socket Addr Parsing Tests ----
+
+    #[test]
+    fn parse_socket_addr_valid() {
+        let addr = parse_socket_addr("127.0.0.1:8080");
+        assert!(addr.is_some());
+        assert_eq!(addr.unwrap().port(), 8080);
+    }
+
+    #[test]
+    fn parse_socket_addr_invalid() {
+        let addr = parse_socket_addr("invalid");
+        assert!(addr.is_none());
+    }
+
+    #[test]
+    fn parse_socket_addrs_mixed() {
+        let inputs = vec![
+            "127.0.0.1:8080".to_string(),
+            "invalid".to_string(),
+            "192.168.1.1:9000".to_string(),
+        ];
+        let addrs = parse_socket_addrs(&inputs);
+        assert_eq!(addrs.len(), 2);
+    }
+
+    #[test]
+    fn parse_socket_addrs_empty() {
+        let addrs = parse_socket_addrs(&[]);
+        assert!(addrs.is_empty());
+    }
+
+    // ---- Known Hosts Tests ----
+
+    #[test]
+    fn load_known_hosts_empty_file() {
+        let tmp = NamedTempFile::new().unwrap();
+        let hosts = load_known_hosts(tmp.path());
+        assert!(hosts.is_empty());
+    }
+
+    #[test]
+    fn load_known_hosts_with_entries() {
+        let mut tmp = NamedTempFile::new().unwrap();
+        let peer_hex = hex::encode([0xab; 32]);
+        let key_hex = hex::encode([0xcd; 32]);
+        writeln!(tmp, "{} {}", peer_hex, key_hex).unwrap();
+        tmp.flush().unwrap();
+
+        let hosts = load_known_hosts(tmp.path());
+        assert_eq!(hosts.len(), 1);
+        let peer = PeerId([0xab; 32]);
+        assert!(hosts.contains_key(&peer));
+        assert_eq!(hosts[&peer], vec![0xcd; 32]);
+    }
+
+    #[test]
+    fn load_known_hosts_with_comments() {
+        let mut tmp = NamedTempFile::new().unwrap();
+        writeln!(tmp, "# This is a comment").unwrap();
+        writeln!(tmp, "").unwrap();
+        let peer_hex = hex::encode([0xab; 32]);
+        let key_hex = hex::encode([0xcd; 32]);
+        writeln!(tmp, "{} {}", peer_hex, key_hex).unwrap();
+        tmp.flush().unwrap();
+
+        let hosts = load_known_hosts(tmp.path());
+        assert_eq!(hosts.len(), 1);
+    }
+
+    #[test]
+    fn load_known_hosts_nonexistent() {
+        let hosts = load_known_hosts(Path::new("/nonexistent/path"));
+        assert!(hosts.is_empty());
+    }
+
+    // ---- Peer to Stream ID Tests ----
+
+    #[test]
+    fn peer_to_stream_id_deterministic() {
+        let peer = PeerId([0x12; 32]);
+        let id1 = peer_to_stream_id(&peer);
+        let id2 = peer_to_stream_id(&peer);
+        assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn peer_to_stream_id_different_peers() {
+        let peer1 = PeerId([0x12; 32]);
+        let peer2 = PeerId([0x34; 32]);
+        let id1 = peer_to_stream_id(&peer1);
+        let id2 = peer_to_stream_id(&peer2);
+        assert_ne!(id1, id2);
+    }
+
+    // ---- Timestamp Tests ----
+
+    #[test]
+    fn now_timestamp_nonzero() {
+        let ts = now_timestamp();
+        // Should be a reasonable timestamp (after 2020)
+        assert!(ts > 1577836800000);
+    }
+
+    // ---- Error Display Tests ----
+
+    #[test]
+    fn rift_error_display() {
+        assert_eq!(format!("{}", RiftError::NotInitialized), "not initialized");
+        assert_eq!(format!("{}", RiftError::AlreadyJoined), "channel already joined");
+        assert_eq!(format!("{}", RiftError::NotJoined), "channel not joined");
+        assert_eq!(format!("{}", RiftError::Mesh("test".to_string())), "mesh error: test");
+        assert_eq!(format!("{}", RiftError::Audio("test".to_string())), "audio error: test");
+        assert_eq!(format!("{}", RiftError::Other("test".to_string())), "other: test");
+    }
+
+    // ---- LinkStats and GlobalStats Tests ----
+
+    #[test]
+    fn link_stats_construction() {
+        let stats = LinkStats {
+            rtt_ms: 50.0,
+            loss: 0.01,
+            jitter_ms: 5.0,
+        };
+        assert_eq!(stats.rtt_ms, 50.0);
+        assert_eq!(stats.loss, 0.01);
+        assert_eq!(stats.jitter_ms, 5.0);
+    }
+
+    #[test]
+    fn global_stats_construction() {
+        let stats = GlobalStats {
+            num_peers: 5,
+            num_sessions: 2,
+            packets_sent: 1000,
+            packets_received: 950,
+            bytes_sent: 100_000,
+            bytes_received: 95_000,
+        };
+        assert_eq!(stats.num_peers, 5);
+        assert_eq!(stats.packets_sent, 1000);
+    }
+
+    // ---- Route Kind Tests ----
+
+    #[test]
+    fn route_kind_direct() {
+        let route = RouteKind::Direct;
+        assert!(matches!(route, RouteKind::Direct));
+    }
+
+    #[test]
+    fn route_kind_relayed() {
+        let via = PeerId([0xab; 32]);
+        let route = RouteKind::Relayed { via };
+        if let RouteKind::Relayed { via: v } = route {
+            assert_eq!(v.0, [0xab; 32]);
+        } else {
+            panic!("expected relayed route");
+        }
+    }
+
+    // ---- SDK Version Constants ----
+
+    #[test]
+    fn sdk_version_defined() {
+        assert_eq!(SDK_VERSION, "0.1.0");
+        assert_eq!(SDK_ABI_VERSION, 1);
+    }
+
+    // ---- NAT Config Tests ----
+
+    #[test]
+    fn default_nat_config_basic() {
+        let cfg = default_nat_config(
+            7777,
+            None,
+            vec!["stun.example.com:3478".to_string()],
+            Some(1000),
+            Some(100),
+            Some(3000),
+            false,
+            Vec::new(),
+            Some(2000),
+            Some(15000),
+        );
+        assert_eq!(cfg.local_ports, vec![7777, 7778, 7779]);
+        assert_eq!(cfg.stun_timeout_ms, 1000);
+        assert_eq!(cfg.punch_interval_ms, 100);
+        assert_eq!(cfg.punch_timeout_ms, 3000);
+        assert!(cfg.turn_servers.is_empty());
+    }
+
+    #[test]
+    fn default_nat_config_custom_ports() {
+        let cfg = default_nat_config(
+            7777,
+            Some(vec![8000, 8001]),
+            Vec::new(),
+            None,
+            None,
+            None,
+            false,
+            Vec::new(),
+            None,
+            None,
+        );
+        assert_eq!(cfg.local_ports, vec![8000, 8001]);
+    }
+
+    // ---- Serialization Tests ----
+
+    #[test]
+    fn rift_config_serialization() {
+        let cfg = RiftConfig::default();
+        let json = serde_json::to_string(&cfg).unwrap();
+        let parsed: RiftConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.listen_port, cfg.listen_port);
+        assert_eq!(parsed.relay, cfg.relay);
+    }
+
+    #[test]
+    fn security_config_serialization() {
+        let cfg = SecurityConfig {
+            trust_on_first_use: false,
+            known_hosts_path: Some(PathBuf::from("/test/path")),
+            reject_on_mismatch: true,
+            channel_shared_secret: Some("secret".to_string()),
+            audit_log_path: None,
+            rekey_interval_secs: Some(300),
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        let parsed: SecurityConfig = serde_json::from_str(&json).unwrap();
+        assert!(!parsed.trust_on_first_use);
+        assert!(parsed.reject_on_mismatch);
+        assert_eq!(parsed.rekey_interval_secs, Some(300));
+    }
+
+    #[test]
+    fn srt_invite_serialization() {
+        let invite = SrtInvite {
+            label: "Test Call".to_string(),
+            uri: "srt://test".to_string(),
+        };
+        let json = serde_json::to_string(&invite).unwrap();
+        let parsed: SrtInvite = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.label, "Test Call");
+        assert_eq!(parsed.uri, "srt://test");
+    }
+
+    // ---- QoS Tuning Tests ----
+
+    #[test]
+    fn compute_next_tuning_empty_stats() {
+        let mut qos = QosState {
+            profile: QosProfile::default(),
+            peer_stats: HashMap::new(),
+            current: AudioTuning {
+                bitrate: 48_000,
+                fec: false,
+                loss_pct: 0,
+            },
+            last_adjust: Instant::now() - Duration::from_secs(10),
+        };
+        let result = compute_next_tuning(&mut qos);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn compute_next_tuning_high_loss() {
+        let mut qos = QosState {
+            profile: QosProfile {
+                packet_loss_tolerance: 0.05,
+                max_latency_ms: 200,
+                target_latency_ms: 100,
+                min_bitrate: 16_000,
+                max_bitrate: 128_000,
+                ..Default::default()
+            },
+            peer_stats: HashMap::new(),
+            current: AudioTuning {
+                bitrate: 64_000,
+                fec: false,
+                loss_pct: 0,
+            },
+            last_adjust: Instant::now() - Duration::from_secs(10),
+        };
+        qos.peer_stats.insert(
+            PeerId([0; 32]),
+            LinkStats {
+                rtt_ms: 50.0,
+                loss: 0.10,  // 10% loss, above tolerance
+                jitter_ms: 5.0,
+            },
+        );
+        let result = compute_next_tuning(&mut qos);
+        assert!(result.is_some());
+        let tuning = result.unwrap();
+        assert!(tuning.bitrate < 64_000); // Should decrease bitrate
+        assert!(tuning.fec); // Should enable FEC
+    }
+
+    #[test]
+    fn compute_next_tuning_good_conditions() {
+        let mut qos = QosState {
+            profile: QosProfile {
+                packet_loss_tolerance: 0.05,
+                max_latency_ms: 200,
+                target_latency_ms: 100,
+                min_bitrate: 16_000,
+                max_bitrate: 128_000,
+                ..Default::default()
+            },
+            peer_stats: HashMap::new(),
+            current: AudioTuning {
+                bitrate: 48_000,
+                fec: true,
+                loss_pct: 5,
+            },
+            last_adjust: Instant::now() - Duration::from_secs(10),
+        };
+        qos.peer_stats.insert(
+            PeerId([0; 32]),
+            LinkStats {
+                rtt_ms: 20.0,
+                loss: 0.01,  // 1% loss, below tolerance
+                jitter_ms: 2.0,
+            },
+        );
+        let result = compute_next_tuning(&mut qos);
+        assert!(result.is_some());
+        let tuning = result.unwrap();
+        assert!(tuning.bitrate >= 48_000); // Should increase or maintain bitrate
+    }
+
+    #[test]
+    fn compute_next_tuning_respects_cooldown() {
+        let mut qos = QosState {
+            profile: QosProfile::default(),
+            peer_stats: HashMap::new(),
+            current: AudioTuning {
+                bitrate: 48_000,
+                fec: false,
+                loss_pct: 0,
+            },
+            last_adjust: Instant::now(), // Just adjusted
+        };
+        qos.peer_stats.insert(
+            PeerId([0; 32]),
+            LinkStats {
+                rtt_ms: 500.0,
+                loss: 0.50,
+                jitter_ms: 50.0,
+            },
+        );
+        let result = compute_next_tuning(&mut qos);
+        assert!(result.is_none()); // Should not adjust due to cooldown
+    }
+}

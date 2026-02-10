@@ -7,11 +7,11 @@ use rift_core::noise::{noise_builder, NoiseSession};
 fn bench_noise_encrypt(c: &mut Criterion) {
     let builder = noise_builder();
     let static_kp = builder.generate_keypair().unwrap();
-    let mut initiator = builder
+    let mut initiator = noise_builder()
         .local_private_key(&static_kp.private)
         .build_initiator()
         .unwrap();
-    let mut responder = builder
+    let mut responder = noise_builder()
         .local_private_key(&static_kp.private)
         .build_responder()
         .unwrap();
