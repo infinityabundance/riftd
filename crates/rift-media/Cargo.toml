@@ -14,7 +14,7 @@ cpal = "0.15"
 opus = "0.3"
 tokio = { version = "1", features = ["sync", "time"] }
 tracing = "0.1"
-rift-protocol = { path = "../rift-protocol" }
+rift-protocol = { path = "../rift-protocol", version = "0.1.0" }
 
 [dev-dependencies]
 criterion = "0.5"

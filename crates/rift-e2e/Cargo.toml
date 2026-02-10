@@ -11,10 +11,10 @@ publish = false
 
 [dependencies]
 anyhow = "1"
-rift-core = { path = "../rift-core" }
-rift-mesh = { path = "../rift-mesh" }
-rift-metrics = { path = "../rift-metrics" }
-rift-protocol = { path = "../rift-protocol" }
+rift-core = { path = "../rift-core", version = "0.1.0" }
+rift-mesh = { path = "../rift-mesh", version = "0.1.0" }
+rift-metrics = { path = "../rift-metrics", version = "0.1.0" }
+rift-protocol = { path = "../rift-protocol", version = "0.1.0" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
 
 [dev-dependencies]

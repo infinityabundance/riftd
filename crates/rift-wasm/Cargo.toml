@@ -22,8 +22,8 @@ bincode = "1"
 getrandom = { version = "0.2", features = ["js"] }
 aes-gcm = "0.10"
 
-rift-core = { path = "../rift-core" }
-rift-protocol = { path = "../rift-protocol" }
+rift-core = { path = "../rift-core", version = "0.1.0" }
+rift-protocol = { path = "../rift-protocol", version = "0.1.0" }
 
 [features]
 wasm = []

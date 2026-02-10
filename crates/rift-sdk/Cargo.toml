@@ -15,15 +15,15 @@ crate-type = ["cdylib", "rlib"]
 anyhow = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync"] }
 tracing = "0.1"
-rift-core = { path = "../rift-core" }
-rift-protocol = { path = "../rift-protocol" }
-rift-discovery = { path = "../rift-discovery" }
-rift-nat = { path = "../rift-nat" }
-rift-mesh = { path = "../rift-mesh" }
-rift-rndzv = { path = "../rift-rndzv" }
-rift-media = { path = "../rift-media" }
-rift-dht = { path = "../rift-dht" }
-rift-metrics = { path = "../rift-metrics" }
+rift-core = { path = "../rift-core", version = "0.1.0" }
+rift-protocol = { path = "../rift-protocol", version = "0.1.0" }
+rift-discovery = { path = "../rift-discovery", version = "0.1.0" }
+rift-nat = { path = "../rift-nat", version = "0.1.0" }
+rift-mesh = { path = "../rift-mesh", version = "0.1.0" }
+rift-rndzv = { path = "../rift-rndzv", version = "0.1.0" }
+rift-media = { path = "../rift-media", version = "0.1.0" }
+rift-dht = { path = "../rift-dht", version = "0.1.0" }
+rift-metrics = { path = "../rift-metrics", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
 hex = "0.4"
 rand = "0.8"

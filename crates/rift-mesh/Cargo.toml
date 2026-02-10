@@ -10,12 +10,12 @@ categories = ["network-programming", "cryptography"]
 
 [dependencies]
 anyhow = "1"
-rift-core = { path = "../rift-core" }
-rift-discovery = { path = "../rift-discovery" }
-rift-nat = { path = "../rift-nat" }
-rift-protocol = { path = "../rift-protocol" }
-rift-metrics = { path = "../rift-metrics" }
-rift-rndzv = { path = "../rift-rndzv", optional = true }
+rift-core = { path = "../rift-core", version = "0.1.0" }
+rift-discovery = { path = "../rift-discovery", version = "0.1.0" }
+rift-nat = { path = "../rift-nat", version = "0.1.0" }
+rift-protocol = { path = "../rift-protocol", version = "0.1.0" }
+rift-metrics = { path = "../rift-metrics", version = "0.1.0" }
+rift-rndzv = { path = "../rift-rndzv", version = "0.1.0", optional = true }
 snow = "0.9"
 tokio = { version = "1", features = ["macros", "net", "rt", "sync", "time"] }
 tokio-stream = "0.1"

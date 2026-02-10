@@ -12,8 +12,8 @@ categories = ["network-programming"]
 hex = "0.4"
 mdns-sd = "0.11"
 if-addrs = "0.13"
-rift-core = { path = "../rift-core" }
+rift-core = { path = "../rift-core", version = "0.1.0" }
 thiserror = "1"
 tokio = { version = "1", features = ["rt", "sync"] }
 tokio-stream = "0.1"
-rift-dht = { path = "../rift-dht" }
+rift-dht = { path = "../rift-dht", version = "0.1.0" }

@@ -16,6 +16,6 @@ thiserror = "1"
 tokio = { version = "1", features = ["sync", "time", "macros", "rt"] }
 futures = "0.3"
 libp2p = { version = "0.53", features = ["kad", "tcp", "dns", "noise", "yamux", "tokio", "identify", "macros"] }
-rift-core = { path = "../rift-core" }
-rift-metrics = { path = "../rift-metrics" }
+rift-core = { path = "../rift-core", version = "0.1.0" }
+rift-metrics = { path = "../rift-metrics", version = "0.1.0" }
 tracing = "0.1"

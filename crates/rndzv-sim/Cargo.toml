@@ -10,7 +10,7 @@ categories = ["development-tools::testing"]
 publish = false
 
 [dependencies]
-rift-rndzv = { path = "../rift-rndzv" }
+rift-rndzv = { path = "../rift-rndzv", version = "0.1.0" }
 blake3 = "1"
 
 [dev-dependencies]
