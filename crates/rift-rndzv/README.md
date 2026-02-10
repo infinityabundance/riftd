@@ -24,7 +24,7 @@ Part of the [riftd](https://github.com/infinityabundance/riftd) project — serv
 
 `rift-rndzv` implements Predictive Rendezvous — a novel approach to NAT traversal:
 
-- **SRT Tokens** — Short Rendezvous Tokens for easy sharing (QR codes, links)
+- **SRT Tokens** — Semantic Rendezvous Tokens for easy sharing (QR codes, links)
 - **Predictive Scheduling** — Time-coordinated hole punching
 - **NAT Coordination** — Synchronized connection attempts
 - **Invite Flow** — Generate and accept peer invitations
