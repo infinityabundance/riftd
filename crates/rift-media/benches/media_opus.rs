@@ -11,12 +11,14 @@ fn bench_opus(c: &mut Criterion) {
     let samples = vec![0.1f32; frame_samples];
     let mut encoder = OpusEncoder::new(&config).unwrap();
     let mut decoder = OpusDecoder::new(&config).unwrap();
+    let mut encode_buf = vec![0u8; 4096];
+    let mut decode_buf = vec![0f32; frame_samples];
 
     c.bench_function("media_opus", |bench| {
         bench.iter(|| {
-            let encoded = encoder.encode_f32(black_box(&samples)).unwrap();
-            let decoded = decoder.decode_f32(black_box(&encoded)).unwrap();
-            black_box(decoded);
+            let encoded_len = encoder.encode_f32(black_box(&samples), &mut encode_buf).unwrap();
+            let decoded_len = decoder.decode_f32(black_box(&encode_buf[..encoded_len]), &mut decode_buf).unwrap();
+            black_box(decoded_len);
         })
     });
 }

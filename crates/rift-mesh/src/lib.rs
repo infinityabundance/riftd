@@ -38,6 +38,7 @@ use aes_gcm::{Aes256Gcm, Key, Nonce, KeyInit};
 use aes_gcm::aead::{Aead, Payload};
 use rand::RngCore;
 use sha2::Digest;
+use subtle::ConstantTimeEq;
 
 #[cfg(feature = "predictive-rendezvous")]
 use rift_rndzv::{
@@ -2683,7 +2684,13 @@ impl MeshInner {
             }
             RiftPayload::Control(ControlMessage::Auth { token }) => {
                 let expected = self.auth_token.clone().unwrap_or_default();
-                if self.auth_required && token != expected {
+                // Use constant-time comparison to prevent timing attacks
+                let token_valid = if token.len() != expected.len() {
+                    false
+                } else {
+                    token.ct_eq(&expected).into()
+                };
+                if self.auth_required && !token_valid {
                     tracing::warn!(%addr, "auth token mismatch");
                     self.disconnect_addr(addr).await;
                     return Ok(());
