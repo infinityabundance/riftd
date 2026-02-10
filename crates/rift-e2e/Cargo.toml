@@ -2,6 +2,12 @@
 name = "rift-e2e"
 version = "0.1.0"
 edition = "2021"
+description = "End-to-end integration tests for Rift P2P"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/infinityabundance/riftd"
+keywords = ["testing", "e2e", "integration"]
+categories = ["development-tools::testing"]
+publish = false
 
 [dependencies]
 anyhow = "1"

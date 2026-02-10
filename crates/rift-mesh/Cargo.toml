@@ -2,6 +2,11 @@
 name = "rift-mesh"
 version = "0.1.0"
 edition = "2021"
+description = "Mesh networking, session management, and E2EE for Rift P2P"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/infinityabundance/riftd"
+keywords = ["p2p", "mesh", "networking", "e2ee"]
+categories = ["network-programming", "cryptography"]
 
 [dependencies]
 anyhow = "1"

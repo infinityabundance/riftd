@@ -2,6 +2,11 @@
 name = "rift-rndzv"
 version = "0.1.0"
 edition = "2021"
+description = "Rendezvous protocol for Rift P2P NAT traversal"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/infinityabundance/riftd"
+keywords = ["rendezvous", "nat", "p2p", "hole-punching"]
+categories = ["network-programming"]
 
 [dependencies]
 base64 = "0.21"

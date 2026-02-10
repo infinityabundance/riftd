@@ -2,6 +2,11 @@
 name = "rift-discovery"
 version = "0.1.0"
 edition = "2021"
+description = "Peer discovery via mDNS and DHT for Rift P2P"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/infinityabundance/riftd"
+keywords = ["p2p", "mdns", "dht", "discovery"]
+categories = ["network-programming"]
 
 [dependencies]
 hex = "0.4"

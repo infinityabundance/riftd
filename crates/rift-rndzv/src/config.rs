@@ -2,8 +2,10 @@
 
 /// Coordination mode for combining rndzv with optional infrastructure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum HybridMode {
     /// Pure Predictive Rendezvous (no infrastructure hints or fallback).
+    #[default]
     PureRndzv,
     /// Attempt rndzv first, then fall back to relay if needed.
     RndzvThenRelay,
@@ -13,8 +15,3 @@ pub enum HybridMode {
     RndzvWithDhtHints,
 }
 
-impl Default for HybridMode {
-    fn default() -> Self {
-        HybridMode::PureRndzv
-    }
-}

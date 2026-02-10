@@ -170,96 +170,93 @@ impl DhtHandle {
                             let _ = swarm.behaviour_mut().kademlia.bootstrap();
                         }
                         SwarmEvent::Behaviour(BehaviourEvent::Kademlia(event)) => {
-                            match event {
-                                KademliaEvent::OutboundQueryProgressed { id, result, .. } => {
-                                    match result {
-                                        QueryResult::PutRecord(Ok(PutRecordOk { .. })) => {
-                                            if let Some(resp) = pending_put.remove(&id) {
-                                                let _ = resp.send(Ok(()));
-                                            }
+                            if let KademliaEvent::OutboundQueryProgressed { id, result, .. } = event {
+                                match result {
+                                    QueryResult::PutRecord(Ok(PutRecordOk { .. })) => {
+                                        if let Some(resp) = pending_put.remove(&id) {
+                                            let _ = resp.send(Ok(()));
                                         }
-                                        QueryResult::PutRecord(Err(err)) => {
-                                            if let Some(resp) = pending_put.remove(&id) {
-                                                let _ = resp.send(Err(DhtError::Dht(err.to_string())));
-                                            }
+                                    }
+                                    QueryResult::PutRecord(Err(err)) => {
+                                        if let Some(resp) = pending_put.remove(&id) {
+                                            let _ = resp.send(Err(DhtError::Dht(err.to_string())));
                                         }
-                                        QueryResult::GetProviders(Ok(GetProvidersOk::FoundProviders { providers, .. })) => {
-                                            if let Some(LookupKind::Providers { lookup_id }) = pending_lookup.remove(&id) {
-                                                if let Some(state) = lookups.get_mut(&lookup_id) {
-                                                    if providers.is_empty() {
-                                                        let state = lookups.remove(&lookup_id).unwrap();
-                                                        let _ = state.resp.send(Ok(state.results));
-                                                    } else {
-                                                        state.pending = providers.len();
-                                                        for provider in providers {
-                                                            let record_key = peer_record_key_from_peer(state.channel, provider);
-                                                            let qid = swarm.behaviour_mut().kademlia.get_record(record_key);
-                                                            pending_lookup.insert(qid, LookupKind::Record { lookup_id });
-                                                        }
+                                    }
+                                    QueryResult::GetProviders(Ok(GetProvidersOk::FoundProviders { providers, .. })) => {
+                                        if let Some(LookupKind::Providers { lookup_id }) = pending_lookup.remove(&id) {
+                                            if let Some(state) = lookups.get_mut(&lookup_id) {
+                                                if providers.is_empty() {
+                                                    let state = lookups.remove(&lookup_id).unwrap();
+                                                    let _ = state.resp.send(Ok(state.results));
+                                                } else {
+                                                    state.pending = providers.len();
+                                                    for provider in providers {
+                                                        let record_key = peer_record_key_from_peer(state.channel, provider);
+                                                        let qid = swarm.behaviour_mut().kademlia.get_record(record_key);
+                                                        pending_lookup.insert(qid, LookupKind::Record { lookup_id });
                                                     }
                                                 }
                                             }
                                         }
-                                        QueryResult::GetProviders(Ok(GetProvidersOk::FinishedWithNoAdditionalRecord { .. })) => {
-                                            if let Some(LookupKind::Providers { lookup_id }) = pending_lookup.remove(&id) {
-                                                if let Some(state) = lookups.remove(&lookup_id) {
+                                    }
+                                    QueryResult::GetProviders(Ok(GetProvidersOk::FinishedWithNoAdditionalRecord { .. })) => {
+                                        if let Some(LookupKind::Providers { lookup_id }) = pending_lookup.remove(&id) {
+                                            if let Some(state) = lookups.remove(&lookup_id) {
+                                                let _ = state.resp.send(Ok(state.results));
+                                            }
+                                        }
+                                    }
+                                    QueryResult::GetProviders(Err(err)) => {
+                                        if let Some(LookupKind::Providers { lookup_id }) = pending_lookup.remove(&id) {
+                                            if let Some(state) = lookups.remove(&lookup_id) {
+                                                let _ = state.resp.send(Err(DhtError::Dht(err.to_string())));
+                                            }
+                                        }
+                                    }
+                                    QueryResult::GetRecord(Ok(GetRecordOk::FoundRecord(record))) => {
+                                        if let Some(LookupKind::Record { lookup_id }) = pending_lookup.remove(&id) {
+                                            if let Some(state) = lookups.get_mut(&lookup_id) {
+                                                if let Ok(info) = bincode::deserialize::<PeerEndpointInfo>(&record.record.value) {
+                                                    state.results.push(info);
+                                                }
+                                                if state.pending > 0 {
+                                                    state.pending -= 1;
+                                                }
+                                                if state.pending == 0 {
+                                                    let state = lookups.remove(&lookup_id).unwrap();
                                                     let _ = state.resp.send(Ok(state.results));
                                                 }
                                             }
                                         }
-                                        QueryResult::GetProviders(Err(err)) => {
-                                            if let Some(LookupKind::Providers { lookup_id }) = pending_lookup.remove(&id) {
-                                                if let Some(state) = lookups.remove(&lookup_id) {
+                                    }
+                                    QueryResult::GetRecord(Ok(GetRecordOk::FinishedWithNoAdditionalRecord { .. })) => {
+                                        if let Some(LookupKind::Record { lookup_id }) = pending_lookup.remove(&id) {
+                                            if let Some(state) = lookups.get_mut(&lookup_id) {
+                                                if state.pending > 0 {
+                                                    state.pending -= 1;
+                                                }
+                                                if state.pending == 0 {
+                                                    let state = lookups.remove(&lookup_id).unwrap();
+                                                    let _ = state.resp.send(Ok(state.results));
+                                                }
+                                            }
+                                        }
+                                    }
+                                    QueryResult::GetRecord(Err(err)) => {
+                                        if let Some(LookupKind::Record { lookup_id }) = pending_lookup.remove(&id) {
+                                            if let Some(state) = lookups.get_mut(&lookup_id) {
+                                                if state.pending > 0 {
+                                                    state.pending -= 1;
+                                                }
+                                                if state.pending == 0 {
+                                                    let state = lookups.remove(&lookup_id).unwrap();
                                                     let _ = state.resp.send(Err(DhtError::Dht(err.to_string())));
                                                 }
                                             }
                                         }
-                                        QueryResult::GetRecord(Ok(GetRecordOk::FoundRecord(record))) => {
-                                            if let Some(LookupKind::Record { lookup_id }) = pending_lookup.remove(&id) {
-                                                if let Some(state) = lookups.get_mut(&lookup_id) {
-                                                    if let Ok(info) = bincode::deserialize::<PeerEndpointInfo>(&record.record.value) {
-                                                        state.results.push(info);
-                                                    }
-                                                    if state.pending > 0 {
-                                                        state.pending -= 1;
-                                                    }
-                                                    if state.pending == 0 {
-                                                        let state = lookups.remove(&lookup_id).unwrap();
-                                                        let _ = state.resp.send(Ok(state.results));
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        QueryResult::GetRecord(Ok(GetRecordOk::FinishedWithNoAdditionalRecord { .. })) => {
-                                            if let Some(LookupKind::Record { lookup_id }) = pending_lookup.remove(&id) {
-                                                if let Some(state) = lookups.get_mut(&lookup_id) {
-                                                    if state.pending > 0 {
-                                                        state.pending -= 1;
-                                                    }
-                                                    if state.pending == 0 {
-                                                        let state = lookups.remove(&lookup_id).unwrap();
-                                                        let _ = state.resp.send(Ok(state.results));
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        QueryResult::GetRecord(Err(err)) => {
-                                            if let Some(LookupKind::Record { lookup_id }) = pending_lookup.remove(&id) {
-                                                if let Some(state) = lookups.get_mut(&lookup_id) {
-                                                    if state.pending > 0 {
-                                                        state.pending -= 1;
-                                                    }
-                                                    if state.pending == 0 {
-                                                        let state = lookups.remove(&lookup_id).unwrap();
-                                                        let _ = state.resp.send(Err(DhtError::Dht(err.to_string())));
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        _ => {}
                                     }
+                                    _ => {}
                                 }
-                                _ => {}
                             }
                         }
                         SwarmEvent::NewListenAddr { .. } => {}

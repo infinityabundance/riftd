@@ -110,7 +110,7 @@ impl Identity {
             fs::create_dir_all(parent)?;
         }
         let bytes = self.keypair.to_bytes();
-        fs::write(path, &bytes)?;
+        fs::write(path, bytes)?;
         Ok(())
     }
 

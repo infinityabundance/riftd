@@ -2,6 +2,11 @@
 name = "rift-wasm"
 version = "0.1.0"
 edition = "2021"
+description = "WebAssembly bindings for Rift P2P browser clients"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/infinityabundance/riftd"
+keywords = ["wasm", "webassembly", "p2p", "browser"]
+categories = ["wasm", "web-programming"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]

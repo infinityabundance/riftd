@@ -2,6 +2,11 @@
 name = "rift-nat"
 version = "0.1.0"
 edition = "2021"
+description = "NAT traversal, STUN, and TURN support for Rift P2P"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/infinityabundance/riftd"
+keywords = ["p2p", "nat", "stun", "turn", "networking"]
+categories = ["network-programming"]
 
 [dependencies]
 anyhow = "1"

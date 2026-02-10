@@ -2,6 +2,11 @@
 name = "rift-media"
 version = "0.1.0"
 edition = "2021"
+description = "Audio capture, playback, and Opus codec for Rift P2P"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/infinityabundance/riftd"
+keywords = ["audio", "opus", "codec", "voice"]
+categories = ["multimedia::audio"]
 
 [dependencies]
 anyhow = "1"

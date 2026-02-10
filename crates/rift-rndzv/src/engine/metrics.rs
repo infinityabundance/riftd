@@ -4,18 +4,15 @@ use crate::config::HybridMode;
 
 /// NAT behavior observations (lightweight heuristic).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum NatBehaviorHint {
+    #[default]
     Unknown,
     PortPreserving,
     Patterned,
     HighVariance,
 }
 
-impl Default for NatBehaviorHint {
-    fn default() -> Self {
-        NatBehaviorHint::Unknown
-    }
-}
 
 /// Which path won in a hybrid rendezvous attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

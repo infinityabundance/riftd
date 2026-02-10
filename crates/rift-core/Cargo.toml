@@ -2,6 +2,11 @@
 name = "rift-core"
 version = "0.1.0"
 edition = "2021"
+description = "Core types, identity, cryptography, and invites for the Rift P2P protocol"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/infinityabundance/riftd"
+keywords = ["p2p", "voip", "cryptography", "identity"]
+categories = ["network-programming", "cryptography"]
 
 [dependencies]
 base64 = "0.21"

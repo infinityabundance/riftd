@@ -2,6 +2,12 @@
 name = "rndzv-sim"
 version = "0.1.0"
 edition = "2021"
+description = "Simulation harness for Rift rendezvous protocol testing"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/infinityabundance/riftd"
+keywords = ["simulation", "testing", "rendezvous"]
+categories = ["development-tools::testing"]
+publish = false
 
 [dependencies]
 rift-rndzv = { path = "../rift-rndzv" }

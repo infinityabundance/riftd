@@ -2,6 +2,11 @@
 name = "rift-protocol"
 version = "0.1.0"
 edition = "2021"
+description = "Versioned wire protocol framing and message types for Rift P2P"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/infinityabundance/riftd"
+keywords = ["p2p", "protocol", "networking"]
+categories = ["network-programming"]
 
 [dependencies]
 bincode = "1"

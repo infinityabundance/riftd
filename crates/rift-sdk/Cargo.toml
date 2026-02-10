@@ -2,6 +2,11 @@
 name = "rift-sdk"
 version = "0.1.0"
 edition = "2021"
+description = "High-level SDK for building Rift P2P applications"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/infinityabundance/riftd"
+keywords = ["p2p", "sdk", "voice", "chat"]
+categories = ["network-programming"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]

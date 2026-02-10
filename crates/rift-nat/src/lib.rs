@@ -384,6 +384,56 @@ fn parse_stun_response(buf: &[u8], tx_id: &[u8; 12]) -> Result<SocketAddr, StunE
     Err(StunError::InvalidResponse)
 }
 
+fn parse_mapped_address(
+    value: &[u8],
+    attr_type: u16,
+    tx_id: &[u8; 12],
+) -> Result<SocketAddr, StunError> {
+    if value.len() < 4 {
+        return Err(StunError::InvalidResponse);
+    }
+    let family = value[1];
+    let port = u16::from_be_bytes([value[2], value[3]]);
+    let port = if attr_type == STUN_ATTR_XOR_MAPPED_ADDRESS {
+        port ^ ((STUN_MAGIC_COOKIE >> 16) as u16)
+    } else {
+        port
+    };
+    match family {
+        0x01 => {
+            if value.len() < 8 {
+                return Err(StunError::InvalidResponse);
+            }
+            let mut ip = [0u8; 4];
+            ip.copy_from_slice(&value[4..8]);
+            if attr_type == STUN_ATTR_XOR_MAPPED_ADDRESS {
+                let cookie = STUN_MAGIC_COOKIE.to_be_bytes();
+                for i in 0..4 {
+                    ip[i] ^= cookie[i];
+                }
+            }
+            Ok(SocketAddr::new(IpAddr::V4(ip.into()), port))
+        }
+        0x02 => {
+            if value.len() < 20 {
+                return Err(StunError::InvalidResponse);
+            }
+            let mut ip = [0u8; 16];
+            ip.copy_from_slice(&value[4..20]);
+            if attr_type == STUN_ATTR_XOR_MAPPED_ADDRESS {
+                let mut xor = [0u8; 16];
+                xor[..4].copy_from_slice(&STUN_MAGIC_COOKIE.to_be_bytes());
+                xor[4..].copy_from_slice(tx_id);
+                for i in 0..16 {
+                    ip[i] ^= xor[i];
+                }
+            }
+            Ok(SocketAddr::new(IpAddr::V6(ip.into()), port))
+        }
+        _ => Err(StunError::InvalidResponse),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -468,55 +518,5 @@ mod tests {
         for addr in list {
             assert!(!addr.ip().is_loopback());
         }
-    }
-}
-
-fn parse_mapped_address(
-    value: &[u8],
-    attr_type: u16,
-    tx_id: &[u8; 12],
-) -> Result<SocketAddr, StunError> {
-    if value.len() < 4 {
-        return Err(StunError::InvalidResponse);
-    }
-    let family = value[1];
-    let port = u16::from_be_bytes([value[2], value[3]]);
-    let port = if attr_type == STUN_ATTR_XOR_MAPPED_ADDRESS {
-        port ^ ((STUN_MAGIC_COOKIE >> 16) as u16)
-    } else {
-        port
-    };
-    match family {
-        0x01 => {
-            if value.len() < 8 {
-                return Err(StunError::InvalidResponse);
-            }
-            let mut ip = [0u8; 4];
-            ip.copy_from_slice(&value[4..8]);
-            if attr_type == STUN_ATTR_XOR_MAPPED_ADDRESS {
-                let cookie = STUN_MAGIC_COOKIE.to_be_bytes();
-                for i in 0..4 {
-                    ip[i] ^= cookie[i];
-                }
-            }
-            Ok(SocketAddr::new(IpAddr::V4(ip.into()), port))
-        }
-        0x02 => {
-            if value.len() < 20 {
-                return Err(StunError::InvalidResponse);
-            }
-            let mut ip = [0u8; 16];
-            ip.copy_from_slice(&value[4..20]);
-            if attr_type == STUN_ATTR_XOR_MAPPED_ADDRESS {
-                let mut xor = [0u8; 16];
-                xor[..4].copy_from_slice(&STUN_MAGIC_COOKIE.to_be_bytes());
-                xor[4..].copy_from_slice(tx_id);
-                for i in 0..16 {
-                    ip[i] ^= xor[i];
-                }
-            }
-            Ok(SocketAddr::new(IpAddr::V6(ip.into()), port))
-        }
-        _ => Err(StunError::InvalidResponse),
     }
 }

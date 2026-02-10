@@ -40,6 +40,7 @@ const TURN_DATA_INDICATION: u16 = 0x0017;
 
 const ATTR_USERNAME: u16 = 0x0006;
 const ATTR_MESSAGE_INTEGRITY: u16 = 0x0008;
+#[allow(dead_code)]
 const ATTR_ERROR_CODE: u16 = 0x0009;
 const ATTR_REALM: u16 = 0x0014;
 const ATTR_NONCE: u16 = 0x0015;
@@ -48,6 +49,7 @@ const ATTR_REQUESTED_TRANSPORT: u16 = 0x0019;
 const ATTR_XOR_PEER_ADDRESS: u16 = 0x0012;
 const ATTR_DATA: u16 = 0x0013;
 const ATTR_CHANNEL_NUMBER: u16 = 0x000C;
+#[allow(dead_code)]
 const ATTR_LIFETIME: u16 = 0x000D;
 const ATTR_FINGERPRINT: u16 = 0x8028;
 
@@ -670,7 +672,7 @@ mod tests {
         let _server = tokio::spawn(async move {
             let socket = UdpSocket::bind(server_addr).await.unwrap();
             let mut buf = [0u8; 1500];
-            let (len, peer) = socket.recv_from(&mut buf).await.unwrap();
+            let (_len, peer) = socket.recv_from(&mut buf).await.unwrap();
             let tx_id: [u8; 12] = buf[8..20].try_into().unwrap();
             let mut response = build_stun_header(TURN_ALLOCATE_RESPONSE, &tx_id);
             add_attr_bytes(&mut response, ATTR_XOR_RELAYED_ADDRESS, &encode_xor_addr(relay_addr, &tx_id));

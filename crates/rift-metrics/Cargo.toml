@@ -2,6 +2,11 @@
 name = "rift-metrics"
 version = "0.1.0"
 edition = "2021"
+description = "Metrics collection and reporting for Rift P2P"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/infinityabundance/riftd"
+keywords = ["metrics", "telemetry", "monitoring"]
+categories = ["development-tools::profiling"]
 
 [dependencies]
 once_cell = "1"
