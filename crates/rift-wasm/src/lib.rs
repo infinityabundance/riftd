@@ -5,7 +5,8 @@
 //! - session bootstrap
 //! - encrypted text encode/decode using protocol framing
 
-use aes_gcm::{Aead, Aes256Gcm, KeyInit, Nonce};
+use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
+use aes_gcm::aead::Aead;
 use js_sys::{Date, Uint8Array};
 use rift_core::{
     invite::{decode_invite, encode_invite, generate_invite, Invite},

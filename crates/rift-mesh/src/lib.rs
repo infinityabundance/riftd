@@ -546,10 +546,21 @@ impl Mesh {
     }
 
     /// Return the local UDP listen address.
-    pub fn local_addr(&self) -> Result<SocketAddr> {
-        let sockets = self.inner.sockets.blocking_lock();
+    pub async fn local_addr(&self) -> Result<SocketAddr> {
+        let sockets = self.inner.sockets.lock().await;
         match sockets.first() {
-            Some(MeshSocket::Udp(sock)) => Ok(sock.local_addr()?),
+            Some(MeshSocket::Udp(sock)) => {
+                let addr = sock.local_addr()?;
+                // Convert 0.0.0.0 to 127.0.0.1 for local connections
+                if addr.ip().is_unspecified() {
+                    Ok(SocketAddr::new(
+                        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                        addr.port(),
+                    ))
+                } else {
+                    Ok(addr)
+                }
+            }
             Some(MeshSocket::Turn(relay)) => Ok(relay.relay_addr()),
             None => Err(anyhow!("missing socket")),
         }
@@ -828,7 +839,8 @@ impl MeshInner {
             let mgr = self.session_mgr.lock().await;
             mgr.participants(session)
         };
-        let count = participants.len().max(1);
+        // Include local peer in count (participants only contains remote peers)
+        let count = participants.len() + 1;
         let next = if count <= GROUP_MESH_MAX {
             GroupMode::Mesh
         } else if self.e2ee_key.is_some() {
@@ -1383,6 +1395,7 @@ impl MeshInner {
         let Some(state) = pending.remove(&key) else {
             return Ok(false);
         };
+        drop(pending);
 
         match state {
             PendingHandshake::InitiatorAwait2(mut hs) => {
@@ -1390,9 +1403,9 @@ impl MeshInner {
                 hs.read_message(data, &mut out)?;
                 let len = hs.write_message(&[], &mut out)?;
                 self.send_raw(socket_idx, addr, &out[..len]).await?;
-        let transport = hs.into_transport_mode()?;
-        self.install_connection(addr, transport, socket_idx).await?;
-    }
+                let transport = hs.into_transport_mode()?;
+                self.install_connection(addr, transport, socket_idx).await?;
+            }
             PendingHandshake::ResponderAwait3(mut hs) => {
                 let mut out = [0u8; MAX_PACKET];
                 hs.read_message(data, &mut out)?;
@@ -2492,6 +2505,16 @@ impl MeshInner {
                 }
 
                 self.send_peer_list(addr).await?;
+                // Broadcast updated peer list to all existing peers so they know about the new peer
+                let all_peers: Vec<SocketAddr> = {
+                    let peers_by_id = self.peers_by_id.lock().await;
+                    peers_by_id.values().copied().collect()
+                };
+                for peer_addr in all_peers {
+                    if peer_addr != addr {
+                        let _ = self.send_peer_list(peer_addr).await;
+                    }
+                }
             }
             RiftPayload::Control(ControlMessage::PeerState {
                 peer_id,
@@ -2830,6 +2853,17 @@ impl MeshInner {
     }
 
     async fn handle_peer_list(self: Arc<Self>, addr: SocketAddr, peers: Vec<PeerInfo>) -> Result<()> {
+        // Always register peers as session participants for topology tracking
+        for peer in &peers {
+            if peer.peer_id == self.identity.peer_id {
+                continue;
+            }
+            let mut sessions = self.session_mgr.lock().await;
+            sessions.add_participant(self.channel_session, peer.peer_id);
+        }
+        // Trigger topology update after learning about new participants
+        let _ = self.update_group_topology(self.channel_session).await;
+
         let nat_cfg = { self.nat_cfg.lock().await.clone() };
         let Some(nat_cfg) = nat_cfg else {
             return Ok(());
@@ -3695,8 +3729,8 @@ mod pr_tests {
         let mesh_a = Mesh::new(Identity::generate(), cfg.clone()).await.unwrap();
         let mesh_b = Mesh::new(Identity::generate(), cfg.clone()).await.unwrap();
 
-        let addr_a = mesh_a.local_addr().unwrap();
-        let addr_b = mesh_b.local_addr().unwrap();
+        let addr_a = mesh_a.local_addr().await.unwrap();
+        let addr_b = mesh_b.local_addr().await.unwrap();
 
         let now_secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)

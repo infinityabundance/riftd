@@ -506,3 +506,219 @@ impl AudioMixer {
         (frame, active > 0)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn audio_config_default_frame_samples() {
+        let config = AudioConfig::default();
+        // 48kHz * 20ms / 1000 * 1 channel = 960 samples
+        assert_eq!(config.frame_samples(), 960);
+    }
+
+    #[test]
+    fn audio_config_stereo_frame_samples() {
+        let config = AudioConfig {
+            sample_rate: 48_000,
+            frame_duration_ms: 20,
+            channels: 2,
+            bitrate: 48_000,
+        };
+        // 48kHz * 20ms / 1000 * 2 channels = 1920 samples
+        assert_eq!(config.frame_samples(), 1920);
+    }
+
+    #[test]
+    fn audio_config_different_sample_rates() {
+        // 8kHz mono 20ms
+        let config8k = AudioConfig {
+            sample_rate: 8_000,
+            frame_duration_ms: 20,
+            channels: 1,
+            bitrate: 12_000,
+        };
+        assert_eq!(config8k.frame_samples(), 160);
+
+        // 16kHz mono 20ms
+        let config16k = AudioConfig {
+            sample_rate: 16_000,
+            frame_duration_ms: 20,
+            channels: 1,
+            bitrate: 24_000,
+        };
+        assert_eq!(config16k.frame_samples(), 320);
+    }
+
+    #[test]
+    fn audio_config_frame_duration() {
+        let config = AudioConfig {
+            sample_rate: 48_000,
+            frame_duration_ms: 10,
+            channels: 1,
+            bitrate: 48_000,
+        };
+        assert_eq!(config.frame_duration(), Duration::from_millis(10));
+    }
+
+    #[test]
+    fn pcm16_encode_decode_roundtrip() {
+        let config = AudioConfig::default();
+        let mut encoder = OpusEncoder::new(&config).unwrap();
+        let mut decoder = OpusDecoder::new(&config).unwrap();
+
+        // Create a simple test frame with a sine wave pattern
+        let frame: Vec<i16> = (0..config.frame_samples())
+            .map(|i| ((i as f32 * 0.1).sin() * 10000.0) as i16)
+            .collect();
+
+        // PCM16 should be lossless
+        let encoded = encode_frame(CodecId::PCM16, &frame, &mut encoder).unwrap();
+        let decoded = decode_frame(CodecId::PCM16, &encoded, &mut decoder, config.frame_samples()).unwrap();
+
+        assert_eq!(frame, decoded);
+    }
+
+    #[test]
+    fn opus_encode_decode_roundtrip() {
+        let config = AudioConfig::default();
+        let mut encoder = OpusEncoder::new(&config).unwrap();
+        let mut decoder = OpusDecoder::new(&config).unwrap();
+
+        // Create test frame
+        let frame: Vec<i16> = (0..config.frame_samples())
+            .map(|i| ((i as f32 * 0.05).sin() * 5000.0) as i16)
+            .collect();
+
+        let encoded = encode_frame(CodecId::Opus, &frame, &mut encoder).unwrap();
+        let decoded = decode_frame(CodecId::Opus, &encoded, &mut decoder, config.frame_samples()).unwrap();
+
+        // Opus is lossy, so just verify we got the right number of samples
+        assert_eq!(decoded.len(), config.frame_samples());
+    }
+
+    #[test]
+    fn opus_encoder_bitrate_change() {
+        let config = AudioConfig::default();
+        let mut encoder = OpusEncoder::new(&config).unwrap();
+
+        // Should not error
+        encoder.set_bitrate(24_000).unwrap();
+        encoder.set_bitrate(96_000).unwrap();
+    }
+
+    #[test]
+    fn opus_encoder_fec_setting() {
+        let config = AudioConfig::default();
+        let mut encoder = OpusEncoder::new(&config).unwrap();
+
+        encoder.set_fec(true).unwrap();
+        encoder.set_fec(false).unwrap();
+    }
+
+    #[test]
+    fn opus_encoder_packet_loss_setting() {
+        let config = AudioConfig::default();
+        let mut encoder = OpusEncoder::new(&config).unwrap();
+
+        encoder.set_packet_loss(0).unwrap();
+        encoder.set_packet_loss(10).unwrap();
+        encoder.set_packet_loss(100).unwrap();
+        // Values > 100 should be clamped
+        encoder.set_packet_loss(255).unwrap();
+    }
+
+    #[test]
+    fn mixer_single_stream() {
+        let mut mixer = AudioMixer::new(4);
+
+        mixer.push(1, vec![100, 200, 300, 400]);
+        let (frame, active) = mixer.mix_next_with_activity();
+
+        assert!(active);
+        assert_eq!(frame, vec![100, 200, 300, 400]);
+    }
+
+    #[test]
+    fn mixer_multiple_streams_averaging() {
+        let mut mixer = AudioMixer::new(4);
+
+        mixer.push(1, vec![100, 200, 300, 400]);
+        mixer.push(2, vec![100, 200, 300, 400]);
+        let (frame, active) = mixer.mix_next_with_activity();
+
+        assert!(active);
+        // Two streams with identical values, divided by 2
+        assert_eq!(frame, vec![100, 200, 300, 400]);
+    }
+
+    #[test]
+    fn mixer_empty_returns_zeros() {
+        let mut mixer = AudioMixer::new(4);
+
+        let (frame, active) = mixer.mix_next_with_activity();
+
+        assert!(!active);
+        assert_eq!(frame, vec![0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn mixer_stream_removal_when_empty() {
+        let mut mixer = AudioMixer::new(4);
+
+        mixer.push(1, vec![100, 200, 300, 400]);
+
+        // First mix consumes the frame
+        let (_, active) = mixer.mix_next_with_activity();
+        assert!(active);
+
+        // Second mix should find no active streams
+        let (frame, active) = mixer.mix_next_with_activity();
+        assert!(!active);
+        assert_eq!(frame, vec![0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn mixer_prebuffer() {
+        let mut mixer = AudioMixer::with_prebuffer(4, 2);
+
+        // Push first frame - still prebuffering
+        mixer.push(1, vec![100, 200, 300, 400]);
+        let (frame, active) = mixer.mix_next_with_activity();
+        assert!(!active);
+        assert_eq!(frame, vec![0, 0, 0, 0]);
+
+        // Push second frame - prebuffer satisfied
+        mixer.push(1, vec![500, 600, 700, 800]);
+        let (frame, active) = mixer.mix_next_with_activity();
+        assert!(active);
+        assert_eq!(frame, vec![100, 200, 300, 400]);
+    }
+
+    #[test]
+    fn mixer_clipping_protection() {
+        let mut mixer = AudioMixer::new(2);
+
+        // Push values that would overflow if not averaged
+        mixer.push(1, vec![i16::MAX, i16::MAX]);
+        mixer.push(2, vec![i16::MAX, i16::MAX]);
+        let (frame, _) = mixer.mix_next_with_activity();
+
+        // Should be averaged, not clipped
+        assert_eq!(frame, vec![i16::MAX, i16::MAX]);
+    }
+
+    #[test]
+    fn voice_frame_construction() {
+        let frame = VoiceFrame {
+            seq: 42,
+            timestamp: 1234567890,
+            payload: vec![1, 2, 3, 4],
+        };
+
+        assert_eq!(frame.seq, 42);
+        assert_eq!(frame.timestamp, 1234567890);
+        assert_eq!(frame.payload, vec![1, 2, 3, 4]);
+    }
+}
