@@ -18,4 +18,7 @@ tracing = "0.1"
 rift-core = { path = "../rift-core", version = "0.1.0" }
 rift-nat = { path = "../rift-nat", version = "0.1.0" }
 
+[package.metadata.docs.rs]
+all-features = true
+
 [dev-dependencies]

@@ -7,6 +7,12 @@
 </p>
 
 <p align="center">
+  <a href="https://crates.io/crates/rift-protocol"><img src="https://img.shields.io/crates/v/rift-protocol.svg" alt="crates.io"></a>
+  <a href="https://docs.rs/rift-protocol"><img src="https://docs.rs/rift-protocol/badge.svg" alt="docs.rs"></a>
+  <a href="https://github.com/infinityabundance/riftd/blob/main/LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg" alt="License"></a>
+</p>
+
+<p align="center">
   Versioned wire protocol framing and message types for the <a href="https://github.com/infinityabundance/riftd">riftd</a> P2P protocol.
 </p>
 

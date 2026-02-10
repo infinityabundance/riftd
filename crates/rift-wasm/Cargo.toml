@@ -30,3 +30,7 @@ wasm = []
 
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = ["-Oz"]
+
+[package.metadata.docs.rs]
+all-features = true
+targets = ["wasm32-unknown-unknown"]

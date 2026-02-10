@@ -7,6 +7,12 @@
 </p>
 
 <p align="center">
+  <a href="https://crates.io/crates/rift-sdk"><img src="https://img.shields.io/crates/v/rift-sdk.svg" alt="crates.io"></a>
+  <a href="https://docs.rs/rift-sdk"><img src="https://docs.rs/rift-sdk/badge.svg" alt="docs.rs"></a>
+  <a href="https://github.com/infinityabundance/riftd/blob/main/LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg" alt="License"></a>
+</p>
+
+<p align="center">
   High-level SDK for building applications with the <a href="https://github.com/infinityabundance/riftd">riftd</a> P2P protocol.
 </p>
 

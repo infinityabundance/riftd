@@ -12,3 +12,6 @@ categories = ["development-tools::profiling"]
 once_cell = "1"
 parking_lot = "0.12"
 serde = { version = "1", features = ["derive"] }
+
+[package.metadata.docs.rs]
+all-features = true

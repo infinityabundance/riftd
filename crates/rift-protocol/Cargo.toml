@@ -23,3 +23,6 @@ criterion = "0.5"
 [[bench]]
 name = "mesh_encode_decode"
 harness = false
+
+[package.metadata.docs.rs]
+all-features = true

@@ -19,3 +19,6 @@ libp2p = { version = "0.53", features = ["kad", "tcp", "dns", "noise", "yamux", 
 rift-core = { path = "../rift-core", version = "0.1.0" }
 rift-metrics = { path = "../rift-metrics", version = "0.1.0" }
 tracing = "0.1"
+
+[package.metadata.docs.rs]
+all-features = true

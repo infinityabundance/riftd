@@ -43,3 +43,6 @@ tempfile = "3"
 [features]
 ffi = []
 android = ["jni", "ndk-context"]
+
+[package.metadata.docs.rs]
+all-features = true

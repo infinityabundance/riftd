@@ -22,3 +22,6 @@ criterion = "0.5"
 [[bench]]
 name = "media_opus"
 harness = false
+
+[package.metadata.docs.rs]
+all-features = true
