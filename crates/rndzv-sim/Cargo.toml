@@ -1,6 +1,6 @@
 [package]
 name = "rndzv-sim"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Simulation harness for Rift rendezvous protocol testing"
 license = "Apache-2.0 OR MIT"
@@ -10,7 +10,7 @@ categories = ["development-tools::testing"]
 publish = false
 
 [dependencies]
-rift-rndzv = { path = "../rift-rndzv", version = "0.1.0" }
+rift-rndzv = { path = "../rift-rndzv", version = "0.1.1" }
 blake3 = "1"
 
 [dev-dependencies]

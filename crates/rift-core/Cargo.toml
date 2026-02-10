@@ -1,6 +1,6 @@
 [package]
 name = "rift-core"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Core types, identity, cryptography, and invites for the Rift P2P protocol"
 license = "Apache-2.0 OR MIT"

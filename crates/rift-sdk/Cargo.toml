@@ -1,6 +1,6 @@
 [package]
 name = "rift-sdk"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "High-level SDK for building Rift P2P applications"
 license = "Apache-2.0 OR MIT"
@@ -15,15 +15,15 @@ crate-type = ["cdylib", "rlib"]
 anyhow = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync"] }
 tracing = "0.1"
-rift-core = { path = "../rift-core", version = "0.1.0" }
-rift-protocol = { path = "../rift-protocol", version = "0.1.0" }
-rift-discovery = { path = "../rift-discovery", version = "0.1.0" }
-rift-nat = { path = "../rift-nat", version = "0.1.0" }
-rift-mesh = { path = "../rift-mesh", version = "0.1.0" }
-rift-rndzv = { path = "../rift-rndzv", version = "0.1.0" }
-rift-media = { path = "../rift-media", version = "0.1.0" }
-rift-dht = { path = "../rift-dht", version = "0.1.0" }
-rift-metrics = { path = "../rift-metrics", version = "0.1.0" }
+rift-core = { path = "../rift-core", version = "0.1.1" }
+rift-protocol = { path = "../rift-protocol", version = "0.1.1" }
+rift-discovery = { path = "../rift-discovery", version = "0.1.1" }
+rift-nat = { path = "../rift-nat", version = "0.1.1" }
+rift-mesh = { path = "../rift-mesh", version = "0.1.1" }
+rift-rndzv = { path = "../rift-rndzv", version = "0.1.1" }
+rift-media = { path = "../rift-media", version = "0.1.1" }
+rift-dht = { path = "../rift-dht", version = "0.1.1" }
+rift-metrics = { path = "../rift-metrics", version = "0.1.1" }
 serde = { version = "1", features = ["derive"] }
 hex = "0.4"
 rand = "0.8"

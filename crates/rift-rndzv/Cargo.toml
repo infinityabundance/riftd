@@ -1,6 +1,6 @@
 [package]
 name = "rift-rndzv"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Rendezvous protocol for Rift P2P NAT traversal"
 license = "Apache-2.0 OR MIT"
@@ -15,8 +15,8 @@ hex = "0.4"
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["net", "time", "rt", "sync", "macros"] }
 tracing = "0.1"
-rift-core = { path = "../rift-core", version = "0.1.0" }
-rift-nat = { path = "../rift-nat", version = "0.1.0" }
+rift-core = { path = "../rift-core", version = "0.1.1" }
+rift-nat = { path = "../rift-nat", version = "0.1.1" }
 
 [package.metadata.docs.rs]
 all-features = true

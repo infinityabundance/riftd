@@ -1,6 +1,6 @@
 [package]
 name = "rift-dht"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Distributed hash table for Rift P2P peer discovery"
 license = "Apache-2.0 OR MIT"
@@ -16,8 +16,8 @@ thiserror = "1"
 tokio = { version = "1", features = ["sync", "time", "macros", "rt"] }
 futures = "0.3"
 libp2p = { version = "0.53", features = ["kad", "tcp", "dns", "noise", "yamux", "tokio", "identify", "macros"] }
-rift-core = { path = "../rift-core", version = "0.1.0" }
-rift-metrics = { path = "../rift-metrics", version = "0.1.0" }
+rift-core = { path = "../rift-core", version = "0.1.1" }
+rift-metrics = { path = "../rift-metrics", version = "0.1.1" }
 tracing = "0.1"
 
 [package.metadata.docs.rs]
