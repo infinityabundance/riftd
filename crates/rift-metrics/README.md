@@ -1,13 +1,28 @@
 # rift-metrics
 
-Metrics collection and reporting for Rift P2P.
+<p align="center">
+  <a href="https://github.com/infinityabundance/riftd">
+    <img src="https://raw.githubusercontent.com/infinityabundance/riftd/main/assets/riftd.svg" alt="riftd" width="80">
+  </a>
+</p>
 
-## Features
+<p align="center">
+  Metrics collection and reporting for the <a href="https://github.com/infinityabundance/riftd">riftd</a> P2P protocol.
+</p>
 
-- Connection statistics tracking
-- Latency and throughput metrics
-- NAT traversal success rates
-- Thread-safe metric collection
+---
+
+Part of the [riftd](https://github.com/infinityabundance/riftd) project — serverless P2P voice + text chat over UDP.
+
+## What's in this crate?
+
+`rift-metrics` provides lightweight, thread-safe metrics collection:
+
+- **Connection Stats** — Track active connections and lifetime totals
+- **Latency Metrics** — RTT measurements and histograms
+- **Throughput** — Bytes sent/received tracking
+- **NAT Traversal** — Success/failure rates for hole punching
+- **Global Registry** — Thread-safe access via `Metrics::global()`
 
 ## Usage
 
@@ -16,8 +31,19 @@ use rift_metrics::Metrics;
 
 let metrics = Metrics::global();
 metrics.record_connection();
+metrics.record_bytes_sent(1024);
+
+let snapshot = metrics.snapshot();
+println!("Active connections: {}", snapshot.active_connections);
 ```
+
+## Related Crates
+
+| Crate | Description |
+|-------|-------------|
+| [rift-mesh](https://crates.io/crates/rift-mesh) | Mesh networking (uses metrics) |
+| [rift-nat](https://crates.io/crates/rift-nat) | NAT traversal (reports metrics) |
 
 ## License
 
-Licensed under either of Apache License, Version 2.0 or MIT license at your option.
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT) at your option.

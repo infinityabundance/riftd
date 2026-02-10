@@ -1,23 +1,60 @@
 # rift-protocol
 
-Versioned wire protocol framing and message types for Rift P2P.
+<p align="center">
+  <a href="https://github.com/infinityabundance/riftd">
+    <img src="https://raw.githubusercontent.com/infinityabundance/riftd/main/assets/riftd.svg" alt="riftd" width="80">
+  </a>
+</p>
 
-## Features
+<p align="center">
+  Versioned wire protocol framing and message types for the <a href="https://github.com/infinityabundance/riftd">riftd</a> P2P protocol.
+</p>
 
-- Binary message encoding/decoding
-- Protocol versioning
-- Chat, voice, and control message types
-- Efficient serialization with bincode
+---
+
+Part of the [riftd](https://github.com/infinityabundance/riftd) project — serverless P2P voice + text chat over UDP.
+
+## What's in this crate?
+
+`rift-protocol` defines the on-the-wire format for all rift messages:
+
+- **Message Types** — Chat, voice, control, and relay messages
+- **Framing** — Length-prefixed binary encoding
+- **Versioning** — Protocol version negotiation
+- **Serialization** — Efficient bincode encoding/decoding
 
 ## Usage
 
 ```rust
-use rift_protocol::{RiftMessage, ChatMessage};
+use rift_protocol::{RiftMessage, ChatMessage, VoiceFrame};
+use rift_core::PeerId;
 
-let msg = ChatMessage::new(peer_id, timestamp, "Hello!".into());
-let encoded = msg.encode()?;
+// Create a chat message
+let chat = ChatMessage::new(
+    peer_id,
+    timestamp,
+    "Hello, world!".to_string(),
+);
+
+// Encode for transmission
+let bytes = chat.encode()?;
+
+// Decode on receive
+let msg = RiftMessage::decode(&bytes)?;
 ```
+
+## Protocol Documentation
+
+See [PROTOCOL.md](https://github.com/infinityabundance/riftd/blob/main/PROTOCOL.md) for the full protocol specification.
+
+## Related Crates
+
+| Crate | Description |
+|-------|-------------|
+| [rift-core](https://crates.io/crates/rift-core) | Core types and identity |
+| [rift-mesh](https://crates.io/crates/rift-mesh) | Mesh networking layer |
+| [rift-media](https://crates.io/crates/rift-media) | Audio encoding for voice frames |
 
 ## License
 
-Licensed under either of Apache License, Version 2.0 or MIT license at your option.
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT) at your option.

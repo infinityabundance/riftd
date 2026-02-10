@@ -1,24 +1,68 @@
 # rift-mesh
 
-Mesh networking, session management, and E2EE for Rift P2P.
+<p align="center">
+  <a href="https://github.com/infinityabundance/riftd">
+    <img src="https://raw.githubusercontent.com/infinityabundance/riftd/main/assets/riftd.svg" alt="riftd" width="80">
+  </a>
+</p>
 
-## Features
+<p align="center">
+  Mesh networking, session management, and E2EE for the <a href="https://github.com/infinityabundance/riftd">riftd</a> P2P protocol.
+</p>
 
-- Noise protocol encrypted sessions
-- Peer discovery and connection management
-- NAT traversal with STUN/TURN fallback
-- End-to-end encrypted messaging
-- Voice and text chat support
+---
+
+Part of the [riftd](https://github.com/infinityabundance/riftd) project — serverless P2P voice + text chat over UDP.
+
+## What's in this crate?
+
+`rift-mesh` is the heart of riftd's networking:
+
+- **Mesh Topology** — Every peer connects to every peer
+- **Noise Sessions** — Encrypted channels using Noise_XX
+- **E2EE** — End-to-end encryption for all messages
+- **NAT Traversal** — Automatic hole punching with fallback
+- **Peer Relay** — Route through peers when direct fails
+- **Session Management** — Handle joins, leaves, reconnects
 
 ## Usage
 
 ```rust
-use rift_mesh::MeshNode;
+use rift_mesh::{MeshNode, MeshConfig};
 
+let config = MeshConfig::default();
 let node = MeshNode::new(config).await?;
-node.connect(peer_addr).await?;
+
+// Join a channel
+node.join(channel_id).await?;
+
+// Send a message
+node.send_chat(peer_id, "Hello!").await?;
+
+// Handle incoming messages
+while let Some(event) = node.next_event().await {
+    match event {
+        MeshEvent::Chat { from, message } => { /* ... */ }
+        MeshEvent::Voice { from, frame } => { /* ... */ }
+        MeshEvent::PeerJoined(peer) => { /* ... */ }
+    }
+}
 ```
+
+## Features
+
+- `predictive-rendezvous` (default) — Enable SRT-based NAT traversal
+
+## Related Crates
+
+| Crate | Description |
+|-------|-------------|
+| [rift-core](https://crates.io/crates/rift-core) | Identity and crypto primitives |
+| [rift-protocol](https://crates.io/crates/rift-protocol) | Message types |
+| [rift-nat](https://crates.io/crates/rift-nat) | STUN/TURN support |
+| [rift-rndzv](https://crates.io/crates/rift-rndzv) | Predictive Rendezvous |
+| [rift-sdk](https://crates.io/crates/rift-sdk) | High-level API |
 
 ## License
 
-Licensed under either of Apache License, Version 2.0 or MIT license at your option.
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT) at your option.

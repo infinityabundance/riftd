@@ -1,23 +1,54 @@
 # rift-nat
 
-NAT traversal, STUN, and TURN support for Rift P2P.
+<p align="center">
+  <a href="https://github.com/infinityabundance/riftd">
+    <img src="https://raw.githubusercontent.com/infinityabundance/riftd/main/assets/riftd.svg" alt="riftd" width="80">
+  </a>
+</p>
 
-## Features
+<p align="center">
+  NAT traversal, STUN, and TURN support for the <a href="https://github.com/infinityabundance/riftd">riftd</a> P2P protocol.
+</p>
 
-- STUN client for reflexive address discovery
-- TURN client for relay fallback
-- NAT type detection
-- ICE-lite candidate gathering
+---
+
+Part of the [riftd](https://github.com/infinityabundance/riftd) project — serverless P2P voice + text chat over UDP.
+
+## What's in this crate?
+
+`rift-nat` handles the hard problem of connecting peers behind NATs:
+
+- **STUN Client** — Discover your public IP and port (server-reflexive address)
+- **TURN Client** — Relay fallback when direct connection fails
+- **NAT Detection** — Identify NAT type (full cone, restricted, symmetric)
+- **Hole Punching** — Coordinated UDP hole punch attempts
+- **ICE-lite** — Simplified ICE candidate gathering
 
 ## Usage
 
 ```rust
-use rift_nat::{StunClient, TurnClient};
+use rift_nat::{StunClient, NatProbe};
 
-let stun = StunClient::new("stun.l.google.com:19302");
-let reflexive_addr = stun.get_reflexive_address().await?;
+// Discover reflexive address via STUN
+let stun = StunClient::new("stun.l.google.com:19302").await?;
+let reflexive = stun.binding_request().await?;
+println!("Public address: {}", reflexive);
+
+// Probe NAT type
+let nat_type = NatProbe::detect().await?;
 ```
+
+## TURN Setup
+
+For self-hosted TURN relay, see [TURN_GUIDE.md](https://github.com/infinityabundance/riftd/blob/main/TURN_GUIDE.md).
+
+## Related Crates
+
+| Crate | Description |
+|-------|-------------|
+| [rift-rndzv](https://crates.io/crates/rift-rndzv) | Rendezvous coordination |
+| [rift-mesh](https://crates.io/crates/rift-mesh) | Mesh networking (uses NAT traversal) |
 
 ## License
 
-Licensed under either of Apache License, Version 2.0 or MIT license at your option.
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT) at your option.
