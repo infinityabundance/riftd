@@ -18,14 +18,14 @@ struct MeshHarness {
     addr: SocketAddr,
 }
 
-async fn spawn_mesh(name: &str) -> Result<MeshHarness> {
+async fn spawn_mesh(channel: &str, _name: &str) -> Result<MeshHarness> {
     let identity = Identity::generate();
     let peer_id = identity.peer_id;
     let cfg = MeshConfig {
-        channel_name: format!("e2e-{name}"),
+        channel_name: channel.to_string(),
         password: None,
         listen_port: 0,
-        relay_capable: false,
+        relay_capable: true,
         qos: QosProfile::default(),
         auth_token: None,
         require_auth: false,
@@ -34,7 +34,7 @@ async fn spawn_mesh(name: &str) -> Result<MeshHarness> {
         max_direct_peers: None,
     };
     let mut mesh = Mesh::new(identity, cfg).await?;
-    let addr = mesh.local_addr()?;
+    let addr = mesh.local_addr().await?;
     let handle = mesh.handle();
     let (tx, rx) = mpsc::unbounded_channel();
     tokio::spawn(async move {
@@ -70,8 +70,8 @@ where
 #[tokio::test]
 async fn lan_direct_chat() -> Result<()> {
     metrics::set_enabled(true);
-    let mut a = spawn_mesh("a").await?;
-    let mut b = spawn_mesh("b").await?;
+    let mut a = spawn_mesh("e2e-chat", "a").await?;
+    let mut b = spawn_mesh("e2e-chat", "b").await?;
 
     b.handle.connect_addr(a.addr).await?;
 
@@ -92,8 +92,8 @@ async fn lan_direct_chat() -> Result<()> {
 
 #[tokio::test]
 async fn lan_voice_frame() -> Result<()> {
-    let mut a = spawn_mesh("va").await?;
-    let mut b = spawn_mesh("vb").await?;
+    let mut a = spawn_mesh("e2e-voice", "va").await?;
+    let mut b = spawn_mesh("e2e-voice", "vb").await?;
 
     b.handle.connect_addr(a.addr).await?;
     let _ = wait_for_event(&mut a.rx, |e| matches!(e, MeshEvent::PeerJoined(_))).await?;
@@ -112,7 +112,7 @@ async fn lan_voice_frame() -> Result<()> {
 async fn group_mesh_to_hybrid_topology() -> Result<()> {
     let mut meshes = Vec::new();
     for i in 0..6 {
-        meshes.push(spawn_mesh(&format!("g{i}")).await?);
+        meshes.push(spawn_mesh("e2e-group", &format!("g{i}")).await?);
     }
     let leader_addr = meshes[0].addr;
 
@@ -120,6 +120,23 @@ async fn group_mesh_to_hybrid_topology() -> Result<()> {
         meshes[idx].handle.connect_addr(leader_addr).await?;
     }
 
+    // Wait for all 5 peers to join the leader before expecting topology change
+    let mut joined_count = 0;
+    while joined_count < 5 {
+        if let Ok(evt) = timeout(E2E_TIMEOUT, meshes[0].rx.recv()).await {
+            if let Some(MeshEvent::PeerJoined(_)) = evt {
+                joined_count += 1;
+            } else if let Some(MeshEvent::GroupTopology { mode, .. }) = evt {
+                if matches!(mode, rift_protocol::GroupMode::Hybrid { .. }) {
+                    return Ok(());
+                }
+            }
+        } else {
+            return Err(anyhow!("timeout waiting for peer joins"));
+        }
+    }
+
+    // Now wait for the topology change event
     let evt = wait_for_event(&mut meshes[0].rx, |e| {
         matches!(e, MeshEvent::GroupTopology { .. })
     }).await?;

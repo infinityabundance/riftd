@@ -326,3 +326,126 @@ fn peer_record_key_from_peer(channel: ChannelId, peer_id: PeerId) -> RecordKey {
     bytes.extend_from_slice(peer_id.to_bytes().as_ref());
     RecordKey::new(&bytes)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn peer_endpoint_info_serialization_roundtrip() {
+        let info = PeerEndpointInfo {
+            peer_id: RiftPeerId([42u8; 32]),
+            addrs: vec![
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 9000),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 9001),
+            ],
+        };
+
+        let serialized = bincode::serialize(&info).unwrap();
+        let deserialized: PeerEndpointInfo = bincode::deserialize(&serialized).unwrap();
+
+        assert_eq!(info.peer_id.0, deserialized.peer_id.0);
+        assert_eq!(info.addrs, deserialized.addrs);
+    }
+
+    #[test]
+    fn peer_endpoint_info_empty_addrs() {
+        let info = PeerEndpointInfo {
+            peer_id: RiftPeerId([0u8; 32]),
+            addrs: vec![],
+        };
+
+        let serialized = bincode::serialize(&info).unwrap();
+        let deserialized: PeerEndpointInfo = bincode::deserialize(&serialized).unwrap();
+
+        assert_eq!(info.addrs.len(), 0);
+        assert_eq!(deserialized.addrs.len(), 0);
+    }
+
+    #[test]
+    fn dht_config_construction() {
+        let config = DhtConfig {
+            bootstrap_nodes: vec![
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)), 4001),
+            ],
+            listen_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+        };
+
+        assert_eq!(config.bootstrap_nodes.len(), 1);
+        assert_eq!(config.listen_addr.port(), 0);
+    }
+
+    #[test]
+    fn dht_error_display() {
+        let err = DhtError::Transport("connection refused".to_string());
+        assert!(format!("{}", err).contains("transport error"));
+
+        let err = DhtError::Dht("no providers".to_string());
+        assert!(format!("{}", err).contains("dht error"));
+    }
+
+    #[test]
+    fn socket_to_multiaddr_ipv4() {
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 4001);
+        let multi = socket_to_multiaddr(addr);
+        let expected = "/ip4/127.0.0.1/tcp/4001".parse::<Multiaddr>().unwrap();
+        assert_eq!(multi, expected);
+    }
+
+    #[test]
+    fn socket_to_multiaddr_ipv6() {
+        let addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 4001);
+        let multi = socket_to_multiaddr(addr);
+        let expected = "/ip6/::1/tcp/4001".parse::<Multiaddr>().unwrap();
+        assert_eq!(multi, expected);
+    }
+
+    #[test]
+    fn channel_key_deterministic() {
+        let channel = ChannelId([42u8; 32]);
+        let key1 = channel_key(channel);
+        let key2 = channel_key(channel);
+        assert_eq!(key1, key2);
+    }
+
+    #[test]
+    fn channel_key_different_channels() {
+        let channel1 = ChannelId([1u8; 32]);
+        let channel2 = ChannelId([2u8; 32]);
+        let key1 = channel_key(channel1);
+        let key2 = channel_key(channel2);
+        assert_ne!(key1, key2);
+    }
+
+    #[test]
+    fn peer_record_key_deterministic() {
+        let channel = ChannelId([42u8; 32]);
+        let peer = RiftPeerId([7u8; 32]);
+        let key1 = peer_record_key(channel, peer);
+        let key2 = peer_record_key(channel, peer);
+        assert_eq!(key1, key2);
+    }
+
+    #[test]
+    fn peer_record_key_different_peers() {
+        let channel = ChannelId([42u8; 32]);
+        let peer1 = RiftPeerId([1u8; 32]);
+        let peer2 = RiftPeerId([2u8; 32]);
+        let key1 = peer_record_key(channel, peer1);
+        let key2 = peer_record_key(channel, peer2);
+        assert_ne!(key1, key2);
+    }
+
+    #[test]
+    fn peer_record_key_different_channels() {
+        let channel1 = ChannelId([1u8; 32]);
+        let channel2 = ChannelId([2u8; 32]);
+        let peer = RiftPeerId([42u8; 32]);
+        let key1 = peer_record_key(channel1, peer);
+        let key2 = peer_record_key(channel2, peer);
+        assert_ne!(key1, key2);
+    }
+
+    use std::net::IpAddr;
+}

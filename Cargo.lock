@@ -3615,6 +3615,7 @@ dependencies = [
  "blake3",
  "hex",
  "rift-core",
+ "rift-nat",
  "serde",
  "tokio",
  "tracing",

@@ -1,7 +1,7 @@
 //! Criterion benchmark for protocol frame encoding/decoding.
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use rift_core::{MessageId, PeerId};
+use rift_core::PeerId;
 use rift_protocol::{ChatMessage, ControlMessage, ProtocolVersion, RiftFrameHeader, RiftPayload, StreamKind};
 
 /// Encode + decode a representative chat frame.
@@ -15,12 +15,11 @@ fn bench_encode_decode(c: &mut Criterion) {
         source: PeerId([7u8; 32]),
         session: rift_protocol::SessionId::NONE,
     };
-    let chat = ChatMessage {
-        id: MessageId::new(),
-        from: PeerId([9u8; 32]),
-        timestamp: 1700000000,
-        text: "hello world".to_string(),
-    };
+    let chat = ChatMessage::new(
+        PeerId([9u8; 32]),
+        1700000000,
+        "hello world".to_string(),
+    );
     let payload = RiftPayload::Control(ControlMessage::Chat(chat));
 
     c.bench_function("mesh_encode_decode", |b| {

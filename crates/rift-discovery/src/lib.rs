@@ -230,3 +230,103 @@ pub fn local_ipv4_addrs() -> Result<Vec<IpAddr>, DiscoveryError> {
     }
     Ok(addrs)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn channel_id_deterministic() {
+        let config1 = DiscoveryConfig {
+            channel_name: "test-channel".to_string(),
+            password: None,
+            peer_id: PeerId([0u8; 32]),
+            listen_port: 9000,
+        };
+
+        let config2 = DiscoveryConfig {
+            channel_name: "test-channel".to_string(),
+            password: None,
+            peer_id: PeerId([1u8; 32]), // Different peer id
+            listen_port: 9001,           // Different port
+        };
+
+        // Same channel name without password should produce same channel ID
+        assert_eq!(config1.channel_id(), config2.channel_id());
+    }
+
+    #[test]
+    fn channel_id_with_password() {
+        let config_no_pass = DiscoveryConfig {
+            channel_name: "test-channel".to_string(),
+            password: None,
+            peer_id: PeerId([0u8; 32]),
+            listen_port: 9000,
+        };
+
+        let config_with_pass = DiscoveryConfig {
+            channel_name: "test-channel".to_string(),
+            password: Some("secret".to_string()),
+            peer_id: PeerId([0u8; 32]),
+            listen_port: 9000,
+        };
+
+        // Different passwords should produce different channel IDs
+        assert_ne!(config_no_pass.channel_id(), config_with_pass.channel_id());
+    }
+
+    #[test]
+    fn channel_id_different_names() {
+        let config1 = DiscoveryConfig {
+            channel_name: "channel-a".to_string(),
+            password: None,
+            peer_id: PeerId([0u8; 32]),
+            listen_port: 9000,
+        };
+
+        let config2 = DiscoveryConfig {
+            channel_name: "channel-b".to_string(),
+            password: None,
+            peer_id: PeerId([0u8; 32]),
+            listen_port: 9000,
+        };
+
+        // Different channel names should produce different channel IDs
+        assert_ne!(config1.channel_id(), config2.channel_id());
+    }
+
+    #[test]
+    fn local_addrs_returns_something() {
+        let addrs = local_ipv4_addrs().unwrap();
+        // Should always return at least one address (even if just localhost)
+        assert!(!addrs.is_empty());
+    }
+
+    #[test]
+    fn local_addrs_are_ipv4() {
+        let addrs = local_ipv4_addrs().unwrap();
+        for addr in addrs {
+            assert!(matches!(addr, IpAddr::V4(_)));
+        }
+    }
+
+    #[test]
+    fn peer_info_construction() {
+        let peer = PeerInfo {
+            peer_id: PeerId([42u8; 32]),
+            addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 9000),
+        };
+
+        assert_eq!(peer.peer_id.0, [42u8; 32]);
+        assert_eq!(peer.addr.port(), 9000);
+    }
+
+    #[test]
+    fn discovery_error_display() {
+        let err = DiscoveryError::MissingPeerInfo;
+        assert_eq!(format!("{}", err), "missing peer info in mDNS record");
+
+        let err = DiscoveryError::InvalidPeerId;
+        assert_eq!(format!("{}", err), "invalid peer id");
+    }
+}
