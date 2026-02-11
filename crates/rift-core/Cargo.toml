@@ -13,6 +13,7 @@ categories = ["network-programming", "cryptography"]
 base64 = "0.21"
 blake3 = "1"
 bincode = "1"
+flate2 = "1"
 ed25519-dalek = { version = "1", features = ["rand"] }
 hex = "0.4"
 hkdf = "0.12"
