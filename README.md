@@ -41,6 +41,53 @@ The repo contains a working voice + text mesh with:
 - Pairwise E2EE for chat + voice.
 - TUI client with call/session semantics.
 
+## Native Clients
+
+### Qt Desktop (Windows / macOS / Linux)
+A unified Qt6/QML desktop client with:
+- Dark mode UI
+- System tray integration
+- Voice calls with audio device selection
+- Channel management and chat
+
+Build instructions:
+```bash
+# Build SDK with FFI exports
+cargo build -p rift-sdk --release --features ffi
+
+# Linux (requires Qt6, opus, alsa)
+cmake -S clients/rift-qt-unified -B build-qt
+cmake --build build-qt --config Release
+
+# macOS (requires Qt6 via Homebrew)
+cmake -S clients/rift-qt-unified -B build-qt \
+  -DCMAKE_PREFIX_PATH=$(brew --prefix qt@6)
+cmake --build build-qt --config Release
+
+# Windows (requires Qt6 + MSVC)
+cmake -S clients/rift-qt-unified -B build-qt
+cmake --build build-qt --config Release
+```
+
+### Android
+A Kotlin/Jetpack Compose app with:
+- JNI bindings to the Rift SDK
+- Voice calls with foreground service
+- Audio focus and Bluetooth routing
+
+Build instructions:
+```bash
+# Build SDK for Android targets
+rustup target add aarch64-linux-android armv7-linux-androideabi
+cargo install cargo-ndk
+cargo ndk -t arm64-v8a -t armeabi-v7a -o android/rift-sdk-android/src/main/jniLibs \
+  build -p rift-sdk --release --features android
+
+# Build APK
+cd android
+JAVA_HOME=/usr/lib/jvm/java-17-openjdk ./gradlew assembleDebug
+```
+
 ## Browser Prototype
 There is an early WebAssembly browser spike for text-only chat over a WebSocket relay.
 See `README.browser.md` for build and run instructions.
@@ -67,13 +114,15 @@ XDG_CONFIG_HOME=/tmp/rift2 cargo run -p rift -- create --channel gaming --voice 
 
 4. Internet (invite mode):
 ```bash
-# Terminal A
-cargo run -p rift -- create --channel gaming --voice --internet --port 7777
+# Terminal A (internet is enabled by default)
+cargo run -p rift -- create --channel gaming --voice --port 7777
 cargo run -p rift -- invite --channel gaming
 
 # Terminal B (use invite string)
 cargo run -p rift -- join --invite "rift://join/..."
 ```
+
+Note: Internet connectivity (STUN, DHT, relays) is enabled by default. Use `--no-internet` for LAN-only mode.
 
 ## TUI Usage
 - Type in the input box and press Enter to chat.
@@ -129,9 +178,11 @@ theme = "dark"
 - [`rift-mesh`](https://crates.io/crates/rift-mesh): mesh routing, relay, call/session handling.
 - [`rift-media`](https://crates.io/crates/rift-media): audio capture/playback and Opus codec.
 - [`rift-metrics`](https://crates.io/crates/rift-metrics): metrics and telemetry.
-- [`rift-sdk`](https://crates.io/crates/rift-sdk): high-level SDK for embedding Rift (Rust + C FFI).
+- [`rift-sdk`](https://crates.io/crates/rift-sdk): high-level SDK for embedding Rift (Rust + C FFI + JNI).
 - [`rift-wasm`](https://crates.io/crates/rift-wasm): WebAssembly bindings for browser clients.
 - `bin/rift`: TUI client.
+- `clients/rift-qt-unified`: Qt6/QML desktop client (Windows / macOS / Linux).
+- `android/`: Kotlin/Compose Android app with JNI bindings.
 
 ## Docs
 - `CODE.md`: high-level code map.
