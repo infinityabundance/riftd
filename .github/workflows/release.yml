@@ -1,29 +1,15 @@
-name: CI
+name: Release
 
 on:
   push:
-    branches: ["main"]
-  pull_request:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
 
 jobs:
-  rust:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-      - name: fmt
-        run: cargo fmt --all -- --check
-      - name: clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: test
-        run: cargo test --workspace
-      - name: e2e
-        run: cargo test -p rift-e2e
-
-  android:
+  build-android:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -35,25 +21,25 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android,x86_64-linux-android
-      - name: install cargo-ndk
+      - name: Install cargo-ndk
         run: cargo install cargo-ndk
-      - name: install android packages
+      - name: Install Android packages
         run: |
           sdkmanager "platforms;android-34" "build-tools;34.0.0" "platform-tools" "ndk;26.1.10909125"
-      - name: build rust android
+      - name: Build Rust Android
         run: |
           cd android
           ./build-rust-android.sh
-      - name: assemble debug apk
+      - name: Assemble release APK
         run: |
           cd android
-          ./gradlew assembleDebug
+          ./gradlew assembleRelease
       - uses: actions/upload-artifact@v4
         with:
-          name: android-apk
-          path: android/app/build/outputs/apk/debug/app-debug.apk
+          name: android-release
+          path: android/app/build/outputs/apk/release/
 
-  qt-windows:
+  build-windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -71,12 +57,18 @@ jobs:
           cmake -S clients/rift-qt-unified -B build-qt -DRIFT_SDK_LIB="${{ github.workspace }}/target/release/rift_sdk.lib"
       - name: Build Qt client
         run: cmake --build build-qt --config Release
+      - name: Package Windows
+        run: |
+          mkdir dist
+          cp build-qt/Release/RiftQt.exe dist/
+          windeployqt --qmldir clients/rift-qt-unified/qml dist/RiftQt.exe
+          Compress-Archive -Path dist/* -DestinationPath rift-windows-x64.zip
       - uses: actions/upload-artifact@v4
         with:
-          name: windows-qt
-          path: build-qt/Release/RiftQt.exe
+          name: windows-release
+          path: rift-windows-x64.zip
 
-  qt-macos:
+  build-macos:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -105,7 +97,28 @@ jobs:
             -DRIFT_SDK_LIB="${{ github.workspace }}/target/release/librift_sdk.a"
       - name: Build Qt client
         run: cmake --build build-qt --config Release
+      - name: Package macOS
+        run: |
+          macdeployqt build-qt/RiftQt.app -qmldir=clients/rift-qt-unified/qml
+          hdiutil create -volname "Rift" -srcfolder build-qt/RiftQt.app -ov -format UDZO rift-macos-universal.dmg
       - uses: actions/upload-artifact@v4
         with:
-          name: macos-qt
-          path: build-qt/RiftQt.app
+          name: macos-release
+          path: rift-macos-universal.dmg
+
+  release:
+    needs: [build-android, build-windows, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            artifacts/android-release/*.apk
+            artifacts/windows-release/rift-windows-x64.zip
+            artifacts/macos-release/rift-macos-universal.dmg
+          generate_release_notes: true

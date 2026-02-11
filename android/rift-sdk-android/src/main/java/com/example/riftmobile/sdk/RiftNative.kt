@@ -13,6 +13,11 @@ object RiftNative {
     external fun sendChat(handle: Long, text: String): Int
     external fun startPtt(handle: Long): Int
     external fun stopPtt(handle: Long): Int
+    external fun setMute(handle: Long, muted: Boolean): Int
+    external fun startCall(handle: Long, peerHex: String): String?
+    external fun acceptCall(handle: Long, sessionHex: String): Int
+    external fun declineCall(handle: Long, sessionHex: String, reason: String?): Int
+    external fun endCall(handle: Long, sessionHex: String): Int
     external fun pollEvent(handle: Long): RiftEventDto?
     external fun lastError(): String?
     external fun setBootstrapNodes(handle: Long, nodes: String)
@@ -23,7 +28,7 @@ object RiftNative {
     external fun generateInvite(channel: String, password: String?, knownPeers: String): String?
 }
 
-internal data class RiftEventDto(
+data class RiftEventDto(
     val type: String,
     val from: String?,
     val text: String?,
