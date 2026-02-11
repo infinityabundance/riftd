@@ -198,7 +198,7 @@ enum Commands {
         port: u16,
         #[arg(long)]
         voice: bool,
-        #[arg(long)]
+        #[arg(long, default_value_t = true)]
         internet: bool,
         #[arg(long)]
         relay: bool,
@@ -224,7 +224,7 @@ enum Commands {
         port: u16,
         #[arg(long)]
         voice: bool,
-        #[arg(long)]
+        #[arg(long, default_value_t = true)]
         internet: bool,
         #[arg(long)]
         relay: bool,
@@ -255,7 +255,7 @@ enum Commands {
         port: u16,
         #[arg(long)]
         voice: bool,
-        #[arg(long)]
+        #[arg(long, default_value_t = true)]
         internet: bool,
         #[arg(long)]
         relay: bool,
@@ -285,7 +285,7 @@ enum Commands {
         port: u16,
         #[arg(long)]
         voice: bool,
-        #[arg(long)]
+        #[arg(long, default_value_t = true)]
         internet: bool,
         #[arg(long)]
         relay: bool,
