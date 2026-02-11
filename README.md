@@ -18,6 +18,12 @@ Serverless P2P voice + text chat over UDP with a mesh, NAT traversal, and option
 
 `riftd` is a small, pragmatic alternative to heavyweight WebRTC stacks. It is designed to work on LANs and across the internet without central servers, using mDNS discovery, UDP hole punching, and peer relays when needed. The project includes a terminal UI (TUI) client and a protocol crate that can be reused by other applications.
 
+### What makes riftd more than just "WebRTC, but in Rust":
+
+> **Predictive Rendezvous: Time–Intent–Deterministic Peer Coordination Without Infrastructure**  
+> Riaan de Beer, 2026
+> **[https://doi.org/10.5281/zenodo.18528430]**
+
 ## Highlights
 - Pure P2P mesh: every peer talks to every peer (with relay fallback).
 - LAN discovery via mDNS + internet discovery via invites and DHT.
