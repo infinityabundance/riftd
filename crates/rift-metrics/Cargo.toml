@@ -1,9 +1,18 @@
 [package]
 name = "rift-metrics"
-version = "0.1.0"
+version = "0.1.3"
 edition = "2021"
+description = "Metrics collection and reporting for Rift P2P"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/infinityabundance/riftd"
+documentation = "https://docs.rs/rift-metrics"
+keywords = ["metrics", "telemetry", "monitoring"]
+categories = ["development-tools::profiling"]
 
 [dependencies]
 once_cell = "1"
 parking_lot = "0.12"
 serde = { version = "1", features = ["derive"] }
+
+[package.metadata.docs.rs]
+all-features = true

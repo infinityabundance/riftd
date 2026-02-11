@@ -240,18 +240,18 @@ fn parse_u64(value: Option<&&str>, field: &'static str) -> Result<u64, SrtError>
 }
 
 fn parse_strategy(value: Option<&&str>) -> Result<SearchStrategy, SrtError> {
-    match value.ok_or(SrtError::MissingField("ss"))? {
-        &"basic" => Ok(SearchStrategy::BasicDeterministic),
-        &"extended" => Ok(SearchStrategy::Extended),
+    match *value.ok_or(SrtError::MissingField("ss"))? {
+        "basic" => Ok(SearchStrategy::BasicDeterministic),
+        "extended" => Ok(SearchStrategy::Extended),
         _ => Err(SrtError::InvalidField("ss")),
     }
 }
 
 fn parse_escalation(value: Option<&&str>) -> Result<EscalationPolicy, SrtError> {
-    match value.ok_or(SrtError::MissingField("esc"))? {
-        &"none" => Ok(EscalationPolicy::None),
-        &"simple" => Ok(EscalationPolicy::Simple),
-        &"aggressive" => Ok(EscalationPolicy::Aggressive),
+    match *value.ok_or(SrtError::MissingField("esc"))? {
+        "none" => Ok(EscalationPolicy::None),
+        "simple" => Ok(EscalationPolicy::Simple),
+        "aggressive" => Ok(EscalationPolicy::Aggressive),
         _ => Err(SrtError::InvalidField("esc")),
     }
 }

@@ -6,8 +6,13 @@
   </a>
 </p>
 
-[![Predictive Rendezvous: Time--Intent--Deterministic Peer Coordination Without Infrastructure](https://img.shields.io/badge/Zenodo-Prior%20Art-blue)](https://zenodo.org/records/18528430)
-
+<p align="center">
+  <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/rust-stable-orange.svg" alt="Rust"></a>
+  <a href="https://crates.io/crates/rift-sdk"><img src="https://img.shields.io/crates/v/rift-sdk.svg" alt="crates.io"></a>
+  <a href="https://docs.rs/rift-sdk"><img src="https://docs.rs/rift-sdk/badge.svg" alt="docs.rs"></a>
+  <a href="https://github.com/infinityabundance/riftd/blob/main/LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg" alt="License"></a>
+  <a href="https://doi.org/10.5281/zenodo.18528430"><img src="https://zenodo.org/badge/DOI/10.5281/zenodo.18528430.svg" alt="DOI"></a>
+</p>
 
 Serverless P2P voice + text chat over UDP with a mesh, NAT traversal, and optional relays.
 

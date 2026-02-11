@@ -1,7 +1,13 @@
 [package]
 name = "rift-core"
-version = "0.1.0"
+version = "0.1.3"
 edition = "2021"
+description = "Core types, identity, cryptography, and invites for the Rift P2P protocol"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/infinityabundance/riftd"
+documentation = "https://docs.rs/rift-core"
+keywords = ["p2p", "voip", "cryptography", "identity"]
+categories = ["network-programming", "cryptography"]
 
 [dependencies]
 base64 = "0.21"
@@ -23,3 +29,6 @@ dirs = "5"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }
+
+[package.metadata.docs.rs]
+all-features = true

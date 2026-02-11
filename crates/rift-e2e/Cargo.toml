@@ -1,14 +1,20 @@
 [package]
 name = "rift-e2e"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
+description = "End-to-end integration tests for Rift P2P"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/infinityabundance/riftd"
+keywords = ["testing", "e2e", "integration"]
+categories = ["development-tools::testing"]
+publish = false
 
 [dependencies]
 anyhow = "1"
-rift-core = { path = "../rift-core" }
-rift-mesh = { path = "../rift-mesh" }
-rift-metrics = { path = "../rift-metrics" }
-rift-protocol = { path = "../rift-protocol" }
+rift-core = { path = "../rift-core", version = "0.1.1" }
+rift-mesh = { path = "../rift-mesh", version = "0.1.1" }
+rift-metrics = { path = "../rift-metrics", version = "0.1.1" }
+rift-protocol = { path = "../rift-protocol", version = "0.1.1" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
 
 [dev-dependencies]

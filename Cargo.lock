@@ -3446,7 +3446,7 @@ checksum = "1e061d1b48cb8d38042de4ae0a7a6401009d6143dc80d2e2d6f31f0bdd6470c7"
 
 [[package]]
 name = "rift"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "blake3",
@@ -3476,7 +3476,7 @@ dependencies = [
 
 [[package]]
 name = "rift-core"
-version = "0.1.0"
+version = "0.1.3"
 dependencies = [
  "base64 0.21.7",
  "bincode",
@@ -3497,7 +3497,7 @@ dependencies = [
 
 [[package]]
 name = "rift-dht"
-version = "0.1.0"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "bincode",
@@ -3513,7 +3513,7 @@ dependencies = [
 
 [[package]]
 name = "rift-discovery"
-version = "0.1.0"
+version = "0.1.3"
 dependencies = [
  "hex",
  "if-addrs 0.13.4",
@@ -3527,7 +3527,7 @@ dependencies = [
 
 [[package]]
 name = "rift-e2e"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "rift-core",
@@ -3539,7 +3539,7 @@ dependencies = [
 
 [[package]]
 name = "rift-media"
-version = "0.1.0"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "cpal",
@@ -3552,7 +3552,7 @@ dependencies = [
 
 [[package]]
 name = "rift-mesh"
-version = "0.1.0"
+version = "0.1.3"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -3576,7 +3576,7 @@ dependencies = [
 
 [[package]]
 name = "rift-metrics"
-version = "0.1.0"
+version = "0.1.3"
 dependencies = [
  "once_cell",
  "parking_lot",
@@ -3585,7 +3585,7 @@ dependencies = [
 
 [[package]]
 name = "rift-nat"
-version = "0.1.0"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "crc32fast",
@@ -3602,7 +3602,7 @@ dependencies = [
 
 [[package]]
 name = "rift-protocol"
-version = "0.1.0"
+version = "0.1.3"
 dependencies = [
  "bincode",
  "blake3",
@@ -3616,7 +3616,7 @@ dependencies = [
 
 [[package]]
 name = "rift-rndzv"
-version = "0.1.0"
+version = "0.1.3"
 dependencies = [
  "base64 0.21.7",
  "blake3",
@@ -3630,7 +3630,7 @@ dependencies = [
 
 [[package]]
 name = "rift-sdk"
-version = "0.1.0"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "blake3",
@@ -3661,7 +3661,7 @@ dependencies = [
 
 [[package]]
 name = "rift-wasm"
-version = "0.1.0"
+version = "0.1.3"
 dependencies = [
  "aes-gcm",
  "bincode",
@@ -3720,7 +3720,7 @@ dependencies = [
 
 [[package]]
 name = "rndzv-sim"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "blake3",
  "rift-rndzv",

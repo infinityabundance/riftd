@@ -16,7 +16,6 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
-use serde_json;
 use tokio::sync::mpsc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::time::Instant;
@@ -793,7 +792,7 @@ async fn cmd_show_known_hosts() -> Result<()> {
         .security
         .known_hosts_path
         .as_ref()
-        .map(|p| PathBuf::from(p))
+        .map(PathBuf::from)
         .unwrap_or_else(|| {
             dirs::config_dir()
                 .map(|base| base.join("rift").join("known_hosts"))
@@ -2722,14 +2721,14 @@ fn build_sdk_config(
                 .security
                 .known_hosts_path
                 .as_ref()
-                .map(|p| PathBuf::from(p)),
+                .map(PathBuf::from),
             reject_on_mismatch: user_cfg.security.reject_on_mismatch.unwrap_or(false),
             channel_shared_secret: user_cfg.security.channel_shared_secret.clone(),
             audit_log_path: user_cfg
                 .security
                 .audit_log_path
                 .as_ref()
-                .map(|p| PathBuf::from(p)),
+                .map(PathBuf::from),
             rekey_interval_secs: user_cfg.security.rekey_interval_secs,
         },
         dht: rift_sdk::DhtConfigSdk {

@@ -645,6 +645,12 @@ async fn run_handshake(
     })
 }
 
+impl Default for RndzvConnector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RndzvConnector {
     /// Create a new connector instance.
     pub fn new() -> Self {
@@ -1021,12 +1027,12 @@ async fn run_handshake_over_relay(
         relay
             .send_to(remote_addr, &out[..len])
             .await
-            .map_err(|e| RndzvError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+            .map_err(|e| RndzvError::Io(std::io::Error::other(e)))?;
 
         let (len, _addr) = tokio::time::timeout(timeout_dur, relay.recv_from(&mut buf))
             .await
             .map_err(|_| RndzvError::HandshakeFailed("init read timeout"))?
-            .map_err(|e| RndzvError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+            .map_err(|e| RndzvError::Io(std::io::Error::other(e)))?;
         hs.read_message(&buf[..len], &mut out)
             .map_err(|_| RndzvError::HandshakeFailed("init read failed"))?;
 
@@ -1036,12 +1042,12 @@ async fn run_handshake_over_relay(
         relay
             .send_to(remote_addr, &out[..len])
             .await
-            .map_err(|e| RndzvError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+            .map_err(|e| RndzvError::Io(std::io::Error::other(e)))?;
     } else {
         let (len, _addr) = tokio::time::timeout(timeout_dur, relay.recv_from(&mut buf))
             .await
             .map_err(|_| RndzvError::HandshakeFailed("resp read timeout"))?
-            .map_err(|e| RndzvError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+            .map_err(|e| RndzvError::Io(std::io::Error::other(e)))?;
         hs.read_message(&buf[..len], &mut out)
             .map_err(|_| RndzvError::HandshakeFailed("resp read failed"))?;
 
@@ -1051,12 +1057,12 @@ async fn run_handshake_over_relay(
         relay
             .send_to(remote_addr, &out[..len])
             .await
-            .map_err(|e| RndzvError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+            .map_err(|e| RndzvError::Io(std::io::Error::other(e)))?;
 
         let (len, _addr) = tokio::time::timeout(timeout_dur, relay.recv_from(&mut buf))
             .await
             .map_err(|_| RndzvError::HandshakeFailed("resp read2 timeout"))?
-            .map_err(|e| RndzvError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+            .map_err(|e| RndzvError::Io(std::io::Error::other(e)))?;
         hs.read_message(&buf[..len], &mut out)
             .map_err(|_| RndzvError::HandshakeFailed("resp read2 failed"))?;
     }
