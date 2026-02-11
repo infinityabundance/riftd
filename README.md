@@ -130,7 +130,7 @@ Note: Internet connectivity (STUN, DHT, relays) is enabled by default. Use `--no
 - `/hangup` or `/bye` to end an active call.
 - Incoming call: `a` to accept, `d` to decline.
 - `m` toggles mute (disables mic capture).
-- `Ctrl+I` shows invite command in chat (easy copy for sharing).
+- `Ctrl+G` shows invite command in chat (easy copy for sharing).
 - `Ctrl+A` toggles audio quality (low/medium/high).
 - `Ctrl+Q` quits.
 - `TAB` toggles focus between input and peer list.

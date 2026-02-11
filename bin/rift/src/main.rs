@@ -2134,7 +2134,7 @@ fn handle_key_event(
             let next = next_quality(&state.audio_quality);
             state.audio_quality = next.to_string();
         }
-        KeyCode::Char('i') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             return Ok(Some(UiAction::ShowInvite));
         }
         KeyCode::Char('m') if key.modifiers.is_empty() => {
