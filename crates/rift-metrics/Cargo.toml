@@ -1,6 +1,6 @@
 [package]
 name = "rift-metrics"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 description = "Metrics collection and reporting for Rift P2P"
 license = "Apache-2.0 OR MIT"

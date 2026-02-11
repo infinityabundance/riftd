@@ -1,6 +1,6 @@
 [package]
 name = "rift-media"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 description = "Audio capture, playback, and Opus codec for Rift P2P"
 license = "Apache-2.0 OR MIT"
@@ -15,7 +15,7 @@ cpal = "0.15"
 opus = "0.3"
 tokio = { version = "1", features = ["sync", "time"] }
 tracing = "0.1"
-rift-protocol = { path = "../rift-protocol", version = "0.1.3" }
+rift-protocol = { path = "../rift-protocol", version = "0.1.4" }
 
 [dev-dependencies]
 criterion = "0.5"
