@@ -14,6 +14,7 @@ members = [
   "crates/rndzv-sim",
   "bin/rift",
   "crates/rift-wasm",
+  "crates/rift-web-chat",
   "bin/rift-ws-relay",
 ]
 resolver = "2"

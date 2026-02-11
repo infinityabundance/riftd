@@ -3704,6 +3704,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "rift-web-chat"
+version = "0.1.4"
+dependencies = [
+ "aes-gcm",
+ "base64 0.22.1",
+ "bincode",
+ "getrandom 0.2.17",
+ "js-sys",
+ "rift-core",
+ "rift-protocol",
+ "serde",
+ "serde-wasm-bindgen",
+ "serde_json",
+ "thiserror 1.0.69",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
+
+[[package]]
 name = "rift-ws-relay"
 version = "0.1.0"
 dependencies = [
