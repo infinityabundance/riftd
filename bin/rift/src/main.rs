@@ -1585,6 +1585,7 @@ enum UiAction {
     DeclineCall(RiftSessionId, Option<String>),
     EndCall(RiftSessionId),
     ToggleMute,
+    ShowInvite,
 }
 
 #[derive(Debug, Clone)]
@@ -2133,6 +2134,9 @@ fn handle_key_event(
             let next = next_quality(&state.audio_quality);
             state.audio_quality = next.to_string();
         }
+        KeyCode::Char('i') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            return Ok(Some(UiAction::ShowInvite));
+        }
         KeyCode::Char('m') if key.modifiers.is_empty() => {
             return Ok(Some(UiAction::ToggleMute));
         }
@@ -2240,6 +2244,18 @@ async fn apply_action(
         UiAction::ToggleMute => {
             state.muted = !state.muted;
             handle.set_mute(state.muted);
+        }
+        UiAction::ShowInvite => {
+            match load_invite_string(&state.channel) {
+                Ok(invite) => {
+                    state.add_chat_line("system".to_string(), "─── Invite (Ctrl+I) ───".to_string());
+                    state.add_chat_line("system".to_string(), format!("cargo run -p rift -- join --invite \"{}\" --voice", invite));
+                    state.add_chat_line("system".to_string(), "───────────────────────".to_string());
+                }
+                Err(_) => {
+                    state.add_chat_line("system".to_string(), "No invite found. Create channel with --internet to generate invite.".to_string());
+                }
+            }
         }
     }
 }

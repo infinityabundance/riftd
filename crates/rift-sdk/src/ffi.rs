@@ -90,7 +90,10 @@ pub extern "C" fn rift_init(config_path: *const c_char, out_error: *mut RiftErro
     }
 
     let config = if config_path.is_null() {
-        RiftConfig::default()
+        // Use port 0 (OS-assigned) by default for FFI clients to avoid conflicts
+        let mut cfg = RiftConfig::default();
+        cfg.listen_port = 0;
+        cfg
     } else {
         let c_str = unsafe { CStr::from_ptr(config_path) };
         match c_str.to_str() {
