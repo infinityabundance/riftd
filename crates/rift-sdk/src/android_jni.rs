@@ -405,6 +405,213 @@ pub extern "system" fn Java_com_example_riftmobile_sdk_RiftNative_stopPtt(
     0
 }
 
+/// Set mute state for microphone.
+#[no_mangle]
+pub extern "system" fn Java_com_example_riftmobile_sdk_RiftNative_setMute(
+    _env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    muted: jboolean,
+) -> jint {
+    if handle == 0 {
+        return -1;
+    }
+    let handle = with_handle(handle);
+    handle.handle.set_mute(muted != 0);
+    0
+}
+
+/// Start a call to a specific peer.
+/// Returns the session ID as a hex string, or null on failure.
+#[no_mangle]
+pub extern "system" fn Java_com_example_riftmobile_sdk_RiftNative_startCall(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    peer_hex: JString,
+) -> jobject {
+    if handle == 0 {
+        return std::ptr::null_mut();
+    }
+    let peer_hex = env
+        .get_string(&peer_hex)
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let peer_bytes = match hex::decode(&peer_hex) {
+        Ok(bytes) if bytes.len() == 32 => {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+            arr
+        }
+        _ => {
+            log_error("invalid peer id hex");
+            return std::ptr::null_mut();
+        }
+    };
+    let peer_id = rift_core::PeerId(peer_bytes);
+    let handle = with_handle(handle);
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        handle.rt.block_on(handle.handle.start_call(peer_id))
+    }));
+    match result {
+        Ok(Ok(session)) => {
+            let session_hex = hex::encode(session.0);
+            match env.new_string(session_hex) {
+                Ok(jstr) => JObject::from(jstr).into_raw(),
+                Err(_) => std::ptr::null_mut(),
+            }
+        }
+        Ok(Err(err)) => {
+            log_error(&format!("start_call failed: {err}"));
+            std::ptr::null_mut()
+        }
+        Err(_) => {
+            log_error("start_call panicked");
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// Accept an incoming call.
+#[no_mangle]
+pub extern "system" fn Java_com_example_riftmobile_sdk_RiftNative_acceptCall(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    session_hex: JString,
+) -> jint {
+    if handle == 0 {
+        return -1;
+    }
+    let session_hex = env
+        .get_string(&session_hex)
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let session_bytes = match hex::decode(&session_hex) {
+        Ok(bytes) if bytes.len() == 32 => {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+            arr
+        }
+        _ => {
+            log_error("invalid session id hex");
+            return -1;
+        }
+    };
+    let session = rift_protocol::SessionId(session_bytes);
+    let handle = with_handle(handle);
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        handle.rt.block_on(handle.handle.accept_call(session))
+    }));
+    match result {
+        Ok(Ok(_)) => 0,
+        Ok(Err(err)) => {
+            log_error(&format!("accept_call failed: {err}"));
+            -1
+        }
+        Err(_) => {
+            log_error("accept_call panicked");
+            -1
+        }
+    }
+}
+
+/// Decline an incoming call with optional reason.
+#[no_mangle]
+pub extern "system" fn Java_com_example_riftmobile_sdk_RiftNative_declineCall(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    session_hex: JString,
+    reason: JString,
+) -> jint {
+    if handle == 0 {
+        return -1;
+    }
+    let session_hex = env
+        .get_string(&session_hex)
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let session_bytes = match hex::decode(&session_hex) {
+        Ok(bytes) if bytes.len() == 32 => {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+            arr
+        }
+        _ => {
+            log_error("invalid session id hex");
+            return -1;
+        }
+    };
+    let reason = if reason.is_null() {
+        None
+    } else {
+        env.get_string(&reason)
+            .ok()
+            .map(|s| s.to_string_lossy().to_string())
+    };
+    let session = rift_protocol::SessionId(session_bytes);
+    let handle = with_handle(handle);
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        handle.rt.block_on(handle.handle.decline_call(session, reason.as_deref()))
+    }));
+    match result {
+        Ok(Ok(_)) => 0,
+        Ok(Err(err)) => {
+            log_error(&format!("decline_call failed: {err}"));
+            -1
+        }
+        Err(_) => {
+            log_error("decline_call panicked");
+            -1
+        }
+    }
+}
+
+/// End an active call.
+#[no_mangle]
+pub extern "system" fn Java_com_example_riftmobile_sdk_RiftNative_endCall(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    session_hex: JString,
+) -> jint {
+    if handle == 0 {
+        return -1;
+    }
+    let session_hex = env
+        .get_string(&session_hex)
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let session_bytes = match hex::decode(&session_hex) {
+        Ok(bytes) if bytes.len() == 32 => {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+            arr
+        }
+        _ => {
+            log_error("invalid session id hex");
+            return -1;
+        }
+    };
+    let session = rift_protocol::SessionId(session_bytes);
+    let handle = with_handle(handle);
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        handle.rt.block_on(handle.handle.end_call(session))
+    }));
+    match result {
+        Ok(Ok(_)) => 0,
+        Ok(Err(err)) => {
+            log_error(&format!("end_call failed: {err}"));
+            -1
+        }
+        Err(_) => {
+            log_error("end_call panicked");
+            -1
+        }
+    }
+}
+
 /// Poll the next event and return it as a Java object.
 #[no_mangle]
 pub extern "system" fn Java_com_example_riftmobile_sdk_RiftNative_pollEvent(
@@ -441,6 +648,27 @@ pub extern "system" fn Java_com_example_riftmobile_sdk_RiftNative_pollEvent(
             "peer_left".to_string(),
             Some(peer.to_hex()),
             None,
+            None,
+            None,
+        ),
+        RiftEvent::IncomingCall { session, from, rndzv_srt_uri } => (
+            "incoming_call".to_string(),
+            Some(from.to_hex()),
+            rndzv_srt_uri, // Pass SRT URI as text if present
+            None,
+            Some(hex::encode(session.0)), // Session ID in status field
+        ),
+        RiftEvent::CallStateChanged { session, state } => (
+            "call_state".to_string(),
+            None,
+            Some(format!("{:?}", state)), // Call state as text
+            None,
+            Some(hex::encode(session.0)), // Session ID in status field
+        ),
+        RiftEvent::AudioLevel { peer, level } => (
+            "audio_level".to_string(),
+            Some(peer.to_hex()),
+            Some(format!("{:.3}", level)), // Level as text
             None,
             None,
         ),

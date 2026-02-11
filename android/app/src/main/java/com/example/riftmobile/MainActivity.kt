@@ -1,12 +1,15 @@
 package com.example.riftmobile
 
 import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.core.content.ContextCompat
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -14,6 +17,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Divider
 import androidx.compose.material3.MaterialTheme
@@ -22,6 +26,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -29,6 +34,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
@@ -55,9 +61,28 @@ class MainActivity : ComponentActivity() {
         viewModel.onMicPermission(granted)
     }
 
+    private val requestNotificationPermission = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        viewModel.onNotificationPermission(granted)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         viewModel.initHandle(this, filesDir.absolutePath)
+
+        // Request notification permission on Android 13+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED) {
+                requestNotificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+            } else {
+                viewModel.onNotificationPermission(true)
+            }
+        } else {
+            viewModel.onNotificationPermission(true)
+        }
+
         setContent {
             MaterialTheme {
                 Surface {
@@ -80,6 +105,18 @@ data class PeerItem(
     val id: String,
 )
 
+data class IncomingCallState(
+    val sessionId: String,
+    val from: String,
+    val rndzvSrtUri: String? = null
+)
+
+data class ActiveCallState(
+    val sessionId: String,
+    val peerId: String,
+    val state: String
+)
+
 enum class Screen {
     Home,
     Call,
@@ -88,6 +125,7 @@ enum class Screen {
 
 class MainViewModel : ViewModel() {
     private val timeFormat = SimpleDateFormat("HH:mm:ss", Locale.US)
+    private var appContext: android.content.Context? = null
 
     var screen by mutableStateOf(Screen.Home)
         private set
@@ -110,13 +148,23 @@ class MainViewModel : ViewModel() {
     var inputText by mutableStateOf("")
     var pttPressed by mutableStateOf(false)
     var micPermission by mutableStateOf(false)
+    var notificationPermission by mutableStateOf(false)
     var debugText by mutableStateOf("")
 
     var audioQuality by mutableStateOf("medium")
     var turnServers by mutableStateOf("")
 
+    // Call state
+    var incomingCall by mutableStateOf<IncomingCallState?>(null)
+        private set
+    var activeCall by mutableStateOf<ActiveCallState?>(null)
+        private set
+    var muted by mutableStateOf(false)
+        private set
+
     fun initHandle(context: android.content.Context, basePath: String) {
         if (client != null) return
+        appContext = context.applicationContext
         val newClient = RiftClient(context, basePath)
         val ok = newClient.init()
         client = newClient
@@ -169,6 +217,46 @@ class MainViewModel : ViewModel() {
                         is RiftEvent.Status -> {
                             statusText = event.text
                         }
+                        is RiftEvent.IncomingCall -> {
+                            incomingCall = IncomingCallState(
+                                sessionId = event.sessionId,
+                                from = event.from,
+                                rndzvSrtUri = event.rndzvSrtUri
+                            )
+                        }
+                        is RiftEvent.CallStateChanged -> {
+                            when (event.state.lowercase()) {
+                                "active", "connected" -> {
+                                    // Call became active
+                                    val incoming = incomingCall
+                                    if (incoming != null && incoming.sessionId == event.sessionId) {
+                                        activeCall = ActiveCallState(
+                                            sessionId = event.sessionId,
+                                            peerId = incoming.from,
+                                            state = event.state
+                                        )
+                                        incomingCall = null
+                                    } else if (activeCall?.sessionId == event.sessionId) {
+                                        activeCall = activeCall?.copy(state = event.state)
+                                    }
+                                }
+                                "ended", "terminated", "failed" -> {
+                                    if (activeCall?.sessionId == event.sessionId) {
+                                        activeCall = null
+                                        stopForegroundService()
+                                    }
+                                    if (incomingCall?.sessionId == event.sessionId) {
+                                        incomingCall = null
+                                    }
+                                }
+                                else -> {
+                                    activeCall = activeCall?.copy(state = event.state)
+                                }
+                            }
+                        }
+                        is RiftEvent.AudioLevel -> {
+                            // Could use this to show audio level indicators
+                        }
                     }
                 }
             }
@@ -179,7 +267,23 @@ class MainViewModel : ViewModel() {
         micPermission = granted
     }
 
-    fun setScreen(next: Screen) {
+    fun onNotificationPermission(granted: Boolean) {
+        notificationPermission = granted
+    }
+
+    private fun startForegroundService(sessionId: String, peerId: String) {
+        appContext?.let { ctx ->
+            RiftForegroundService.startCall(ctx, sessionId, peerId)
+        }
+    }
+
+    private fun stopForegroundService() {
+        appContext?.let { ctx ->
+            RiftForegroundService.endCall(ctx)
+        }
+    }
+
+    fun navigateTo(next: Screen) {
         screen = next
     }
 
@@ -283,15 +387,119 @@ class MainViewModel : ViewModel() {
         if (channel.isEmpty()) return
         generatedInvite = client.generateInvite(channel, password.ifEmpty { null }, knownPeers) ?: ""
     }
+
+    fun startCall(peerId: String) {
+        val client = client ?: return
+        if (!connected) return
+        viewModelScope.launch(Dispatchers.IO) {
+            val sessionId = client.startCall(peerId)
+            if (sessionId != null) {
+                withContext(Dispatchers.Main) {
+                    activeCall = ActiveCallState(
+                        sessionId = sessionId,
+                        peerId = peerId,
+                        state = "connecting"
+                    )
+                    startForegroundService(sessionId, peerId)
+                }
+            } else {
+                withContext(Dispatchers.Main) {
+                    statusText = "call failed"
+                }
+            }
+        }
+    }
+
+    fun acceptCall() {
+        val call = incomingCall ?: return
+        val client = client ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            val ok = client.acceptCall(call.sessionId)
+            if (ok) {
+                withContext(Dispatchers.Main) {
+                    activeCall = ActiveCallState(
+                        sessionId = call.sessionId,
+                        peerId = call.from,
+                        state = "active"
+                    )
+                    incomingCall = null
+                    startForegroundService(call.sessionId, call.from)
+                }
+            }
+        }
+    }
+
+    fun declineCall() {
+        val call = incomingCall ?: return
+        val client = client ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            client.declineCall(call.sessionId)
+            withContext(Dispatchers.Main) {
+                incomingCall = null
+            }
+        }
+    }
+
+    fun endCall() {
+        val call = activeCall ?: return
+        val client = client ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            client.endCall(call.sessionId)
+            withContext(Dispatchers.Main) {
+                activeCall = null
+                stopForegroundService()
+            }
+        }
+    }
+
+    fun toggleMute() {
+        val client = client ?: return
+        val newMuted = !muted
+        if (client.setMute(newMuted)) {
+            muted = newMuted
+        }
+    }
 }
 
 @Composable
 fun RiftApp(viewModel: MainViewModel, onRequestMic: () -> Unit) {
+    // Show incoming call dialog
+    viewModel.incomingCall?.let { call ->
+        IncomingCallDialog(
+            from = call.from.take(16) + "...",
+            onAccept = { viewModel.acceptCall() },
+            onDecline = { viewModel.declineCall() }
+        )
+    }
+
     when (viewModel.screen) {
         Screen.Home -> HomeScreen(viewModel, onRequestMic)
         Screen.Call -> CallScreen(viewModel)
         Screen.Settings -> SettingsScreen(viewModel)
     }
+}
+
+@Composable
+fun IncomingCallDialog(
+    from: String,
+    onAccept: () -> Unit,
+    onDecline: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDecline,
+        title = { Text("Incoming Call") },
+        text = { Text("Call from $from") },
+        confirmButton = {
+            Button(onClick = onAccept) {
+                Text("Accept")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDecline) {
+                Text("Decline")
+            }
+        }
+    )
 }
 
 @Composable
@@ -362,7 +570,7 @@ fun HomeScreen(viewModel: MainViewModel, onRequestMic: () -> Unit) {
         Spacer(modifier = Modifier.height(8.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(onClick = { viewModel.generateInvite() }) { Text("Generate Invite") }
-            OutlinedButton(onClick = { viewModel.setScreen(Screen.Settings) }) { Text("Settings") }
+            OutlinedButton(onClick = { viewModel.navigateTo(Screen.Settings) }) { Text("Settings") }
         }
         if (viewModel.generatedInvite.isNotEmpty()) {
             Spacer(modifier = Modifier.height(8.dp))
@@ -380,6 +588,33 @@ fun CallScreen(viewModel: MainViewModel) {
             Text("Channel: ${viewModel.channelName}", fontWeight = FontWeight.Bold)
             Text("Peers: ${viewModel.peerCount}")
         }
+
+        // Active call banner
+        viewModel.activeCall?.let { call ->
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(MaterialTheme.colorScheme.primaryContainer)
+                    .padding(12.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column {
+                    Text("In call with: ${call.peerId.take(12)}...", fontWeight = FontWeight.Bold)
+                    Text("Status: ${call.state}", style = MaterialTheme.typography.bodySmall)
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = { viewModel.toggleMute() }) {
+                        Text(if (viewModel.muted) "Unmute" else "Mute")
+                    }
+                    Button(onClick = { viewModel.endCall() }) {
+                        Text("End")
+                    }
+                }
+            }
+        }
+
         Spacer(modifier = Modifier.height(8.dp))
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             Column(modifier = Modifier.weight(0.35f)) {
@@ -388,7 +623,21 @@ fun CallScreen(viewModel: MainViewModel) {
                     modifier = Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant)
                 ) {
                     items(viewModel.peers) { peer ->
-                        Text(peer.id, modifier = Modifier.padding(6.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(6.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(peer.id.take(12) + "...", modifier = Modifier.weight(1f))
+                            if (viewModel.activeCall == null) {
+                                TextButton(
+                                    onClick = { viewModel.startCall(peer.id) },
+                                    modifier = Modifier.padding(0.dp)
+                                ) {
+                                    Text("Call", style = MaterialTheme.typography.bodySmall)
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -415,7 +664,7 @@ fun CallScreen(viewModel: MainViewModel) {
         Divider()
         Spacer(modifier = Modifier.height(8.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(onClick = { viewModel.setScreen(Screen.Settings) }) { Text("Settings") }
+            OutlinedButton(onClick = { viewModel.navigateTo(Screen.Settings) }) { Text("Settings") }
             OutlinedButton(onClick = { viewModel.disconnect() }) { Text("Leave") }
         }
     }
@@ -447,8 +696,8 @@ fun SettingsScreen(viewModel: MainViewModel) {
         )
         Spacer(modifier = Modifier.height(12.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = { viewModel.setScreen(Screen.Home) }) { Text("Back") }
-            OutlinedButton(onClick = { viewModel.setScreen(Screen.Call) }) { Text("Call") }
+            Button(onClick = { viewModel.navigateTo(Screen.Home) }) { Text("Back") }
+            OutlinedButton(onClick = { viewModel.navigateTo(Screen.Call) }) { Text("Call") }
         }
     }
 }
@@ -495,9 +744,9 @@ fun PttButton(pressed: Boolean, onDown: () -> Unit, onUp: () -> Unit, enabled: B
             .fillMaxWidth()
             .height(80.dp)
             .background(color)
-            .pointerInput(Unit) {
+            .pointerInput(enabled) {
                 if (enabled) {
-                    androidx.compose.foundation.gestures.detectTapGestures(
+                    detectTapGestures(
                         onPress = {
                             onDown()
                             tryAwaitRelease()

@@ -1,8 +1,8 @@
 buildscript {
     ext {
-        kotlin_version = "1.9.22"
-        agp_version = "8.2.2"
-        compose_bom = "2024.04.01"
+        kotlin_version = "2.0.0"
+        agp_version = "8.5.0"
+        compose_bom = "2024.09.00"
     }
     repositories {
         google()
@@ -11,5 +11,6 @@ buildscript {
     dependencies {
         classpath "com.android.tools.build:gradle:$agp_version"
         classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
+        classpath "org.jetbrains.kotlin:compose-compiler-gradle-plugin:$kotlin_version"
     }
 }

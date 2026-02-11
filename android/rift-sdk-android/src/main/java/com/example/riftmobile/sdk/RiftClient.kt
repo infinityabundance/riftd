@@ -92,6 +92,31 @@ class RiftClient(private val context: Context, private val configPath: String?) 
         return RiftNative.stopPtt(handle) == 0
     }
 
+    fun setMute(muted: Boolean): Boolean {
+        if (handle == 0L) return false
+        return RiftNative.setMute(handle, muted) == 0
+    }
+
+    fun startCall(peerHex: String): String? {
+        if (handle == 0L) return null
+        return RiftNative.startCall(handle, peerHex)
+    }
+
+    fun acceptCall(sessionHex: String): Boolean {
+        if (handle == 0L) return false
+        return RiftNative.acceptCall(handle, sessionHex) == 0
+    }
+
+    fun declineCall(sessionHex: String, reason: String? = null): Boolean {
+        if (handle == 0L) return false
+        return RiftNative.declineCall(handle, sessionHex, reason) == 0
+    }
+
+    fun endCall(sessionHex: String): Boolean {
+        if (handle == 0L) return false
+        return RiftNative.endCall(handle, sessionHex) == 0
+    }
+
     private fun startPolling() {
         if (pollJob != null) return
         pollJob = scope.launch {
@@ -119,6 +144,23 @@ class RiftClient(private val context: Context, private val configPath: String?) 
             }
             "peer_joined" -> _events.tryEmit(RiftEvent.PeerJoined(event.from ?: ""))
             "peer_left" -> _events.tryEmit(RiftEvent.PeerLeft(event.from ?: ""))
+            "incoming_call" -> _events.tryEmit(
+                RiftEvent.IncomingCall(
+                    sessionId = event.status ?: "",
+                    from = event.from ?: "",
+                    rndzvSrtUri = event.text
+                )
+            )
+            "call_state" -> _events.tryEmit(
+                RiftEvent.CallStateChanged(
+                    sessionId = event.status ?: "",
+                    state = event.text ?: "unknown"
+                )
+            )
+            "audio_level" -> {
+                val level = event.text?.toFloatOrNull() ?: 0f
+                _events.tryEmit(RiftEvent.AudioLevel(event.from ?: "", level))
+            }
             "stats" -> _events.tryEmit(RiftEvent.Stats(event.peers ?: 0))
             "security" -> _events.tryEmit(RiftEvent.Security(event.text ?: ""))
             "fingerprint" -> _events.tryEmit(
