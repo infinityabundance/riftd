@@ -120,15 +120,18 @@ theme = "dark"
 ```
 
 ## Crates
-- `rift-core`: identity, keys, invites, core types.
-- `rift-protocol`: versioned framing + on-the-wire types.
-- `rift-discovery`: LAN mDNS discovery.
-- `rift-nat`: UDP hole punching.
-- `rift-rndzv`: Predictive Rendezvous networking layer (SRTs, scheduling, runner).
-- `rift-mesh`: mesh routing, relay, call/session handling.
-- `rift-media`: audio capture/playback and Opus codec.
+- [`rift-core`](https://crates.io/crates/rift-core): identity, keys, invites, core types.
+- [`rift-protocol`](https://crates.io/crates/rift-protocol): versioned framing + on-the-wire types.
+- [`rift-discovery`](https://crates.io/crates/rift-discovery): LAN mDNS discovery.
+- [`rift-dht`](https://crates.io/crates/rift-dht): distributed hash table for peer discovery.
+- [`rift-nat`](https://crates.io/crates/rift-nat): UDP hole punching.
+- [`rift-rndzv`](https://crates.io/crates/rift-rndzv): Predictive Rendezvous networking layer (SRTs, scheduling, runner).
+- [`rift-mesh`](https://crates.io/crates/rift-mesh): mesh routing, relay, call/session handling.
+- [`rift-media`](https://crates.io/crates/rift-media): audio capture/playback and Opus codec.
+- [`rift-metrics`](https://crates.io/crates/rift-metrics): metrics and telemetry.
+- [`rift-sdk`](https://crates.io/crates/rift-sdk): high-level SDK for embedding Rift (Rust + C FFI).
+- [`rift-wasm`](https://crates.io/crates/rift-wasm): WebAssembly bindings for browser clients.
 - `bin/rift`: TUI client.
-- `rift-sdk`: high-level SDK for embedding Rift (Rust + C FFI).
 
 ## Docs
 - `CODE.md`: high-level code map.
