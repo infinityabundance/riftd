@@ -10,6 +10,7 @@
   <a href="https://crates.io/crates/rift-mesh"><img src="https://img.shields.io/crates/v/rift-mesh.svg" alt="crates.io"></a>
   <a href="https://docs.rs/rift-mesh"><img src="https://docs.rs/rift-mesh/badge.svg" alt="docs.rs"></a>
   <a href="https://github.com/infinityabundance/riftd/blob/main/LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg" alt="License"></a>
+  <a href="https://doi.org/10.5281/zenodo.18528430"><img src="https://zenodo.org/badge/DOI/10.5281/zenodo.18528430.svg" alt="DOI"></a>
 </p>
 
 <p align="center">
@@ -68,6 +69,12 @@ while let Some(event) = node.next_event().await {
 | [rift-nat](https://crates.io/crates/rift-nat) | STUN/TURN support |
 | [rift-rndzv](https://crates.io/crates/rift-rndzv) | Predictive Rendezvous |
 | [rift-sdk](https://crates.io/crates/rift-sdk) | High-level API |
+
+## Citation
+
+If you use riftd in academic work, please cite:
+
+> de Beer, R. (2026). *Predictive Rendezvous: Time–Intent–Deterministic Peer Coordination Without Infrastructure*. Zenodo. https://doi.org/10.5281/zenodo.18528430
 
 ## License
 

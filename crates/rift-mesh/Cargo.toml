@@ -1,21 +1,22 @@
 [package]
 name = "rift-mesh"
-version = "0.1.1"
+version = "0.1.3"
 edition = "2021"
 description = "Mesh networking, session management, and E2EE for Rift P2P"
 license = "Apache-2.0 OR MIT"
 repository = "https://github.com/infinityabundance/riftd"
+documentation = "https://docs.rs/rift-mesh"
 keywords = ["p2p", "mesh", "networking", "e2ee"]
 categories = ["network-programming", "cryptography"]
 
 [dependencies]
 anyhow = "1"
-rift-core = { path = "../rift-core", version = "0.1.1" }
-rift-discovery = { path = "../rift-discovery", version = "0.1.1" }
-rift-nat = { path = "../rift-nat", version = "0.1.1" }
-rift-protocol = { path = "../rift-protocol", version = "0.1.1" }
-rift-metrics = { path = "../rift-metrics", version = "0.1.1" }
-rift-rndzv = { path = "../rift-rndzv", version = "0.1.1", optional = true }
+rift-core = { path = "../rift-core", version = "0.1.3" }
+rift-discovery = { path = "../rift-discovery", version = "0.1.3" }
+rift-nat = { path = "../rift-nat", version = "0.1.3" }
+rift-protocol = { path = "../rift-protocol", version = "0.1.3" }
+rift-metrics = { path = "../rift-metrics", version = "0.1.3" }
+rift-rndzv = { path = "../rift-rndzv", version = "0.1.3", optional = true }
 snow = "0.9"
 tokio = { version = "1", features = ["macros", "net", "rt", "sync", "time"] }
 tokio-stream = "0.1"

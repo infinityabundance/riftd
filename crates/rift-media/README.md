@@ -10,6 +10,7 @@
   <a href="https://crates.io/crates/rift-media"><img src="https://img.shields.io/crates/v/rift-media.svg" alt="crates.io"></a>
   <a href="https://docs.rs/rift-media"><img src="https://docs.rs/rift-media/badge.svg" alt="docs.rs"></a>
   <a href="https://github.com/infinityabundance/riftd/blob/main/LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg" alt="License"></a>
+  <a href="https://doi.org/10.5281/zenodo.18528430"><img src="https://zenodo.org/badge/DOI/10.5281/zenodo.18528430.svg" alt="DOI"></a>
 </p>
 
 <p align="center">
@@ -58,6 +59,12 @@ capture.start(|samples| { /* process samples */ })?;
 | [rift-protocol](https://crates.io/crates/rift-protocol) | Voice frame message types |
 | [rift-mesh](https://crates.io/crates/rift-mesh) | Sends/receives voice over mesh |
 | [rift-sdk](https://crates.io/crates/rift-sdk) | High-level voice call API |
+
+## Citation
+
+If you use riftd in academic work, please cite:
+
+> de Beer, R. (2026). *Predictive Rendezvous: Time–Intent–Deterministic Peer Coordination Without Infrastructure*. Zenodo. https://doi.org/10.5281/zenodo.18528430
 
 ## License
 
