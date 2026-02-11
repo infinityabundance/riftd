@@ -5,9 +5,13 @@
 //! - per-channel encryption key
 //! - known peers and ICE-style candidates
 
+use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use flate2::read::GzDecoder;
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -15,8 +19,10 @@ use serde::{Deserialize, Serialize};
 use crate::CoreError;
 use base64::Engine;
 
-/// URI prefix for invites.
+/// URI prefix for invites (uncompressed, legacy).
 const INVITE_PREFIX: &str = "rift://join/";
+/// URI prefix for compressed invites.
+const INVITE_PREFIX_Z: &str = "rift://z/";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Invite {
@@ -61,24 +67,46 @@ pub fn generate_invite(
     }
 }
 
-/// Encode the invite as a URL-safe string.
+/// Encode the invite as a URL-safe string with gzip compression.
 pub fn encode_invite(invite: &Invite) -> String {
     let bytes = bincode::serialize(invite).expect("serialize invite");
-    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
-    format!("{}{}", INVITE_PREFIX, encoded)
+
+    // Compress with gzip
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::best());
+    encoder.write_all(&bytes).expect("gzip compress");
+    let compressed = encoder.finish().expect("gzip finish");
+
+    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(compressed);
+    format!("{}{}", INVITE_PREFIX_Z, encoded)
 }
 
 /// Decode an invite string back to the structured form.
+/// Supports both compressed (rift://z/) and legacy uncompressed (rift://join/) formats.
 pub fn decode_invite(url: &str) -> Result<Invite, CoreError> {
-    if !url.starts_with(INVITE_PREFIX) {
-        return Err(CoreError::InvalidInvite);
+    if url.starts_with(INVITE_PREFIX_Z) {
+        // Compressed format
+        let payload = &url[INVITE_PREFIX_Z.len()..];
+        let compressed = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(payload)
+            .map_err(|_| CoreError::InvalidInvite)?;
+
+        let mut decoder = GzDecoder::new(&compressed[..]);
+        let mut bytes = Vec::new();
+        decoder.read_to_end(&mut bytes).map_err(|_| CoreError::InvalidInvite)?;
+
+        let invite: Invite = bincode::deserialize(&bytes)?;
+        Ok(invite)
+    } else if url.starts_with(INVITE_PREFIX) {
+        // Legacy uncompressed format
+        let payload = &url[INVITE_PREFIX.len()..];
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(payload)
+            .map_err(|_| CoreError::InvalidInvite)?;
+        let invite: Invite = bincode::deserialize(&bytes)?;
+        Ok(invite)
+    } else {
+        Err(CoreError::InvalidInvite)
     }
-    let payload = &url[INVITE_PREFIX.len()..];
-    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(payload)
-        .map_err(|_| CoreError::InvalidInvite)?;
-    let invite: Invite = bincode::deserialize(&bytes)?;
-    Ok(invite)
 }
 
 /// Timestamp helper for invite creation.
