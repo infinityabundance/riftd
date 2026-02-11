@@ -1,6 +1,6 @@
 [package]
 name = "rift-wasm"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 description = "WebAssembly bindings for Rift P2P browser clients"
 license = "Apache-2.0 OR MIT"
@@ -23,8 +23,8 @@ bincode = "1"
 getrandom = { version = "0.2", features = ["js"] }
 aes-gcm = "0.10"
 
-rift-core = { path = "../rift-core", version = "0.1.3" }
-rift-protocol = { path = "../rift-protocol", version = "0.1.3" }
+rift-core = { path = "../rift-core", version = "0.1.4" }
+rift-protocol = { path = "../rift-protocol", version = "0.1.4" }
 
 [features]
 wasm = []
