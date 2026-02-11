@@ -21,7 +21,7 @@ use serde_json::json;
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::Instant;
 
-use rift_core::{decode_invite, generate_invite, Identity, Invite, PeerId, KeyStore};
+use rift_core::{decode_invite, encode_invite, generate_invite, Identity, Invite, PeerId, KeyStore};
 use rift_dht::{DhtConfig as RiftDhtConfig, DhtHandle, PeerEndpointInfo};
 use rift_discovery::local_ipv4_addrs;
 use rift_media::{
@@ -498,6 +498,8 @@ struct SessionRuntime {
     _voice: Option<Arc<VoiceRuntime>>,
     _dht: Option<DhtHandle>,
     pending_call_srt: Arc<StdMutex<HashMap<SessionId, String>>>,
+    /// Encoded invite string for the current channel (if internet mode).
+    invite_string: Option<String>,
 }
 
 /// Primary SDK handle exposed to callers.
@@ -686,6 +688,8 @@ impl RiftHandle {
         } else {
             None
         };
+        // Encode invite for sharing
+        let invite_string = invite_for_key.as_ref().map(|inv| encode_invite(inv));
         let e2ee_key = derive_e2ee_key(
             name,
             password,
@@ -1038,6 +1042,7 @@ impl RiftHandle {
             _voice: voice,
             _dht: dht,
             pending_call_srt,
+            invite_string,
         });
         Ok(())
     }
@@ -1050,6 +1055,12 @@ impl RiftHandle {
         }
         *runtime_guard = None;
         Ok(())
+    }
+
+    /// Get the invite string for the current channel (if available).
+    pub async fn get_invite(&self) -> Option<String> {
+        let runtime_guard = self.runtime.lock().await;
+        runtime_guard.as_ref().and_then(|rt| rt.invite_string.clone())
     }
 
     /// Send a chat message to all peers.

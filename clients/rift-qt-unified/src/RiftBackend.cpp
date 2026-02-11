@@ -164,6 +164,16 @@ bool RiftBackend::endCall(const QString& sessionHex)
     return rift_end_call(m_handle, session) == 0;
 }
 
+QString RiftBackend::getInvite()
+{
+    if (!m_handle) return QString();
+    char* invite = rift_get_invite(m_handle);
+    if (!invite) return QString();
+    QString result = QString::fromUtf8(invite);
+    rift_free_string(invite);
+    return result;
+}
+
 void RiftBackend::pollEvents()
 {
     if (!m_handle) return;

@@ -60,6 +60,8 @@ extern "C" {
     int rift_end_call(RiftHandleC* handle, SessionIdC session);
     int rift_next_event(RiftHandleC* handle, RiftEventC* out_event);
     void rift_event_free(RiftEventC* event);
+    char* rift_get_invite(RiftHandleC* handle);
+    void rift_free_string(char* s);
 }
 
 class RiftBackend : public QObject {
@@ -96,6 +98,7 @@ public:
     Q_INVOKABLE bool acceptCall(const QString& sessionHex);
     Q_INVOKABLE bool declineCall(const QString& sessionHex, const QString& reason = QString());
     Q_INVOKABLE bool endCall(const QString& sessionHex);
+    Q_INVOKABLE QString getInvite();
 
 signals:
     void statusChanged();

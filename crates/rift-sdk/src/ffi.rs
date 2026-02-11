@@ -236,6 +236,44 @@ pub extern "C" fn rift_leave_channel(handle: *mut RiftHandleC, name: *const c_ch
     }
 }
 
+/// Get the invite string for the current channel.
+///
+/// Returns a newly allocated string that must be freed with `rift_free_string`.
+/// Returns null if not joined or no invite available.
+///
+/// # Safety
+/// `handle` must be valid.
+#[no_mangle]
+pub extern "C" fn rift_get_invite(handle: *mut RiftHandleC) -> *mut c_char {
+    if handle.is_null() {
+        return ptr::null_mut();
+    }
+    let handle = unsafe { &mut *handle };
+    let invite = handle.runtime.block_on(handle.handle.get_invite());
+    match invite {
+        Some(s) => {
+            match CString::new(s) {
+                Ok(cs) => cs.into_raw(),
+                Err(_) => ptr::null_mut(),
+            }
+        }
+        None => ptr::null_mut(),
+    }
+}
+
+/// Free a string returned by `rift_get_invite`.
+///
+/// # Safety
+/// `s` must be a string returned by `rift_get_invite` or null.
+#[no_mangle]
+pub extern "C" fn rift_free_string(s: *mut c_char) {
+    if !s.is_null() {
+        unsafe {
+            drop(CString::from_raw(s));
+        }
+    }
+}
+
 /// Send a chat message to peers.
 ///
 /// # Safety

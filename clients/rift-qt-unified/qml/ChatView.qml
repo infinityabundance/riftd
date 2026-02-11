@@ -7,6 +7,65 @@ Page {
     signal disconnected()
     signal openSettings()
 
+    // Invite dialog
+    Dialog {
+        id: inviteDialog
+        title: "Channel Invite"
+        modal: true
+        anchors.centerIn: parent
+        width: Math.min(parent.width - 40, 600)
+
+        property string inviteText: ""
+
+        ColumnLayout {
+            spacing: 12
+            width: parent.width
+
+            Label {
+                text: "Share this command to invite others:"
+                wrapMode: Text.Wrap
+            }
+
+            Rectangle {
+                Layout.fillWidth: true
+                height: inviteCommand.implicitHeight + 16
+                color: "#2d2d2d"
+                radius: 4
+
+                TextEdit {
+                    id: inviteCommand
+                    anchors.fill: parent
+                    anchors.margins: 8
+                    text: "cargo run -p rift -- join --invite \"" + inviteDialog.inviteText + "\" --voice"
+                    wrapMode: TextEdit.Wrap
+                    readOnly: true
+                    selectByMouse: true
+                    color: "#e0e0e0"
+                    font.family: "monospace"
+                }
+            }
+
+            RowLayout {
+                Layout.alignment: Qt.AlignRight
+                spacing: 8
+
+                Button {
+                    text: "Copy"
+                    onClicked: {
+                        inviteCommand.selectAll()
+                        inviteCommand.copy()
+                        inviteCommand.deselect()
+                    }
+                }
+
+                Button {
+                    text: "Close"
+                    onClicked: inviteDialog.close()
+                }
+            }
+        }
+    }
+
     header: ToolBar {
         RowLayout {
             anchors.fill: parent
@@ -21,6 +80,17 @@ Page {
 
             Label {
                 text: "Peers: " + backend.peers.length
+            }
+
+            ToolButton {
+                text: "Invite"
+                onClicked: {
+                    var invite = backend.getInvite()
+                    if (invite.length > 0) {
+                        inviteDialog.inviteText = invite
+                        inviteDialog.open()
+                    }
+                }
             }
 
             ToolButton {
