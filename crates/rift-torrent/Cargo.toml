@@ -1,0 +1,28 @@
+[package]
+name = "rift-torrent"
+version = "0.1.4"
+edition = "2021"
+description = "SRT-based torrent peer discovery for zero-infrastructure P2P"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/infinityabundance/riftd"
+documentation = "https://docs.rs/rift-torrent"
+keywords = ["torrent", "p2p", "rendezvous", "bittorrent", "srt"]
+categories = ["network-programming"]
+
+[dependencies]
+rift-rndzv = { path = "../rift-rndzv", version = "0.1.4" }
+rift-core = { path = "../rift-core", version = "0.1.4" }
+blake3 = "1"
+sha1 = "0.10"
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+thiserror = "1"
+tokio = { version = "1", features = ["sync", "time", "rt"] }
+urlencoding = "2"
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "test-util", "macros"] }
+
+[package.metadata.docs.rs]
+all-features = true

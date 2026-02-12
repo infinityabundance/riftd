@@ -182,6 +182,7 @@ theme = "dark"
 - [`rift-sdk`](https://crates.io/crates/rift-sdk): high-level SDK for embedding Rift (Rust + C FFI + JNI).
 - [`rift-wasm`](https://crates.io/crates/rift-wasm): WebAssembly bindings for browser clients.
 - [`rift-web-chat`](https://crates.io/crates/rift-web-chat): WebSocket-based browser chat client (WASM).
+- [`rift-torrent`](https://crates.io/crates/rift-torrent): SRT-based torrent peer discovery (zero-infrastructure).
 - `bin/rift`: TUI client.
 - `clients/rift-qt-unified`: Qt6/QML desktop client (Windows / macOS / Linux).
 - `android/`: Kotlin/Compose Android app with JNI bindings.
