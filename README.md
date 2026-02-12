@@ -92,6 +92,26 @@ JAVA_HOME=/usr/lib/jvm/java-17-openjdk ./gradlew assembleDebug
 There is an early WebAssembly browser spike for text-only chat over a WebSocket relay.
 See `README.browser.md` for build and run instructions.
 
+## SRT-Based Torrents
+The `rift-torrent` crate enables zero-infrastructure torrent peer discovery using Predictive Rendezvous. Instead of trackers or DHT bootstrap nodes, peers derive identical rendezvous schedules from the infohash alone.
+
+```rust
+use rift_torrent::{MagnetUri, SwarmSrt, InfoHash};
+
+// Parse a magnet URI
+let magnet = MagnetUri::parse("magnet:?xt=urn:btih:...")?;
+
+// Derive SRT from infohash (no tracker needed!)
+let srt = SwarmSrt::from_infohash(*magnet.primary_hash());
+
+// Share the SRT-enhanced magnet
+let enhanced = magnet.with_srt(srt.to_uri()?);
+println!("{}", enhanced.to_uri());
+// magnet:?xt=urn:btih:...&xs=riftd-srt://v1?space=...&seed=...
+```
+
+See `docs/rift-torrent.md` for detailed documentation on how it works.
+
 ## Quick Start
 1. Build:
 ```bash
@@ -190,6 +210,7 @@ theme = "dark"
 ## Docs
 - `CODE.md`: high-level code map.
 - `PROTOCOL.md`: protocol framing and message types.
+- `docs/rift-torrent.md`: SRT-based torrent peer discovery.
 - `docs/srt-tooling.md`: SRT generation and inspection tooling.
 - `docs/srt-invites.md`: SRT invite UX and sharing patterns.
 - `docs/predictive-rendezvous.md`: Predictive Rendezvous architecture and SRT format.
