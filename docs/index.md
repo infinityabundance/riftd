@@ -1,7 +1,8 @@
 # Predictive Rendezvous Documentation Index
 
 ## Core Concepts
-- [predictive-rendezvous.md](predictive-rendezvous.md) — architecture and SRT format
+- [predictive-rendezvous-overview.md](predictive-rendezvous-overview.md) — conceptual overview and theory
+- [predictive-rendezvous.md](predictive-rendezvous.md) — implementation guide and SRT format
 - [formalization.md](formalization.md) — minimal formal model
 - [design-rationale.md](design-rationale.md) — why PR exists and boundaries
 - [pr-security.md](pr-security.md) — threat analysis (coordination layer)

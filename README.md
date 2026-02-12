@@ -214,7 +214,8 @@ All documentation is in the `docs/` folder:
 - `docs/rift-torrent.md`: SRT-based torrent peer discovery.
 - `docs/srt-tooling.md`: SRT generation and inspection tooling.
 - `docs/srt-invites.md`: SRT invite UX and sharing patterns.
-- `docs/predictive-rendezvous.md`: Predictive Rendezvous architecture and SRT format.
+- `docs/predictive-rendezvous-overview.md`: conceptual overview and theory of Predictive Rendezvous.
+- `docs/predictive-rendezvous.md`: Predictive Rendezvous implementation guide and SRT format.
 - `docs/future-directions.md`: cross-domain synthesis and future directions.
 - `docs/hybrid-coordination.md`: optional hybrid coordination patterns.
 - `docs/hybrid-modes.md`: optional hybrid modes (rndzv + relay / DHT hints).
