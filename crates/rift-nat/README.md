@@ -47,7 +47,7 @@ let nat_type = NatProbe::detect().await?;
 
 ## TURN Setup
 
-For self-hosted TURN relay, see [TURN_GUIDE.md](https://github.com/infinityabundance/riftd/blob/main/TURN_GUIDE.md).
+For self-hosted TURN relay, see [TURN_GUIDE.md](https://github.com/infinityabundance/riftd/blob/main/docs/TURN_GUIDE.md).
 
 ## Related Crates
 

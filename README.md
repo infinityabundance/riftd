@@ -90,7 +90,7 @@ JAVA_HOME=/usr/lib/jvm/java-17-openjdk ./gradlew assembleDebug
 
 ## Browser Prototype
 There is an early WebAssembly browser spike for text-only chat over a WebSocket relay.
-See `README.browser.md` for build and run instructions.
+See `docs/README.browser.md` for build and run instructions.
 
 ## SRT-Based Torrents
 The `rift-torrent` crate enables zero-infrastructure torrent peer discovery using Predictive Rendezvous. Instead of trackers or DHT bootstrap nodes, peers derive identical rendezvous schedules from the infohash alone.
@@ -208,8 +208,9 @@ theme = "dark"
 - `android/`: Kotlin/Compose Android app with JNI bindings.
 
 ## Docs
-- `CODE.md`: high-level code map.
-- `PROTOCOL.md`: protocol framing and message types.
+All documentation is in the `docs/` folder:
+- `docs/CODE.md`: high-level code map.
+- `docs/PROTOCOL.md`: protocol framing and message types.
 - `docs/rift-torrent.md`: SRT-based torrent peer discovery.
 - `docs/srt-tooling.md`: SRT generation and inspection tooling.
 - `docs/srt-invites.md`: SRT invite UX and sharing patterns.
@@ -224,13 +225,13 @@ theme = "dark"
 - `docs/cross-protocol.md`: protocol-agnostic mapping across domains.
 - `docs/design-rationale.md`: why PR exists and what it does not solve.
 - `docs/index.md`: documentation index and phase status.
-- `SECURITY.md`: threat model and security checklist.
-- `TURN_GUIDE.md`: self-hosted TURN setup and config.
-- `CHANGELOG.md`: release history.
-- `RELEASE_CHECKLIST.md`: release steps.
-- `OPTIMIZATION_REPORT.md`: performance notes.
-- `PHASE34_PLAN.md`: implementation plan for ICE/E2EE reliability work.
-- `ROADMAP.md`: planned next steps.
+- `docs/SECURITY.md`: threat model and security checklist.
+- `docs/TURN_GUIDE.md`: self-hosted TURN setup and config.
+- `docs/CHANGELOG.md`: release history.
+- `docs/RELEASE_CHECKLIST.md`: release steps.
+- `docs/OPTIMIZATION_REPORT.md`: performance notes.
+- `docs/PHASE34_PLAN.md`: implementation plan for ICE/E2EE reliability work.
+- `docs/ROADMAP.md`: planned next steps.
 
 ## rndzv CLI tools
 Basic SRT utilities:

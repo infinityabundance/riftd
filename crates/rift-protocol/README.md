@@ -52,7 +52,7 @@ let msg = RiftMessage::decode(&bytes)?;
 
 ## Protocol Documentation
 
-See [PROTOCOL.md](https://github.com/infinityabundance/riftd/blob/main/PROTOCOL.md) for the full protocol specification.
+See [PROTOCOL.md](https://github.com/infinityabundance/riftd/blob/main/docs/PROTOCOL.md) for the full protocol specification.
 
 ## Related Crates
 
