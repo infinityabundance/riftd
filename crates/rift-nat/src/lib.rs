@@ -25,6 +25,11 @@ pub use turn::{
     parse_turn_server, spawn_turn_keepalive,
 };
 
+mod stun;
+pub use stun::{
+    StunBindingRequest, StunBindingResponse, StunClient,
+};
+
 #[derive(Debug, Clone)]
 pub struct NatConfig {
     /// Ports to attempt for local binding (0 means OS-assigned).
@@ -89,6 +94,15 @@ pub enum StunError {
     /// Malformed or unexpected STUN response.
     #[error("invalid stun response")]
     InvalidResponse,
+    /// Invalid STUN message format.
+    #[error("invalid stun message format: {0}")]
+    InvalidFormat(String),
+    /// Timeout waiting for STUN response.
+    #[error("timeout waiting for stun response")]
+    Timeout,
+    /// No mapped address in STUN response.
+    #[error("no mapped address in response")]
+    NoMappedAddress,
     /// Low-level socket I/O error.
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
