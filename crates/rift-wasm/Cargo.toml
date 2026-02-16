@@ -22,6 +22,7 @@ thiserror = "1"
 bincode = "1"
 getrandom = { version = "0.2", features = ["js"] }
 aes-gcm = "0.10"
+snow = "0.9"
 
 rift-core = { path = "../rift-core", version = "0.1.4" }
 rift-protocol = { path = "../rift-protocol", version = "0.1.4" }

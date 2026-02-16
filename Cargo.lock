@@ -3714,6 +3714,7 @@ dependencies = [
  "rift-protocol",
  "serde",
  "serde-wasm-bindgen",
+ "snow",
  "thiserror 1.0.69",
  "wasm-bindgen",
  "wasm-bindgen-futures",
