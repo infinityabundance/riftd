@@ -13,6 +13,7 @@
   <a href="https://github.com/infinityabundance/riftd/blob/main/LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg" alt="License"></a>
   <a href="https://doi.org/10.5281/zenodo.18528430"><img src="https://zenodo.org/badge/DOI/10.5281/zenodo.18528430.svg" alt="DOI"></a>
 </p>
+
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/infinityabundance/riftd)
 
 Serverless P2P voice + text chat over UDP with a mesh, NAT traversal, and optional relays.
