@@ -29,7 +29,7 @@ Serverless P2P voice + text chat over UDP with a mesh, NAT traversal, and option
 ## Highlights
 - Pure P2P mesh: every peer talks to every peer (with relay fallback).
 - LAN discovery via mDNS + internet discovery via invites and DHT.
-- NAT traversal: UDP hole punching + STUN candidates + optional TURN fallback.
+- NAT traversal: UDP hole punching (STUN/ICE-lite in development - see Phase 35 plan) + optional TURN fallback.
 - End-to-end encryption for chat and voice (pairwise).
 - Opus voice with configurable quality + QoS adaptation.
 - Versioned on-the-wire protocol in `crates/rift-protocol`.

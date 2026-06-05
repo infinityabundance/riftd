@@ -25,6 +25,11 @@ pub use turn::{
     parse_turn_server, spawn_turn_keepalive,
 };
 
+mod stun;
+pub use stun::{
+    StunBindingRequest, StunBindingResponse, StunClient,
+};
+
 #[derive(Debug, Clone)]
 pub struct NatConfig {
     /// Ports to attempt for local binding (0 means OS-assigned).
@@ -50,6 +55,81 @@ pub enum NatType {
     Unknown,
     OpenInternet,
     Natted,
+}
+
+/// ICE candidate type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CandidateType {
+    /// Host candidate (local interface address)
+    Host,
+    /// Server reflexive candidate (public address via STUN)
+    ServerReflexive,
+    /// Relayed candidate (via TURN)
+    Relayed,
+}
+
+/// ICE candidate for NAT traversal.
+#[derive(Debug, Clone)]
+pub struct Candidate {
+    /// Type of candidate
+    pub typ: CandidateType,
+    /// Network address
+    pub addr: SocketAddr,
+    /// Priority for candidate selection
+    pub priority: u32,
+    /// Foundation for candidate pairing
+    pub foundation: String,
+}
+
+impl Candidate {
+    /// Create a new host candidate.
+    pub fn host(addr: SocketAddr) -> Self {
+        Self {
+            typ: CandidateType::Host,
+            addr,
+            priority: Self::calculate_priority(CandidateType::Host, addr),
+            foundation: format!("host-{}", addr),
+        }
+    }
+
+    /// Create a new server reflexive candidate.
+    pub fn server_reflexive(addr: SocketAddr, base: SocketAddr) -> Self {
+        Self {
+            typ: CandidateType::ServerReflexive,
+            addr,
+            priority: Self::calculate_priority(CandidateType::ServerReflexive, addr),
+            foundation: format!("srflx-{}", base),
+        }
+    }
+
+    /// Create a new relayed candidate.
+    pub fn relayed(addr: SocketAddr) -> Self {
+        Self {
+            typ: CandidateType::Relayed,
+            addr,
+            priority: Self::calculate_priority(CandidateType::Relayed, addr),
+            foundation: format!("relay-{}", addr),
+        }
+    }
+
+    /// Calculate candidate priority based on type and address.
+    /// Higher priority = more preferred.
+    fn calculate_priority(typ: CandidateType, addr: SocketAddr) -> u32 {
+        let type_preference = match typ {
+            CandidateType::Host => 126,
+            CandidateType::ServerReflexive => 100,
+            CandidateType::Relayed => 0,
+        };
+        
+        let local_preference = match addr {
+            SocketAddr::V4(_) => 65535,
+            SocketAddr::V6(_) => 65534, // Slight preference for IPv4
+        };
+
+        // ICE priority formula: (2^24) * type + (2^8) * local + (256 - component)
+        // Component is always 1 for RTP
+        (type_preference as u32 * (1 << 24)) + (local_preference * (1 << 8)) + (256 - 1)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -89,6 +169,15 @@ pub enum StunError {
     /// Malformed or unexpected STUN response.
     #[error("invalid stun response")]
     InvalidResponse,
+    /// Invalid STUN message format.
+    #[error("invalid stun message format: {0}")]
+    InvalidFormat(String),
+    /// Timeout waiting for STUN response.
+    #[error("timeout waiting for stun response")]
+    Timeout,
+    /// No mapped address in STUN response.
+    #[error("no mapped address in response")]
+    NoMappedAddress,
     /// Low-level socket I/O error.
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
@@ -103,6 +192,85 @@ const STUN_BINDING_RESPONSE: u16 = 0x0101;
 const STUN_ATTR_MAPPED_ADDRESS: u16 = 0x0001;
 const STUN_ATTR_XOR_MAPPED_ADDRESS: u16 = 0x0020;
 const KEEPALIVE_BYTES: &[u8] = b"RIFT_KEEPALIVE";
+
+/// Gather all ICE candidates (host + server reflexive via STUN).
+/// 
+/// Returns a list of candidates sorted by priority (highest first).
+pub async fn gather_candidates(nat_cfg: &NatConfig) -> Result<Vec<Candidate>, StunError> {
+    let mut candidates = Vec::new();
+
+    // Gather host candidates (local interfaces)
+    candidates.extend(gather_host_candidates()?);
+
+    // Gather server reflexive candidates via STUN
+    if !nat_cfg.stun_servers.is_empty() {
+        if let Ok(srflx_candidates) = gather_stun_candidates(nat_cfg).await {
+            candidates.extend(srflx_candidates);
+        }
+    }
+
+    // Sort by priority (highest first)
+    candidates.sort_by(|a, b| b.priority.cmp(&a.priority));
+
+    Ok(candidates)
+}
+
+/// Gather host candidates from local network interfaces.
+fn gather_host_candidates() -> Result<Vec<Candidate>, StunError> {
+    let mut candidates = Vec::new();
+
+    let interfaces = get_if_addrs().map_err(|e| {
+        StunError::Io(std::io::Error::new(std::io::ErrorKind::Other, e))
+    })?;
+
+    for iface in interfaces {
+        let addr = iface.addr.ip();
+        
+        // Skip loopback addresses
+        if addr.is_loopback() {
+            continue;
+        }
+
+        // Create candidate with ephemeral port (will be replaced with actual socket port)
+        let socket_addr = SocketAddr::new(addr, 0);
+        candidates.push(Candidate::host(socket_addr));
+    }
+
+    Ok(candidates)
+}
+
+/// Gather server reflexive candidates via STUN.
+async fn gather_stun_candidates(nat_cfg: &NatConfig) -> Result<Vec<Candidate>, StunError> {
+    use std::time::Duration;
+    
+    let mut candidates = Vec::new();
+    let timeout = Duration::from_millis(nat_cfg.stun_timeout_ms);
+    let stun_client = StunClient::new(nat_cfg.stun_servers.clone(), timeout);
+
+    // Try to discover public address from each local interface
+    let host_candidates = gather_host_candidates()?;
+    
+    for host in &host_candidates {
+        // Bind a socket on this local address
+        let socket = match UdpSocket::bind(host.addr).await {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+
+        // Query STUN servers
+        if let Ok(public_addr) = stun_client.discover_public_addr(&socket).await {
+            let candidate = Candidate::server_reflexive(public_addr, host.addr);
+            candidates.push(candidate);
+            
+            metrics::inc_counter("rift_stun_success", &[]);
+            break; // One srflx candidate is usually enough
+        } else {
+            metrics::inc_counter("rift_stun_failures", &[]);
+        }
+    }
+
+    Ok(candidates)
+}
 
 /// Allocate TURN relays and return candidates if successful.
 pub async fn gather_turn_candidates(nat_cfg: &NatConfig) -> Result<Vec<TurnCandidate>, TurnError> {
@@ -520,3 +688,31 @@ mod tests {
         }
     }
 }
+
+    #[tokio::test]
+    async fn test_gather_host_candidates() {
+        let candidates = gather_host_candidates().unwrap();
+        
+        // Should have at least one host candidate (non-loopback interface)
+        assert!(!candidates.is_empty());
+        
+        // All should be host type
+        for candidate in &candidates {
+            assert_eq!(candidate.typ, CandidateType::Host);
+            assert!(!candidate.addr.ip().is_loopback());
+        }
+    }
+
+    #[test]
+    fn test_candidate_priority() {
+        let host = Candidate::host("192.168.1.100:8000".parse().unwrap());
+        let srflx = Candidate::server_reflexive(
+            "203.0.113.1:8000".parse().unwrap(),
+            "192.168.1.100:8000".parse().unwrap()
+        );
+        let relay = Candidate::relayed("192.0.2.1:3478".parse().unwrap());
+        
+        // Host should have highest priority
+        assert!(host.priority > srflx.priority);
+        assert!(srflx.priority > relay.priority);
+    }

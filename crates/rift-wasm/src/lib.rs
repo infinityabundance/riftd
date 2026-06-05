@@ -6,6 +6,9 @@
 //! - encrypted text encode/decode using protocol framing
 //! - voice frame encode/decode for browser audio integration
 //! - audio utilities (level metering, VAD)
+//! - Noise protocol handshake for pairwise E2EE
+
+pub mod noise;
 
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use aes_gcm::aead::Aead;

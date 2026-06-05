@@ -355,7 +355,7 @@ impl RndzvSession {
         self.space
     }
 
-    /// Open a logical channel (stub).
+    /// Open a logical channel.
     pub async fn open_channel(&self, kind: ChannelKind) -> Result<RndzvChannel, RndzvError> {
         let channel_id = {
             let mut demux = self.path.demux.lock().await;
@@ -403,7 +403,7 @@ pub struct RndzvChannel {
 }
 
 impl RndzvChannel {
-    /// Send data on this channel (stub).
+    /// Send data on this channel.
     pub async fn send(&self, data: &[u8]) -> Result<(), RndzvError> {
         match self.kind {
             ChannelKind::UnreliableDatagram => {
@@ -483,7 +483,7 @@ impl RndzvChannel {
         }
     }
 
-    /// Receive data from this channel (stub).
+    /// Receive data from this channel.
     pub async fn recv(&self) -> Result<Option<Vec<u8>>, RndzvError> {
         let mut rx = self.rx.lock().await;
         Ok(rx.recv().await)
@@ -700,7 +700,7 @@ impl RndzvConnector {
         self
     }
 
-    /// Connect using a rendezvous target (stub).
+    /// Connect using a rendezvous target.
     pub async fn connect(
         &self,
         target: RndzvConnectTarget,
@@ -1127,7 +1127,7 @@ impl RndzvListener {
         self
     }
 
-    /// Accept an incoming rendezvous session (stub).
+    /// Accept an incoming rendezvous session.
     pub async fn accept(&self) -> Result<RndzvOutcome, RndzvError> {
         use crate::engine::{
             build_probe_payload, parse_probe_payload, rendezvous_id_from_seed,

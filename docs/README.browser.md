@@ -1,5 +1,10 @@
 # Browser Client Prototype (WASM)
 
+> **⚠️ SECURITY WARNING**  
+> The browser client currently uses a shared channel key for encryption instead of pairwise E2EE handshakes.
+> This means the WebSocket relay server could potentially decrypt messages. **Do not use for sensitive communications.**  
+> Pairwise Noise protocol handshake implementation is planned in Phase 1 of the implementation roadmap.
+
 This is an early, text-only WebAssembly client that exercises the Rift protocol in the browser.
 It uses a lightweight WebSocket relay for transport, while keeping protocol framing and
 AES-GCM payload encryption compatible with the existing protocol types.
